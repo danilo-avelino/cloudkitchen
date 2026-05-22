@@ -1,0 +1,28 @@
+# Credenciais locais (Supabase URL + anon key)
+config.local.js
+.env
+.env.local
+.env.*.local
+
+# MCP config (contém Personal Access Token Supabase)
+.mcp.json
+
+# Node / npm
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Vite build
+dist/
+.vite/
+
+# Diretórios temporários
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Uploads de teste
+uploads/*
+!uploads/.gitkeep

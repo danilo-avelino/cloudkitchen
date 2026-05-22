@@ -1,0 +1,661 @@
+// Settings — operations, users, billing
+function Settings() {
+  const [tab, setTab] = useState("operations");
+  const sess = (typeof useSession === "function") ? useSession() : null;
+  const headerParts = [
+    sess?.tenantName || "Tenant local",
+    sess?.tenantId ? `TEN-${sess.tenantId.slice(0, 4).toUpperCase()}` : null,
+  ].filter(Boolean);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      <div style={{ padding: "20px 28px 0" }}>
+        <div className="h-eyebrow" style={{ marginBottom: 6 }}>{headerParts.join(" · ")}</div>
+        <h1 className="h-title">Configurações</h1>
+        <div style={{ display: "flex", gap: 0, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
+          {[
+            ["operations",   "Operações"],
+            ["users",        "Usuários & permissões"],
+            ["billing",      "Plano & cobrança"],
+          ].map(([id, label]) => {
+            const active = tab === id;
+            return (
+              <button key={id} onClick={() => setTab(id)} style={{
+                background: "transparent", border: "none",
+                padding: "10px 14px",
+                fontSize: 12.5, color: active ? "var(--fg-0)" : "var(--fg-2)",
+                fontWeight: active ? 500 : 400, letterSpacing: "-0.005em",
+                borderBottom: `2px solid ${active ? "var(--accent-bright)" : "transparent"}`,
+                marginBottom: -1,
+              }}>{label}</button>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ flex: 1, overflow: "auto", padding: "24px 28px 32px" }}>
+        {tab === "operations"   && <OperationsTab />}
+        {tab === "users"        && <UsersTab />}
+        {tab === "billing"      && <BillingTab />}
+      </div>
+    </div>
+  );
+}
+
+function OperationsTab() {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const [ops, setOps]         = useState(MOCK.OPERATIONS.filter((o) => o.id !== "all"));
+  const [editing, setEditing] = useState(null);
+  const [source, setSource]   = useState("mock"); // "db" | "mock"
+  const [tenantId, setTenantId] = useState(null);
+
+  // Resolve o tenantId do usuário autenticado (uma vez)
+  useEffect(() => {
+    if (!dbStatus.isOnline) return;
+    let cancelled = false;
+    (async () => {
+      const ctx = await dbGetCurrentContext();
+      if (cancelled) return;
+      const tid = ctx?.tenant?.id || null;
+      setTenantId(tid);
+      if (!tid) return; // usuário sem tenant_member · fica no mock
+      const { data, source: src, error } = await dbListOperations(tid);
+      if (cancelled) return;
+      if (src === "db") {
+        // Adapta shape do banco para shape do mock; aceita lista vazia
+        const mapped = (data || []).map((row) => ({
+          id: row.id, slug: row.slug, name: row.name,
+          short: row.short_label, color: row.color,
+          iFood: row.ifood_handle,
+        }));
+        setOps(mapped);
+        setSource("db");
+      } else if (error) {
+        console.warn("dbListOperations falhou", error);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline]);
+
+  const save = async (op) => {
+    if (editing?.initial) {
+      // Update otimista
+      const prev = ops;
+      const next = ops.map((o) => o.id === editing.initial.id ? { ...o, ...op } : o);
+      setOps(next);
+      if (source === "db" && dbStatus.isOnline) {
+        const { error } = await dbUpdateOperation(editing.initial.id, op);
+        if (error) {
+          setOps(prev);
+          window.showToast(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
+        } else {
+          window.showToast(`Operação ${op.name} salva no Supabase`, { tone: "ok" });
+        }
+      } else {
+        window.showToast(`Operação ${op.name} atualizada (mock)`, { tone: "warn" });
+      }
+    } else {
+      // Insert · tenta DB se online e tenantId resolvido (independente de source)
+      if (dbStatus.isOnline && tenantId) {
+        const slug = (op.short || op.name || "op").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        const { data, error } = await dbInsertOperation(tenantId, {
+          slug, name: op.name, short: op.short, color: op.color, iFood: op.iFood,
+          sort_order: ops.length + 1,
+        });
+        if (error) {
+          window.showToast(`Erro ao criar: ${error.message}`, { tone: "crit", ttl: 4500 });
+        } else if (data) {
+          setOps([...ops, {
+            id: data.id, slug: data.slug, name: data.name,
+            short: data.short_label, color: data.color, iFood: data.ifood_handle,
+          }]);
+          setSource("db");
+          window.showToast(`Operação ${op.name} criada no Supabase`, { tone: "ok" });
+        }
+      } else {
+        const id = (op.short || op.name || "op").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        setOps([...ops, { ...op, id }]);
+        window.showToast(`Operação ${op.name} criada (mock · DB offline ou sem tenant)`, { tone: "warn" });
+      }
+    }
+    setEditing(null);
+  };
+
+  const remove = async (op) => {
+    const prev = ops;
+    setOps(ops.filter((o) => o.id !== op.id));
+    if (source === "db" && dbStatus.isOnline) {
+      const { error } = await dbDeleteOperation(op.id);
+      if (error) {
+        setOps(prev);
+        window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+      } else {
+        window.showToast(`Operação ${op.name} desativada no Supabase`, { tone: "warn", ttl: 4500 });
+      }
+    } else {
+      window.showToast(`Operação ${op.name} excluída (mock)`, { tone: "warn", ttl: 4500 });
+    }
+    setEditing(null);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12 }}>
+        <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13, maxWidth: 600 }}>
+          Cada operação é uma marca virtual independente que compartilha o mesmo estoque físico.
+          Pausar uma operação não exclui histórico — apenas oculta da consolidação.
+        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            fontFamily: "var(--mono)", fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase",
+            padding: "3px 9px", borderRadius: 99,
+            color: source === "db" ? "var(--ok)" : "var(--fg-3)",
+            background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
+            border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
+          }} title={source === "db" ? `Carregado do Supabase · tenant ${tenantId?.slice(0, 8)}` : "Modo MOCK · operações não persistem"}>
+            <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
+            {source === "db" ? "Supabase" : "Mock"}
+          </span>
+          <button className="btn" data-variant="primary" data-size="sm" onClick={() => setEditing({ initial: null })}>
+            <I.Plus size={13} />Nova operação
+          </button>
+        </div>
+      </div>
+      <div className="card">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Operação</th>
+              <th>iFood</th>
+              <th>Meta CMV</th>
+              <th className="num">Faturamento 7d</th>
+              <th>Status</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {ops.map((o) => (
+              <tr key={o.id}>
+                <td>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 50, background: o.color }} />
+                    <div>
+                      <div style={{ color: "var(--fg-0)", fontWeight: 500 }}>{o.name}</div>
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>OPER-{o.short}</div>
+                    </div>
+                  </div>
+                </td>
+                <td className="dim" style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{o.iFood || "—"}</td>
+                <td className="num">{o.cmvGoal != null ? `${Number(o.cmvGoal).toFixed(1)}%` : "—"}</td>
+                <td className="num">—</td>
+                <td><span className="badge" data-tone="ok">Ativa</span></td>
+                <td><button className="btn" data-variant="ghost" data-size="sm" onClick={() => setEditing({ initial: o })}>Editar</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {editing && (
+        <OperationModal
+          initial={editing.initial}
+          onClose={() => setEditing(null)}
+          onSave={save}
+          onDelete={editing.initial ? () => remove(editing.initial) : null}
+        />
+      )}
+    </div>
+  );
+}
+
+function OperationModal({ initial, onClose, onSave, onDelete }) {
+  const [name, setName]   = useState(initial?.name || "");
+  const [short, setShort] = useState(initial?.short || "");
+  const [color, setColor] = useState(initial?.color || "#2d8c66");
+  const [iFood, setIFood] = useState(initial?.iFood || "");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const valid = name.trim() && short.trim();
+  return (
+    <Modal title={initial ? "Editar operação" : "Nova operação"} onClose={onClose}
+      footer={
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 8 }}>
+          <div>
+            {initial && onDelete && (
+              <button className="btn" data-size="sm" onClick={() => setConfirmingDelete(true)}
+                      style={{ color: "var(--crit)", borderColor: "var(--crit-line)" }}>
+                <I.Trash size={11} />Excluir operação
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
+                    onClick={() => onSave({ name: name.trim(), short: short.trim().toUpperCase(), color, iFood: iFood.trim() || null })}>
+              {initial ? "Salvar alterações" : "Criar operação"}
+            </button>
+          </div>
+        </div>
+      }>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12 }}>
+        <FormRow label="Nome da marca">
+          <input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Forno & Brasa" />
+        </FormRow>
+        <FormRow label="Sigla curta">
+          <input className="input mono" maxLength={6} value={short} onChange={(e) => setShort(e.target.value)} placeholder="BURG" style={{ textTransform: "uppercase" }} />
+        </FormRow>
+        <FormRow label="Cor">
+          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: "100%", height: 36, padding: 2, background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4 }} />
+        </FormRow>
+        <FormRow label="Handle iFood" hint="opcional">
+          <input className="input mono" value={iFood} onChange={(e) => setIFood(e.target.value)} placeholder="@minhamarca" />
+        </FormRow>
+      </div>
+
+      {confirmingDelete && (
+        <OperationDeleteConfirm
+          name={initial.name}
+          short={initial.short}
+          onCancel={() => setConfirmingDelete(false)}
+          onConfirm={() => { setConfirmingDelete(false); onDelete && onDelete(); }}
+        />
+      )}
+    </Modal>
+  );
+}
+
+// Modal de confirmação de exclusão de operação · alerta forte (perda de dados)
+function OperationDeleteConfirm({ name, short, onCancel, onConfirm }) {
+  const [typed, setTyped] = useState("");
+  const matchesName = typed.trim().toLowerCase() === (name || "").trim().toLowerCase();
+  return (
+    <Modal title="Excluir operação?" subtitle={`${name} · ${short}`} onClose={onCancel} width={460}
+      footer={
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, width: "100%" }}>
+          <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
+          <button className="btn" data-size="sm" disabled={!matchesName} onClick={onConfirm}
+                  style={{
+                    background: matchesName ? "var(--crit)" : "var(--bg-3)",
+                    borderColor: matchesName ? "var(--crit)" : "var(--line)",
+                    color: matchesName ? "#fff" : "var(--fg-3)",
+                  }}>
+            <I.Trash size={11} />Excluir definitivamente
+          </button>
+        </div>
+      }>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{
+          padding: "12px 14px", borderRadius: 4,
+          background: "var(--crit-soft)", border: "1px solid var(--crit)",
+          display: "flex", alignItems: "flex-start", gap: 10,
+        }}>
+          <I.AlertTriangle size={14} style={{ color: "var(--crit)", marginTop: 1, flexShrink: 0 }} />
+          <div style={{ fontSize: 12.5, color: "var(--fg-1)", lineHeight: 1.5 }}>
+            Esta ação é <strong style={{ color: "var(--crit)" }}>irreversível</strong>. Todos os dados
+            vinculados a <strong style={{ color: "var(--fg-0)" }}>{name}</strong> serão perdidos:
+            faturamento, requisições, fichas técnicas, alocações de estoque e histórico financeiro.
+          </div>
+        </div>
+        <FormRow label={`Digite "${name}" para confirmar`}>
+          <input className="input" autoFocus value={typed}
+                 onChange={(e) => setTyped(e.target.value)}
+                 placeholder={name}
+                 onKeyDown={(e) => { if (e.key === "Enter" && matchesName) onConfirm(); }} />
+        </FormRow>
+      </div>
+    </Modal>
+  );
+}
+
+const ROLE_TO_DB = {
+  "Super Admin": "owner", "Gestor de marca": "manager",
+  "Operador cozinha": "kitchen", "Estoquista": "stock",
+  "Contador": "accountant", "Visualização": "viewer"
+};
+
+function UsersTab() {
+  const dbStatus = useDbStatus?.() || { isOnline: false };
+  const [users, setUsers] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [tenantId, setTenantId] = useState(null);
+  const [source, setSource] = useState("loading");
+  const [loadError, setLoadError] = useState(null);
+
+  useEffect(() => {
+    if (!dbStatus.isOnline) { setSource("offline"); return; }
+    let cancelled = false;
+    (async () => {
+      const ctx = await dbGetCurrentContext?.();
+      const tid = ctx?.tenant?.id;
+      if (cancelled) return;
+      if (!tid) { setSource("offline"); return; }
+      setTenantId(tid);
+      const res = await dbListMembers?.(tid);
+      if (cancelled) return;
+      if (res?.error) {
+        setLoadError(res.error.message || String(res.error));
+        setSource("offline");
+      } else if (res?.data) {
+        setUsers(res.data);
+        setSource("db");
+      } else {
+        setSource("offline");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline]);
+
+  const formatOps = (ops) => {
+    if (!ops) return "—";
+    if (Array.isArray(ops)) {
+      if (ops.length === 0) return "todas";
+      return ops.join(", ");
+    }
+    return String(ops);
+  };
+  const formatLast = (iso) => {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    const diffMin = Math.floor((Date.now() - d.getTime()) / 60000);
+    if (diffMin < 1)    return "agora";
+    if (diffMin < 60)   return `há ${diffMin} min`;
+    if (diffMin < 1440) return `há ${Math.floor(diffMin / 60)}h`;
+    return d.toLocaleDateString("pt-BR");
+  };
+
+  const save = async (u) => {
+    if (editing?.userId) {
+      // Edit existing member
+      if (dbStatus.isOnline && tenantId) {
+        const { error } = await dbUpdateMemberRole?.(editing.userId, tenantId, {
+          role: ROLE_TO_DB[u.role],
+          ops: u.ops ? [u.ops] : [],
+        });
+        if (error) {
+          window.showToast(`Erro ao atualizar: ${error.message}`, { tone: "crit" });
+          return;
+        }
+        // Reload members
+        const res = await dbListMembers?.(tenantId);
+        if (res?.data) setUsers(res.data);
+        window.showToast(`${u.name} atualizado`, { tone: "ok" });
+      } else {
+        setUsers(users.map((x) => x.email === editing.email ? { ...x, ...u } : x));
+        window.showToast(`${u.name} atualizado`, { tone: "ok" });
+      }
+    } else {
+      // Invite new member
+      if (dbStatus.isOnline && tenantId) {
+        const { error } = await dbInviteMember?.(tenantId, {
+          email: u.email,
+          role: ROLE_TO_DB[u.role],
+          ops: u.ops ? [u.ops] : [],
+        });
+        if (error) {
+          window.showToast(`Erro ao convidar: ${error.message}`, { tone: "crit" });
+          return;
+        }
+        // Reload members
+        const res = await dbListMembers?.(tenantId);
+        if (res?.data) setUsers(res.data);
+        window.showToast(`Convite enviado para ${u.email}`, { tone: "ok" });
+      } else {
+        setUsers([...users, { ...u, last: "convite enviado", userId: null }]);
+        window.showToast(`Convite enviado para ${u.email}`, { tone: "ok" });
+      }
+    }
+    setEditing(null);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13 }}>{users.length} usuários ativos</p>
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
+            padding: "2px 7px", borderRadius: 99,
+            color: source === "db" ? "var(--ok)" : "var(--fg-3)",
+            background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
+            border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
+          }} title={source === "db" ? "Membros do Supabase" : (loadError || "DB offline")}>
+            <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
+            {source === "db" ? "Supabase" : (source === "loading" ? "Carregando…" : "Offline")}
+          </span>
+        </div>
+        <button className="btn" data-variant="primary" data-size="sm" onClick={() => setEditing({})}>
+          <I.Plus size={13} />Convidar usuário
+        </button>
+      </div>
+      <div className="card">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Usuário</th>
+              <th>Função</th>
+              <th>Operações</th>
+              <th>Último acesso</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {users.length === 0 ? (
+              <tr><td colSpan={5} className="dim" style={{ textAlign: "center", padding: 24 }}>
+                {source === "loading" ? "Carregando…" : (source === "offline" ? (loadError || "DB offline") : "Nenhum usuário")}
+              </td></tr>
+            ) : users.map((u) => (
+              <tr key={u.email || u.userId}>
+                <td>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 24, height: 24, borderRadius: 3, background: "var(--bg-3)", color: "var(--fg-1)", fontSize: 10, fontWeight: 500, display: "grid", placeItems: "center", letterSpacing: "0.02em" }}>
+                      {(u.name || u.email || "?").split(" ").map((n) => n[0]).slice(0, 2).join("")}
+                    </div>
+                    <div>
+                      <div style={{ color: "var(--fg-0)", fontWeight: 500 }}>{u.name || u.email}</div>
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)" }}>{u.email}</div>
+                    </div>
+                  </div>
+                </td>
+                <td className="dim">{u.role}</td>
+                <td className="dim">{formatOps(u.ops)}</td>
+                <td className="dim mono" style={{ fontSize: 11 }}>{formatLast(u.joinedAt || u.last)}</td>
+                <td><button className="btn" data-variant="ghost" data-size="sm" onClick={() => setEditing(u)}>Editar</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {editing && <UserModal initial={editing.email ? editing : null} onClose={() => setEditing(null)} onSave={save} />}
+    </div>
+  );
+}
+
+// Catálogo de módulos do app (espelha a sidebar em shell.jsx).
+// Mantenha sincronizado quando adicionar/remover módulos da navegação.
+const USER_MODULES = [
+  { id: "dashboard", label: "Dashboard"        },
+  { id: "stock",     label: "Estoque"          },
+  { id: "recipes",   label: "Fichas técnicas"  },
+  { id: "revenue",   label: "Faturamento"      },
+  { id: "requests",  label: "Requisições"      },
+  { id: "purchases", label: "Compras"          },
+  { id: "cmv",       label: "CMV & margem"     },
+  { id: "finance",   label: "Financeiro & DRE" },
+  { id: "settings",  label: "Configurações"    },
+];
+const ALL_MODULE_IDS = USER_MODULES.map((m) => m.id);
+
+// Sugestão padrão de módulos por papel — usuário pode customizar livremente depois.
+const ROLE_MODULE_PRESETS = {
+  "Super Admin":      ALL_MODULE_IDS,
+  "Gestor de marca":  ALL_MODULE_IDS.filter((m) => m !== "settings"),
+  "Operador cozinha": ["dashboard", "stock", "requests", "recipes"],
+  "Estoquista":       ["dashboard", "stock", "requests", "purchases"],
+  "Contador":         ["dashboard", "revenue", "cmv", "finance"],
+  "Visualização":     ["dashboard"],
+};
+
+function UserModal({ initial, onClose, onSave }) {
+  const [name, setName]   = useState(initial?.name || "");
+  const [email, setEmail] = useState(initial?.email || "");
+  const [role, setRole]   = useState(initial?.role || "Operador cozinha");
+  const [ops, setOps]     = useState(initial?.ops || "todas");
+  const [modules, setModules] = useState(
+    initial?.modules || ROLE_MODULE_PRESETS[initial?.role || "Operador cozinha"] || ["dashboard"]
+  );
+  const valid = name.trim() && /\S+@\S+\.\S+/.test(email) && modules.length > 0;
+
+  // Trocar de papel substitui os módulos pelo preset; o usuário pode ajustar depois.
+  const onRoleChange = (next) => {
+    setRole(next);
+    setModules(ROLE_MODULE_PRESETS[next] || ["dashboard"]);
+  };
+
+  const toggleModule = (id) => {
+    setModules((cur) => cur.includes(id) ? cur.filter((m) => m !== id) : [...cur, id]);
+  };
+  const selectAll  = () => setModules(ALL_MODULE_IDS);
+  const selectNone = () => setModules([]);
+  const applyPreset = () => setModules(ROLE_MODULE_PRESETS[role] || []);
+
+  return (
+    <Modal title={initial ? "Editar usuário" : "Convidar usuário"}
+      subtitle={initial ? null : "Será enviado um e-mail de convite com link de acesso."}
+      onClose={onClose}
+      width={560}
+      footer={<>
+        <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
+                onClick={() => onSave({ name: name.trim(), email: email.trim(), role, ops, modules })}>
+          {initial ? "Salvar" : "Enviar convite"}
+        </button>
+      </>}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <FormRow label="Nome">
+          <input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+        </FormRow>
+        <FormRow label="E-mail">
+          <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} disabled={!!initial} />
+        </FormRow>
+        <FormRow label="Função">
+          <select className="select" value={role} onChange={(e) => onRoleChange(e.target.value)}>
+            <option>Super Admin</option>
+            <option>Gestor de marca</option>
+            <option>Operador cozinha</option>
+            <option>Estoquista</option>
+            <option>Contador</option>
+            <option>Visualização</option>
+          </select>
+        </FormRow>
+        <FormRow label="Operações">
+          <select className="select" value={ops} onChange={(e) => setOps(e.target.value)}>
+            <option value="todas">Todas as operações</option>
+            {MOCK.OPERATIONS.filter((o) => o.id !== "all").map((o) => (
+              <option key={o.id} value={o.name}>{o.name}</option>
+            ))}
+          </select>
+        </FormRow>
+
+        {/* Módulos de acesso · ocupa as duas colunas */}
+        <div style={{ gridColumn: "1 / -1", marginTop: 4 }}>
+          <div style={{
+            display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8,
+          }}>
+            <span style={{
+              fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)",
+              letterSpacing: "0.08em", textTransform: "uppercase",
+            }}>Módulos de acesso</span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
+              {modules.length}/{ALL_MODULE_IDS.length}
+            </span>
+            <span style={{ flex: 1 }} />
+            <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                    onClick={applyPreset} title={`Aplicar preset de "${role}"`}>
+              Preset · {role}
+            </button>
+            <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                    onClick={selectAll}>Todos</button>
+            <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                    onClick={selectNone}>Nenhum</button>
+          </div>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, 1fr)",
+            gap: 6,
+          }}>
+            {USER_MODULES.map((m) => {
+              const on = modules.includes(m.id);
+              return (
+                <button
+                  key={m.id} type="button"
+                  onClick={() => toggleModule(m.id)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "8px 10px", borderRadius: 4, cursor: "pointer",
+                    background:   on ? "var(--accent-soft)" : "var(--bg-2)",
+                    border: `1px solid ${on ? "var(--accent-line)" : "var(--line)"}`,
+                    color: on ? "var(--fg-0)" : "var(--fg-2)",
+                    fontSize: 12, textAlign: "left",
+                    transition: "all 120ms ease",
+                  }}>
+                  <span style={{
+                    width: 14, height: 14, borderRadius: 3, flexShrink: 0,
+                    background: on ? "var(--accent-bright)" : "transparent",
+                    border: `1px solid ${on ? "var(--accent-bright)" : "var(--line-strong)"}`,
+                    display: "grid", placeItems: "center",
+                  }}>
+                    {on && <I.Check size={10} style={{ color: "var(--accent-fg)" }} />}
+                  </span>
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+          {modules.length === 0 && (
+            <div style={{
+              marginTop: 8, padding: "8px 10px",
+              background: "var(--warn-soft)", border: "1px solid var(--warn-line)",
+              borderRadius: 4, fontSize: 11.5, color: "var(--warn)",
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <I.AlertTriangle size={12} />
+              <span>Selecione ao menos 1 módulo — usuário sem acesso não consegue entrar.</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function BillingTab() {
+  return (
+    <div style={{ maxWidth: 720 }}>
+      <div className="card">
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 16 }}>
+            <div style={{ flex: 1 }}>
+              <div className="h-eyebrow" style={{ marginBottom: 4 }}>Plano atual</div>
+              <h3 style={{ margin: 0, fontSize: 22, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.018em" }}>Pro · 4 operações</h3>
+              <div style={{ color: "var(--fg-2)", fontSize: 12.5, marginTop: 4 }}>Próxima cobrança · 28/05/2026</div>
+            </div>
+            <span className="mono" style={{ fontSize: 26, color: "var(--fg-0)", fontWeight: 500, letterSpacing: "-0.02em" }}>R$ 489/mês</span>
+          </div>
+          <div className="hr" />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+            <SummaryStat label="SKUs" value={`${(MOCK.STOCK_ITEMS || []).length} / 250`} />
+            <SummaryStat label="Operações" value={`${(MOCK.OPERATIONS || []).filter((o) => o.id !== "all").length} / 6`} />
+            <SummaryStat label="Usuários" value="— / 10" />
+          </div>
+          <div className="hr" />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: 12.5, color: "var(--fg-2)" }}>Próximo plano: <span style={{ color: "var(--fg-0)" }}>Scale</span> · 10 operações · R$ 989/mês</div>
+            <button className="btn" data-size="sm" onClick={() => notImplemented("Upgrade de plano")}>Ver upgrade</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+window.Settings = Settings;

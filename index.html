@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<title>Cloud Kitchen</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Desregistra service workers órfãos de outros projetos que rodaram em localhost:5173 -->
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then((regs) => {
+    regs.forEach((r) => r.unregister().then((ok) => ok && console.info('[sw] unregistered:', r.scope)));
+  });
+}
+</script>
+
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
