@@ -44,6 +44,130 @@ function Modal({ title, subtitle, onClose, children, footer, width = 480, minHei
   );
 }
 
+// =====================================================================
+// <ConfirmDialog> · substituto interno para window.confirm()
+// =====================================================================
+// Use no lugar de confirm() do navegador para ações destrutivas (excluir,
+// resetar, etc.). Renderiza por cima de qualquer Modal aberto (z-index 250).
+//
+// Props:
+//   open         · controla visibilidade
+//   title        · cabeçalho curto (ex. "Excluir lançamento")
+//   message      · descrição da ação — string ou nó React
+//   confirmLabel · texto do botão primário (default "Confirmar")
+//   cancelLabel  · texto do botão secundário (default "Cancelar")
+//   tone         · "danger" (default) | "neutral"
+//   busy         · desabilita os botões enquanto a ação roda
+//   onConfirm / onCancel · handlers
+function ConfirmDialog({
+  open,
+  title = "Confirmar ação",
+  message,
+  confirmLabel = "Confirmar",
+  cancelLabel = "Cancelar",
+  tone = "danger",
+  busy = false,
+  onConfirm,
+  onCancel,
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => {
+      if (busy) return;
+      if (e.key === "Escape") { e.preventDefault(); onCancel && onCancel(); }
+      if (e.key === "Enter")  { e.preventDefault(); onConfirm && onConfirm(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, busy, onConfirm, onCancel]);
+
+  if (!open) return null;
+
+  const isDanger = tone === "danger";
+  const accent = isDanger ? "var(--crit)" : "var(--accent-bright)";
+  const accentSoft = isDanger ? "var(--crit-soft)" : "var(--accent-soft)";
+  const accentLine = isDanger ? "var(--crit-line)" : "var(--accent-line)";
+
+  return (
+    <div
+      onClick={busy ? undefined : onCancel}
+      style={{
+        position: "fixed", inset: 0, zIndex: 250,
+        background: "rgba(7,8,10,0.72)",
+        display: "grid", placeItems: "center", padding: 20,
+        animation: "fadeUp 140ms ease both",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-dialog-title"
+        style={{
+          width: 420, maxWidth: "calc(100vw - 32px)",
+          background: "var(--bg-1)",
+          border: "1px solid var(--line-strong)",
+          borderRadius: 6,
+          boxShadow: "0 24px 60px -12px rgba(0,0,0,0.7)",
+          display: "flex", flexDirection: "column",
+        }}
+      >
+        <div style={{ padding: "20px 22px 16px", display: "flex", gap: 14, alignItems: "flex-start" }}>
+          <div style={{
+            flexShrink: 0,
+            width: 36, height: 36, borderRadius: 6,
+            background: accentSoft, border: "1px solid " + accentLine,
+            display: "grid", placeItems: "center", color: accent,
+          }}>
+            <I.AlertTriangle size={18} />
+          </div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <h2
+              id="confirm-dialog-title"
+              style={{ margin: 0, fontSize: 15, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.01em" }}
+            >
+              {title}
+            </h2>
+            {message && (
+              <div style={{ fontSize: 13, color: "var(--fg-2)", marginTop: 6, lineHeight: 1.5 }}>
+                {message}
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{
+          padding: "12px 18px",
+          borderTop: "1px solid var(--line)",
+          display: "flex", justifyContent: "flex-end", gap: 8,
+          background: "var(--bg-0)",
+          borderBottomLeftRadius: 6, borderBottomRightRadius: 6,
+        }}>
+          <button
+            type="button"
+            className="btn"
+            data-size="sm"
+            onClick={onCancel}
+            disabled={busy}
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            data-variant={isDanger ? "danger" : "primary"}
+            data-size="sm"
+            onClick={onConfirm}
+            disabled={busy}
+            autoFocus
+          >
+            {busy ? "Processando…" : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FormRow({ label, hint, children }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -228,7 +352,183 @@ function PendingFeature({ variant = "badge", label, hint, children, style: extra
   );
 }
 
+// =====================================================================
+// <PageLoading> · skeleton de carregamento para páginas inteiras
+// =====================================================================
+// Use no topo do return da página enquanto o fetch inicial não terminou:
+//   if (loading) return <PageLoading label="Carregando faturamento…" variant="table" />;
+//
+// Variants:
+//   "dashboard" · grid de KPIs + dois cards grandes (Dashboard, CMV)
+//   "table"     · linha de filtros + tabela (Stock, Revenue, Recipes, etc.)
+//   "cards"     · grid de cards (Requests, Purchases)
+//   "form"      · coluna de campos (Settings)
+//   "minimal"   · só spinner + label centralizado
+function PageLoading({ label = "Carregando…", hint = "Buscando dados do servidor", variant = "table" }) {
+  const skel = (w, h, extra) => (
+    <div className="skel" style={{ width: w, height: h, ...(extra || {}) }} />
+  );
+
+  const block = (children) => (
+    <div style={{
+      position: "relative",
+      flex: 1, minHeight: 0, height: "100%",
+      padding: "20px 28px 32px",
+      display: "flex", flexDirection: "column", gap: 18,
+      animation: "fadeUp 200ms ease both",
+    }}>
+      {children}
+    </div>
+  );
+
+  const headerRow = (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 4 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {skel(80, 9)}
+        {skel(220, 22)}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        {skel(96, 30, { borderRadius: 4 })}
+        {skel(120, 30, { borderRadius: 4 })}
+      </div>
+    </div>
+  );
+
+  let body;
+  if (variant === "dashboard") {
+    body = (
+      <>
+        {headerRow}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} style={{
+              padding: 14, background: "var(--bg-1)", border: "1px solid var(--line)",
+              borderRadius: 6, display: "flex", flexDirection: "column", gap: 10,
+            }}>
+              {skel(60, 9)}
+              {skel(120, 24)}
+              {skel(80, 9)}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr", gap: 12 }}>
+          <div style={{ padding: 16, background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 6, display: "flex", flexDirection: "column", gap: 12 }}>
+            {skel(140, 12)}
+            {skel("100%", 180, { borderRadius: 4 })}
+          </div>
+          <div style={{ padding: 16, background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 6, display: "flex", flexDirection: "column", gap: 10 }}>
+            {skel(140, 12)}
+            {Array.from({ length: 4 }).map((_, i) => skel("100%", 28, { borderRadius: 4 }))}
+          </div>
+        </div>
+      </>
+    );
+  } else if (variant === "cards") {
+    body = (
+      <>
+        {headerRow}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} style={{
+              padding: 14, background: "var(--bg-1)", border: "1px solid var(--line)",
+              borderRadius: 6, display: "flex", flexDirection: "column", gap: 10,
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                {skel(80, 11)}
+                {skel(50, 11)}
+              </div>
+              {skel("80%", 16)}
+              {skel("100%", 10)}
+              {skel("90%", 10)}
+              <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                {skel(56, 22, { borderRadius: 99 })}
+                {skel(56, 22, { borderRadius: 99 })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  } else if (variant === "form") {
+    body = (
+      <>
+        {headerRow}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 640 }}>
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {skel(100, 9)}
+              {skel("100%", 32, { borderRadius: 4 })}
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  } else if (variant === "minimal") {
+    body = null;
+  } else {
+    // "table" default
+    body = (
+      <>
+        {headerRow}
+        <div style={{ display: "flex", gap: 8 }}>
+          {skel(120, 28, { borderRadius: 99 })}
+          {skel(96, 28, { borderRadius: 99 })}
+          {skel(96, 28, { borderRadius: 99 })}
+        </div>
+        <div style={{
+          background: "var(--bg-1)", border: "1px solid var(--line)",
+          borderRadius: 6, padding: 14, display: "flex", flexDirection: "column", gap: 10,
+        }}>
+          <div style={{ display: "flex", gap: 10 }}>
+            {skel(140, 11)}
+            <div style={{ flex: 1 }} />
+            {skel(80, 11)}
+            {skel(80, 11)}
+            {skel(80, 11)}
+          </div>
+          {Array.from({ length: 7 }).map((_, i) => (
+            <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", padding: "6px 0", borderTop: i === 0 ? "1px solid var(--line)" : "1px solid var(--line-soft)" }}>
+              {skel(180, 12)}
+              <div style={{ flex: 1 }} />
+              {skel(64, 11)}
+              {skel(64, 11)}
+              {skel(64, 11)}
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  }
+
+  return block(
+    <>
+      {body}
+      <div style={{
+        position: "absolute", bottom: 24, left: "50%", transform: "translateX(-50%)",
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "8px 14px",
+        background: "var(--bg-1)", border: "1px solid var(--line-strong)",
+        borderRadius: 99,
+        boxShadow: "0 8px 24px -6px rgba(0,0,0,0.4)",
+        pointerEvents: "none",
+      }}>
+        <span
+          aria-hidden="true"
+          style={{
+            width: 12, height: 12, borderRadius: "50%",
+            border: "1.5px solid var(--line-strong)",
+            borderTopColor: "var(--accent-bright)",
+            animation: "pl-spin 0.9s linear infinite",
+          }}
+        />
+        <span style={{ fontSize: 11.5, color: "var(--fg-1)", fontWeight: 500 }}>{label}</span>
+        {hint && <span style={{ fontSize: 11, color: "var(--fg-3)" }}>· {hint}</span>}
+      </div>
+    </>
+  );
+}
+
 Object.assign(window, {
-  Modal, FormRow, SummaryStat, notImplemented, PendingFeature,
+  Modal, ConfirmDialog, FormRow, SummaryStat, notImplemented, PendingFeature, PageLoading,
   parseQtyText, findStockItemByName, computeStockStatus, applyStockMovement,
 });

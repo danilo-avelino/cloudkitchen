@@ -22,49 +22,56 @@ function Stock({ scope }) {
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource] = useState("mock"); // "db" | "mock"
   const [loading, setLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(true);
   const [showEntry, setShowEntry] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showAssistant, setShowAssistant] = useState(false);
   const [editingItem, setEditingItem] = useState(null); // insumo sendo editado
+  const [categoryPendingDelete, setCategoryPendingDelete] = useState(null);
+  const [deletingCategory, setDeletingCategory] = useState(false);
 
   // Carrega tenant + items + categorias do DB quando online
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const ctx = await dbGetCurrentContext();
-      if (cancelled) return;
-      const tid = ctx?.tenant?.id;
-      setTenantId(tid || null);
-      if (!tid) { setLoading(false); return; }
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id;
+        setTenantId(tid || null);
+        if (!tid) return;
 
-      const [itemsRes, catsRes, supRes] = await Promise.all([
-        dbListStockItems(tid),
-        dbListStockCategories(tid),
-        dbListSuppliers(tid),
-      ]);
-      if (cancelled) return;
+        const [itemsRes, catsRes, supRes] = await Promise.all([
+          dbListStockItems(tid),
+          dbListStockCategories(tid),
+          dbListSuppliers(tid),
+        ]);
+        if (cancelled) return;
 
-      if (itemsRes.source === "db") {
-        // Mesmo que array vazio, exibe dados reais do DB (não MOCK)
-        setItems(itemsRes.data || []);
-        setSource("db");
-      } else if (itemsRes.error) {
-        console.warn("dbListStockItems erro:", itemsRes.error);
+        if (itemsRes.source === "db") {
+          // Mesmo que array vazio, exibe dados reais do DB (não MOCK)
+          setItems(itemsRes.data || []);
+          setSource("db");
+        } else if (itemsRes.error) {
+          console.warn("dbListStockItems erro:", itemsRes.error);
+        }
+        if (catsRes.data) {
+          setDbCategories(catsRes.data);
+          setCategories(catsRes.data.map((c) => c.name).sort());
+        }
+        if (supRes?.data) {
+          setSuppliers(supRes.data.map((s) => ({ id: s.id, name: s.name })));
+        }
+      } finally {
+        if (!cancelled) { setLoading(false); setPageLoading(false); }
       }
-      if (catsRes.data) {
-        setDbCategories(catsRes.data);
-        setCategories(catsRes.data.map((c) => c.name).sort());
-      }
-      if (supRes?.data) {
-        setSuppliers(supRes.data.map((s) => ({ id: s.id, name: s.name })));
-      }
-      setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   const handleCreateItem = async (draft) => {
     if (source === "db" && tenantId) {
@@ -159,27 +166,38 @@ function Stock({ scope }) {
     );
   };
 
-  const deleteCategory = async (name) => {
+  const deleteCategory = (name) => {
     const inUse = items.some((it) => it.cat === name);
     if (inUse) {
       window.showToast(`Há insumos em "${name}" · migre-os antes de excluir`, { tone: "warn", ttl: 4500 });
       return;
     }
-    if (!window.confirm(`Excluir a categoria "${name}"?\n\nEssa ação não pode ser desfeita.`)) return;
-    // Persiste no DB se a categoria existir lá
-    if (source === "db" && typeof dbDeleteStockCategory === "function") {
-      const dbCat = dbCategories.find((c) => c.name === name);
-      if (dbCat?.id) {
-        const { error } = await dbDeleteStockCategory(dbCat.id);
-        if (error) {
-          window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
-          return;
+    setCategoryPendingDelete(name);
+  };
+
+  const performDeleteCategory = async () => {
+    const name = categoryPendingDelete;
+    if (!name || deletingCategory) return;
+    setDeletingCategory(true);
+    try {
+      // Persiste no DB se a categoria existir lá
+      if (source === "db" && typeof dbDeleteStockCategory === "function") {
+        const dbCat = dbCategories.find((c) => c.name === name);
+        if (dbCat?.id) {
+          const { error } = await dbDeleteStockCategory(dbCat.id);
+          if (error) {
+            window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+            return;
+          }
+          setDbCategories((prev) => prev.filter((c) => c.id !== dbCat.id));
         }
-        setDbCategories((prev) => prev.filter((c) => c.id !== dbCat.id));
       }
+      setCategories((prev) => prev.filter((c) => c !== name));
+      window.showToast(`Categoria "${name}" excluída`, { tone: "warn" });
+      setCategoryPendingDelete(null);
+    } finally {
+      setDeletingCategory(false);
     }
-    setCategories((prev) => prev.filter((c) => c !== name));
-    window.showToast(`Categoria "${name}" excluída`, { tone: "warn" });
   };
 
   // Inclui categorias gerenciadas + as que aparecem nos items (caso o item
@@ -389,6 +407,8 @@ function Stock({ scope }) {
     window.showToast(`Insumo ${id} atualizado`, { tone: "ok" });
   };
 
+  if (pageLoading) return <PageLoading label="Carregando estoque…" variant="table" />;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* Sub-tabs Insumos | Inventário */}
@@ -579,6 +599,22 @@ function Stock({ scope }) {
           onDelete={() => handleDeleteItem(editingItem.id)}
         />
       )}
+
+      <ConfirmDialog
+        open={!!categoryPendingDelete}
+        tone="danger"
+        title="Excluir categoria?"
+        message={
+          <>
+            Remover a categoria <strong style={{ color: "var(--fg-0)" }}>{categoryPendingDelete}</strong> do estoque. Essa ação não pode ser desfeita.
+          </>
+        }
+        confirmLabel="Excluir categoria"
+        cancelLabel="Manter"
+        busy={deletingCategory}
+        onCancel={() => { if (!deletingCategory) setCategoryPendingDelete(null); }}
+        onConfirm={performDeleteCategory}
+      />
     </div>
   );
 }

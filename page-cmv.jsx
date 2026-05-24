@@ -96,10 +96,11 @@ function excludedImpact(movements, fromDate, toDate) {
 
 function CMV({ setPage }) {
   const [period, setPeriod] = useState("mtd"); // mtd | today | yesterday | 7d | 30d
-  const dbStatus = useDbStatus?.() || { isOnline: false };
+  const dbStatus = useDbStatus?.() || { isOnline: false, state: "offline" };
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource] = useState("loading");
   const [loading, setLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(true);
   const [revenueEntries, setRevenueEntries] = useState([]);
   const [movements, setMovements] = useState([]);
   const [topConsumed, setTopConsumed] = useState([]);
@@ -109,13 +110,14 @@ function CMV({ setPage }) {
   const [heatMovements, setHeatMovements] = useState([]);
 
   useEffect(() => {
-    if (!dbStatus.isOnline) { setSource("offline"); return; }
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setSource("offline"); setPageLoading(false); return; }
     let cancelled = false;
     setLoading(true);
     (async () => {
       const ctx = await dbGetCurrentContext?.();
       const tid = ctx?.tenant?.id;
-      if (cancelled || !tid) { setSource("offline"); setLoading(false); return; }
+      if (cancelled || !tid) { setSource("offline"); setLoading(false); setPageLoading(false); return; }
       setTenantId(tid);
 
       const { fromDate, toDate } = getDateRange(period);
@@ -147,9 +149,10 @@ function CMV({ setPage }) {
       setHeatRevenue(heatRevRes.data ?? revRes.data ?? []);
       setHeatMovements(heatMovRes.data ?? movRes.data ?? []);
       setLoading(false);
+      setPageLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline, period]);
+  }, [dbStatus.state, dbStatus.isOnline, period]);
 
   const daily = useMemo(
     () => buildDailyRows(revenueEntries, movements),
@@ -221,6 +224,8 @@ function CMV({ setPage }) {
 
   const headerTone = cmvTone(totals.cmv);
   const hasData = totals.revenue > 0 || totals.cogs > 0;
+
+  if (pageLoading) return <PageLoading label="Carregando CMV & margem…" variant="dashboard" />;
 
   return (
     <div style={{ padding: "20px 28px 32px", display: "flex", flexDirection: "column", gap: 20, overflow: "auto", height: "100%" }} className="stagger">

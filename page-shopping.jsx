@@ -5,13 +5,15 @@
 const _fmtBRL = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function Shopping({ embedded = false, onSave = null, stockItems: stockItemsProp = null }) {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   const [stockItems, setStockItems] = useState(stockItemsProp || MOCK.STOCK_ITEMS || []);
+  const [pageLoading, setPageLoading] = useState(!stockItemsProp);
 
   // Quando vier por prop (Estoque já carregou), prefere; senão busca direto
   useEffect(() => {
-    if (stockItemsProp) { setStockItems(stockItemsProp); return; }
-    if (!dbStatus.isOnline) return;
+    if (stockItemsProp) { setStockItems(stockItemsProp); setPageLoading(false); return; }
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
       try {
@@ -21,9 +23,10 @@ function Shopping({ embedded = false, onSave = null, stockItems: stockItemsProp 
         if (cancelled) return;
         if (src === "db") setStockItems(data || []);
       } catch (e) { console.warn("[shopping] falha ao carregar estoque:", e); }
+      finally { if (!cancelled) setPageLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline, stockItemsProp]);
+  }, [dbStatus.state, dbStatus.isOnline, stockItemsProp]);
 
   // Computa todos os itens abaixo do mínimo a partir do estoque.
   const baseSuggestions = useMemo(() => {
@@ -200,6 +203,8 @@ function Shopping({ embedded = false, onSave = null, stockItems: stockItemsProp 
       total,
     });
   };
+
+  if (pageLoading && !embedded) return <PageLoading label="Carregando lista de compras…" variant="table" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: embedded ? "auto" : "100%", overflow: "hidden", flex: 1 }}>

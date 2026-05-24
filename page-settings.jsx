@@ -42,39 +42,45 @@ function Settings() {
 }
 
 function OperationsTab() {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   const [ops, setOps]         = useState(MOCK.OPERATIONS.filter((o) => o.id !== "all"));
   const [editing, setEditing] = useState(null);
   const [source, setSource]   = useState("mock"); // "db" | "mock"
   const [tenantId, setTenantId] = useState(null);
+  const [tabLoading, setTabLoading] = useState(true);
 
   // Resolve o tenantId do usuário autenticado (uma vez)
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setTabLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext();
-      if (cancelled) return;
-      const tid = ctx?.tenant?.id || null;
-      setTenantId(tid);
-      if (!tid) return; // usuário sem tenant_member · fica no mock
-      const { data, source: src, error } = await dbListOperations(tid);
-      if (cancelled) return;
-      if (src === "db") {
-        // Adapta shape do banco para shape do mock; aceita lista vazia
-        const mapped = (data || []).map((row) => ({
-          id: row.id, slug: row.slug, name: row.name,
-          short: row.short_label, color: row.color,
-          iFood: row.ifood_handle,
-        }));
-        setOps(mapped);
-        setSource("db");
-      } else if (error) {
-        console.warn("dbListOperations falhou", error);
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id || null;
+        setTenantId(tid);
+        if (!tid) return; // usuário sem tenant_member · fica no mock
+        const { data, source: src, error } = await dbListOperations(tid);
+        if (cancelled) return;
+        if (src === "db") {
+          // Adapta shape do banco para shape do mock; aceita lista vazia
+          const mapped = (data || []).map((row) => ({
+            id: row.id, slug: row.slug, name: row.name,
+            short: row.short_label, color: row.color,
+            iFood: row.ifood_handle,
+          }));
+          setOps(mapped);
+          setSource("db");
+        } else if (error) {
+          console.warn("dbListOperations falhou", error);
+        }
+      } finally {
+        if (!cancelled) setTabLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   const save = async (op) => {
     if (editing?.initial) {
@@ -136,6 +142,8 @@ function OperationsTab() {
     }
     setEditing(null);
   };
+
+  if (tabLoading) return <PageLoading label="Carregando operações…" variant="table" hint="" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -313,36 +321,42 @@ const ROLE_TO_DB = {
 };
 
 function UsersTab() {
-  const dbStatus = useDbStatus?.() || { isOnline: false };
+  const dbStatus = useDbStatus?.() || { isOnline: false, state: "offline" };
   const [users, setUsers] = useState([]);
   const [editing, setEditing] = useState(null);
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource] = useState("loading");
   const [loadError, setLoadError] = useState(null);
+  const [tabLoading, setTabLoading] = useState(true);
 
   useEffect(() => {
-    if (!dbStatus.isOnline) { setSource("offline"); return; }
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setSource("offline"); setTabLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext?.();
-      const tid = ctx?.tenant?.id;
-      if (cancelled) return;
-      if (!tid) { setSource("offline"); return; }
-      setTenantId(tid);
-      const res = await dbListMembers?.(tid);
-      if (cancelled) return;
-      if (res?.error) {
-        setLoadError(res.error.message || String(res.error));
-        setSource("offline");
-      } else if (res?.data) {
-        setUsers(res.data);
-        setSource("db");
-      } else {
-        setSource("offline");
+      try {
+        const ctx = await dbGetCurrentContext?.();
+        const tid = ctx?.tenant?.id;
+        if (cancelled) return;
+        if (!tid) { setSource("offline"); return; }
+        setTenantId(tid);
+        const res = await dbListMembers?.(tid);
+        if (cancelled) return;
+        if (res?.error) {
+          setLoadError(res.error.message || String(res.error));
+          setSource("offline");
+        } else if (res?.data) {
+          setUsers(res.data);
+          setSource("db");
+        } else {
+          setSource("offline");
+        }
+      } finally {
+        if (!cancelled) setTabLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   const formatOps = (ops) => {
     if (!ops) return "—";
@@ -409,6 +423,8 @@ function UsersTab() {
     }
     setEditing(null);
   };
+
+  if (tabLoading) return <PageLoading label="Carregando usuários…" variant="table" hint="" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>

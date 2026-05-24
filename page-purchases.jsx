@@ -33,13 +33,14 @@ const _isoTimeBR = (iso) => {
 const _dayKey = (iso) => (iso || "").slice(0, 10); // YYYY-MM-DD
 
 function Purchases() {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   // Quando online, inicia vazio pra evitar flash de MOCK; offline usa MOCK como demo
   const [lists,    setLists]    = useState(() => dbStatus.isOnline ? [] : (MOCK.SHOPPING_LISTS || []));
   const [receipts, setReceipts] = useState(() => dbStatus.isOnline ? [] : (MOCK.GOODS_RECEIPTS || []));
   const [stockItems, setStockItems] = useState(() => dbStatus.isOnline ? [] : (MOCK.STOCK_ITEMS || []));
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource]     = useState(dbStatus.isOnline ? "db" : "mock");
+  const [pageLoading, setPageLoading] = useState(true);
   const [selectedListId, setSelectedListId] = useState(null);
   const [viewingSavedListId, setViewingSavedListId] = useState(null); // snapshot tipo Shopping
   const [confirmDeleteId,    setConfirmDeleteId]    = useState(null);
@@ -49,33 +50,38 @@ function Purchases() {
 
   // Carrega listas + recebimentos do DB
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext();
-      if (cancelled) return;
-      const tid = ctx?.tenant?.id;
-      setTenantId(tid || null);
-      if (!tid) return;
-      const [listsRes, receiptsRes, stockRes] = await Promise.all([
-        dbListPurchaseOrders(tid),
-        dbListGoodsReceipts(tid),
-        dbListStockItems(tid),
-      ]);
-      if (cancelled) return;
-      if (listsRes.source === "db") {
-        setLists(listsRes.data || []);
-        setSource("db");
-      }
-      if (receiptsRes.source === "db") {
-        setReceipts(receiptsRes.data || []);
-      }
-      if (stockRes.source === "db") {
-        setStockItems(stockRes.data || []);
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id;
+        setTenantId(tid || null);
+        if (!tid) return;
+        const [listsRes, receiptsRes, stockRes] = await Promise.all([
+          dbListPurchaseOrders(tid),
+          dbListGoodsReceipts(tid),
+          dbListStockItems(tid),
+        ]);
+        if (cancelled) return;
+        if (listsRes.source === "db") {
+          setLists(listsRes.data || []);
+          setSource("db");
+        }
+        if (receiptsRes.source === "db") {
+          setReceipts(receiptsRes.data || []);
+        }
+        if (stockRes.source === "db") {
+          setStockItems(stockRes.data || []);
+        }
+      } finally {
+        if (!cancelled) setPageLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   const selectedList = lists.find((l) => l.id === selectedListId) || null;
 
@@ -418,6 +424,8 @@ function Purchases() {
 
   const viewingSavedList = enrichedLists.find((l) => l.id === viewingSavedListId) || null;
   const confirmDeleteList = lists.find((l) => l.id === confirmDeleteId) || null;
+
+  if (pageLoading) return <PageLoading label="Carregando compras…" variant="cards" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>

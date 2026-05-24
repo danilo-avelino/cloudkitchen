@@ -1,6 +1,6 @@
 // Requests page — Kanban Pendente → Separada → Entregue
 function Requests({ scope }) {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   // Lançamentos existentes com status "approved" são tratados como "pending" no novo fluxo
   const [items, setItems] = useState(() =>
     MOCK.REQUESTS.map((r) => r.status === "approved" ? { ...r, status: "pending" } : r)
@@ -8,6 +8,7 @@ function Requests({ scope }) {
   const [stockItems, setStockItems] = useState(MOCK.STOCK_ITEMS || []);
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource]     = useState("mock");
+  const [pageLoading, setPageLoading] = useState(true);
   const [view, setView] = useState("kanban"); // kanban | list
   const [creating, setCreating] = useState(false);
   const [editingReq, setEditingReq] = useState(null);
@@ -16,31 +17,36 @@ function Requests({ scope }) {
 
   // Carrega do DB quando online
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext();
-      if (cancelled) return;
-      const tid = ctx?.tenant?.id;
-      setTenantId(tid || null);
-      if (!tid) return;
-      const [reqRes, stockRes] = await Promise.all([
-        dbListKitchenRequests(tid, { limit: 100 }),
-        dbListStockItems(tid),
-      ]);
-      if (cancelled) return;
-      if (reqRes.data && reqRes.source === "db") {
-        setItems(reqRes.data);
-        setSource("db");
-      }
-      if (stockRes.data && stockRes.source === "db") {
-        setStockItems(stockRes.data);
-      } else if (stockRes.source === "db") {
-        setStockItems([]); // DB online porém sem insumos cadastrados
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id;
+        setTenantId(tid || null);
+        if (!tid) return;
+        const [reqRes, stockRes] = await Promise.all([
+          dbListKitchenRequests(tid, { limit: 100 }),
+          dbListStockItems(tid),
+        ]);
+        if (cancelled) return;
+        if (reqRes.data && reqRes.source === "db") {
+          setItems(reqRes.data);
+          setSource("db");
+        }
+        if (stockRes.data && stockRes.source === "db") {
+          setStockItems(stockRes.data);
+        } else if (stockRes.source === "db") {
+          setStockItems([]); // DB online porém sem insumos cadastrados
+        }
+      } finally {
+        if (!cancelled) setPageLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   // Realtime · atualiza itens quando kitchen_requests muda no DB
   useEffect(() => {
@@ -222,6 +228,8 @@ function Requests({ scope }) {
       window.showToast(`Requisição ${id} criada · aguardando aprovação`, { tone: "ok" });
     }
   };
+
+  if (pageLoading) return <PageLoading label="Carregando requisições…" variant="cards" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>

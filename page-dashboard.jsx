@@ -25,7 +25,8 @@ function Dashboard({ scope, setScope, setPage }) {
   const opsCount = (MOCK.OPERATIONS || []).filter((o) => o.id !== "all").length;
 
   // DB data
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const [pageLoading, setPageLoading] = useState(true);
   const [dbData, setDbData] = useState({
     revenue: [],
     revenuePrev: [],        // mesmo length de período, deslocado para o anterior
@@ -39,10 +40,11 @@ function Dashboard({ scope, setScope, setPage }) {
 
   // Carrega dados do DB + assina realtime (faturamento/saída atualizam o ranking ao vivo)
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return; // aguarda saber o status
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     const sess = (() => { try { return JSON.parse(localStorage.getItem("stockkitchen.session.v1")); } catch { return null; } })();
     const tid = sess?.tenantId;
-    if (!tid) return;
+    if (!tid) { setPageLoading(false); return; }
 
     let cancelled = false;
     let reloadTimer = null;
@@ -84,6 +86,7 @@ function Dashboard({ scope, setScope, setPage }) {
         requests:         reqRes.data || [],
         cmvMovements:     movRes.data || [],
       });
+      setPageLoading(false);
     };
 
     // Debounce — várias mudanças em sequência viram um único reload
@@ -105,13 +108,15 @@ function Dashboard({ scope, setScope, setPage }) {
       if (reloadTimer) clearTimeout(reloadTimer);
       unsubs.forEach((u) => { try { u(); } catch {} });
     };
-  }, [dbStatus.isOnline, period]);
+  }, [dbStatus.state, dbStatus.isOnline, period]);
 
   // Computa KPI real a partir de dados do DB ou MOCK
   const k = useMemo(() => computeKpi(scope, dbData, period), [scope, dbData, period]);
 
   // Métricas dos novos módulos (Inventário)
   const moduleMetrics = useMemo(() => computeDashboardMetrics(scope, period, dbData, dbStatus.isOnline), [scope, period, dbData, dbStatus.isOnline]);
+
+  if (pageLoading) return <PageLoading label="Carregando dashboard…" variant="dashboard" />;
 
   return (
     <div style={{ padding: "24px 28px 32px", display: "flex", flexDirection: "column", gap: 20 }} className="stagger">

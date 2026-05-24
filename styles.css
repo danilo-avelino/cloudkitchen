@@ -403,6 +403,11 @@ input, select, textarea { font-family: inherit; }
   border-radius: var(--r-1);
 }
 
+/* Spinner usado por <PageLoading> em widgets.jsx */
+@keyframes pl-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ============ IMPRESSÃO TÉRMICA ============ */
 /* O .print-area só aparece no modo @media print. Largura 80mm (térmica padrão). */
 @media screen {

@@ -92,7 +92,7 @@ function buildInventoryHistory(inventories, limit = 8) {
 
 // ===================== Componente principal =====================
 function Inventory() {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   const [inventories, setInventories] = useState(MOCK.INVENTORIES);
   const [stockItems, setStockItems] = useState(MOCK.STOCK_ITEMS);
   const [tenantId, setTenantId] = useState(null);
@@ -100,43 +100,49 @@ function Inventory() {
   const [creating, setCreating] = useState(false);
   const [resuming, setResuming] = useState(null); // inventário in_progress a continuar
   const [viewing,  setViewing]  = useState(null);
+  const [pageLoading, setPageLoading] = useState(true);
 
   // Carrega inventários + insumos do DB (se schema aplicado)
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext();
-      if (cancelled) return;
-      const tid = ctx?.tenant?.id;
-      setTenantId(tid || null);
-      if (!tid) return;
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id;
+        setTenantId(tid || null);
+        if (!tid) return;
 
-      const [invRes, itemsRes] = await Promise.all([
-        dbListInventories(tid),
-        dbListStockItems(tid),
-      ]);
-      if (cancelled) return;
+        const [invRes, itemsRes] = await Promise.all([
+          dbListInventories(tid),
+          dbListStockItems(tid),
+        ]);
+        if (cancelled) return;
 
-      if (invRes.data && invRes.source === "db") {
-        setInventories(invRes.data);
-        setSource("db");
-      } else if (invRes.error) {
-        // Provavelmente tabela ainda não existe (Fase 11 não aplicada)
-        if (/does not exist|relation .* does not exist|42P01/i.test(invRes.error.message)) {
-          console.info("[inventory] Fase 11 do schema não aplicada · usando MOCK");
-        } else {
-          console.warn("dbListInventories erro:", invRes.error);
+        if (invRes.data && invRes.source === "db") {
+          setInventories(invRes.data);
+          setSource("db");
+        } else if (invRes.error) {
+          // Provavelmente tabela ainda não existe (Fase 11 não aplicada)
+          if (/does not exist|relation .* does not exist|42P01/i.test(invRes.error.message)) {
+            console.info("[inventory] Fase 11 do schema não aplicada · usando MOCK");
+          } else {
+            console.warn("dbListInventories erro:", invRes.error);
+          }
         }
-      }
-      if (itemsRes.source === "db") {
-        setStockItems(itemsRes.data || []);
-      } else if (itemsRes.error) {
-        console.warn("dbListStockItems erro:", itemsRes.error);
+        if (itemsRes.source === "db") {
+          setStockItems(itemsRes.data || []);
+        } else if (itemsRes.error) {
+          console.warn("dbListStockItems erro:", itemsRes.error);
+        }
+      } finally {
+        if (!cancelled) setPageLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   // Métricas pro dashboard
   const finalized = useMemo(() =>
@@ -229,6 +235,8 @@ function Inventory() {
       window.showToast(`Inventário ${id} salvo parcialmente · finalize quando terminar`, { tone: "info", ttl: 4500 });
     }
   };
+
+  if (pageLoading) return <PageLoading label="Carregando inventário…" variant="dashboard" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "auto" }}>

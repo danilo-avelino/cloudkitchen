@@ -70,40 +70,49 @@ function Finance() {
   const [checklist, setChecklist] = useState(MOCK.CLOSING_CHECKLIST);
   const [stockSnapshot, setStockSnapshot] = useState({ initial: 0, final: 0, initialAt: null, finalAt: null });
   const [draftOpen, setDraftOpen] = useState(false);
+  const [editingEntry, setEditingEntry] = useState(null);
+  const [confirmDeleteEntry, setConfirmDeleteEntry] = useState(null);
+  const [viewingSub, setViewingSub] = useState(null); // { sub } — abre modal com lançamentos da subcategoria
   const [fillItem, setFillItem] = useState(null);
   const [addingChecklist, setAddingChecklist] = useState(false);
   const [showStructure, setShowStructure] = useState(false);
 
   // DB state
-  const dbStatus = useDbStatus?.() || { isOnline: false };
+  const dbStatus = useDbStatus?.() || { isOnline: false, state: "offline" };
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource] = useState("mock");
+  const [pageLoading, setPageLoading] = useState(true);
 
   // Load from DB when period changes
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext?.();
-      const tid = ctx?.tenant?.id;
-      if (cancelled || !tid) return;
-      setTenantId(tid);
-      const [catsRes, subsRes, entriesRes, checkRes, snapRes] = await Promise.all([
-        dbListDreCategories?.(tid) || { data: null },
-        dbListDreSubcategories?.(tid) || { data: null },
-        dbListFinanceEntries?.(tid, period) || { data: null },
-        dbListClosingChecklist?.(tid, period) || { data: null },
-        dbGetStockValueSnapshots?.(tid, period) || { data: null },
-      ]);
-      if (cancelled) return;
-      if (catsRes.data) { setCategories(catsRes.data); setSource("db"); }
-      if (subsRes.data) setSubcategories(subsRes.data);
-      if (entriesRes.data) setEntries(entriesRes.data);
-      if (checkRes.data) setChecklist(checkRes.data);
-      if (snapRes.data) setStockSnapshot(snapRes.data);
+      try {
+        const ctx = await dbGetCurrentContext?.();
+        const tid = ctx?.tenant?.id;
+        if (cancelled || !tid) return;
+        setTenantId(tid);
+        const [catsRes, subsRes, entriesRes, checkRes, snapRes] = await Promise.all([
+          dbListDreCategories?.(tid) || { data: null },
+          dbListDreSubcategories?.(tid) || { data: null },
+          dbListFinanceEntries?.(tid, period) || { data: null },
+          dbListClosingChecklist?.(tid, period) || { data: null },
+          dbGetStockValueSnapshots?.(tid, period) || { data: null },
+        ]);
+        if (cancelled) return;
+        if (catsRes.data) { setCategories(catsRes.data); setSource("db"); }
+        if (subsRes.data) setSubcategories(subsRes.data);
+        if (entriesRes.data) setEntries(entriesRes.data);
+        if (checkRes.data) setChecklist(checkRes.data);
+        if (snapRes.data) setStockSnapshot(snapRes.data);
+      } finally {
+        if (!cancelled) setPageLoading(false);
+      }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline, period]);
+  }, [dbStatus.state, dbStatus.isOnline, period]);
 
   // Auto-feed do Ajuste de estoque · entries sintéticos vindos de inventários
   const autoEntries = useMemo(() => buildStockAdjustEntries(period), [period]);
@@ -132,6 +141,46 @@ function Finance() {
     setDraftOpen(false);
     window.showToast?.("Lançamento salvo localmente (offline)", { tone: "warn" });
     return id;
+  };
+
+  const updateEntry = async (id, patch) => {
+    if (dbStatus.isOnline && tenantId && typeof dbUpdateFinanceEntry === "function") {
+      const { error } = await dbUpdateFinanceEntry(id, patch);
+      if (error) {
+        window.showToast?.(`Erro ao atualizar: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return false;
+      }
+      const refreshed = await dbListFinanceEntries?.(tenantId, period);
+      if (refreshed?.data) setEntries(refreshed.data);
+      setEditingEntry(null);
+      window.showToast?.("Lançamento atualizado", { tone: "ok" });
+      return true;
+    }
+    setEntries(entries.map((x) => x.id === id ? { ...x, ...patch } : x));
+    setEditingEntry(null);
+    window.showToast?.("Lançamento atualizado (offline)", { tone: "warn" });
+    return true;
+  };
+
+  const deleteEntry = async (id) => {
+    if (dbStatus.isOnline && tenantId && typeof dbDeleteFinanceEntry === "function") {
+      const { error } = await dbDeleteFinanceEntry(id);
+      if (error) {
+        window.showToast?.(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return false;
+      }
+      const refreshed = await dbListFinanceEntries?.(tenantId, period);
+      if (refreshed?.data) setEntries(refreshed.data);
+      setConfirmDeleteEntry(null);
+      setEditingEntry(null);
+      window.showToast?.("Lançamento excluído", { tone: "warn" });
+      return true;
+    }
+    setEntries(entries.filter((x) => x.id !== id));
+    setConfirmDeleteEntry(null);
+    setEditingEntry(null);
+    window.showToast?.("Lançamento excluído (offline)", { tone: "warn" });
+    return true;
   };
 
   const fillChecklistItem = async ({ item, value, comp, paid, status }) => {
@@ -223,6 +272,8 @@ function Finance() {
     window.showToast(`Subcategoria "${sub.name}" excluída`, { tone: "warn" });
   };
 
+  if (pageLoading) return <PageLoading label="Carregando financeiro…" variant="table" />;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{ padding: "20px 28px 0" }}>
@@ -262,12 +313,53 @@ function Finance() {
       </div>
 
       <div style={{ flex: 1, overflow: "auto" }}>
-        {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} />}
-        {tab === "dre"       && <DREView entries={inPeriod} categories={categories} subcategories={subcategories} period={period} stockSnapshot={stockSnapshot} />}
+        {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} onEdit={setEditingEntry} onDelete={setConfirmDeleteEntry} />}
+        {tab === "dre"       && <DREView entries={inPeriod} categories={categories} subcategories={subcategories} period={period} stockSnapshot={stockSnapshot} onViewSub={setViewingSub} />}
         {tab === "checklist" && <ChecklistView checklist={checklist} categories={categories} subcategories={subcategories} onFill={setFillItem} period={period} />}
       </div>
 
       {draftOpen  && <EntryDraft  categories={categories} subcategories={subcategories} onClose={() => setDraftOpen(false)} onSave={addEntry} period={period} />}
+      {editingEntry && (
+        <EntryDraft
+          categories={categories}
+          subcategories={subcategories}
+          initial={editingEntry}
+          period={period}
+          onClose={() => setEditingEntry(null)}
+          onSave={(draft) => updateEntry(editingEntry.id, draft)}
+          onDelete={() => setConfirmDeleteEntry(editingEntry)}
+        />
+      )}
+      {viewingSub && (
+        <SubEntriesModal
+          sub={viewingSub}
+          categories={categories}
+          subcategories={subcategories}
+          entries={inPeriod}
+          period={period}
+          onClose={() => setViewingSub(null)}
+          onEdit={(entry) => { setViewingSub(null); setEditingEntry(entry); }}
+          onDelete={(entry) => setConfirmDeleteEntry(entry)}
+        />
+      )}
+      {confirmDeleteEntry && (
+        <ConfirmDialog
+          open={!!confirmDeleteEntry}
+          tone="danger"
+          title="Excluir lançamento?"
+          message={
+            <>
+              Esta ação remove <strong style={{ color: "var(--fg-0)" }}>{confirmDeleteEntry.desc || "este lançamento"}</strong>
+              {Number(confirmDeleteEntry.value) > 0 && <> no valor de <strong style={{ color: "var(--fg-0)" }}>{fmt(confirmDeleteEntry.value)}</strong></>}
+              . A exclusão não pode ser desfeita.
+            </>
+          }
+          confirmLabel="Excluir"
+          cancelLabel="Cancelar"
+          onCancel={() => setConfirmDeleteEntry(null)}
+          onConfirm={() => deleteEntry(confirmDeleteEntry.id)}
+        />
+      )}
       {fillItem   && <FillDraft   item={fillItem} categories={categories} subcategories={subcategories} period={period} onClose={() => setFillItem(null)} onSave={fillChecklistItem} />}
       {addingChecklist && (
         <ChecklistItemDraft
@@ -416,7 +508,7 @@ function FinanceTabs({ tab, setTab, checklist }) {
 }
 
 // ---------- Lançamentos ----------
-function EntriesView({ entries, subcategories, categories }) {
+function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
   // Filtra despesas (não-receita) e remove auto-feeds (que são exibidos apenas na DRE)
   const expenseOnly = entries.filter((e) => {
     const sub = findSubcategory(subcategories, e.cat);
@@ -448,11 +540,12 @@ function EntriesView({ entries, subcategories, categories }) {
             <th>Pagamento</th>
             <th>Status</th>
             <th className="num">Valor</th>
+            <th style={{ width: 90 }}></th>
           </tr>
         </thead>
         <tbody>
           {sorted.length === 0 && (
-            <tr><td colSpan="7" style={{ padding: "32px", textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
+            <tr><td colSpan="8" style={{ padding: "32px", textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
               Sem lançamentos de despesa neste período. Receitas são consolidadas em <span style={{ color: "var(--accent-bright)" }}>Faturamento</span>.
             </td></tr>
           )}
@@ -462,7 +555,7 @@ function EntriesView({ entries, subcategories, categories }) {
             const tone = e.status === "paid" ? "ok" : e.status === "scheduled" ? "info" : "warn";
             const lbl = e.status === "paid" ? "Pago" : e.status === "scheduled" ? "Agendado" : "Pendente";
             return (
-              <tr key={e.id}>
+              <tr key={e.id} style={{ cursor: onEdit ? "pointer" : "default" }} onClick={() => onEdit?.(e)}>
                 <td className="row-strong">{e.desc}</td>
                 <td className="dim">
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -475,6 +568,18 @@ function EntriesView({ entries, subcategories, categories }) {
                 <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>{fmtDate(e.paid)}</td>
                 <td><span className="badge" data-tone={tone}>{lbl}</span></td>
                 <td className="num" style={{ color: "var(--fg-0)" }}>−{fmt(e.value)}</td>
+                <td onClick={(ev) => ev.stopPropagation()}>
+                  <div style={{ display: "inline-flex", gap: 4 }}>
+                    <button className="btn" data-variant="ghost" data-size="sm" title="Editar"
+                            onClick={() => onEdit?.(e)} style={{ padding: "3px 6px" }}>
+                      <I.Edit size={11} />
+                    </button>
+                    <button className="btn" data-variant="ghost" data-size="sm" title="Excluir"
+                            onClick={() => onDelete?.(e)} style={{ padding: "3px 6px", color: "var(--crit)" }}>
+                      <I.Trash size={11} />
+                    </button>
+                  </div>
+                </td>
               </tr>
             );
           })}
@@ -485,7 +590,7 @@ function EntriesView({ entries, subcategories, categories }) {
 }
 
 // ---------- DRE ----------
-function DREView({ entries, categories, subcategories, period, stockSnapshot = { initial: 0, final: 0 } }) {
+function DREView({ entries, categories, subcategories, period, stockSnapshot = { initial: 0, final: 0 }, onViewSub }) {
   // Agrega valores por categoria/subcategoria
   const byCat = {};
   categories.forEach((c) => { byCat[c.id] = { total: 0, bySub: {} }; });
@@ -621,6 +726,7 @@ function DREView({ entries, categories, subcategories, period, stockSnapshot = {
                   byCat={byCat[c.id]?.bySub || {}}
                   subcategories={subcategories}
                   note={note}
+                  onViewSub={c.kind === "revenue" ? null : onViewSub}
                 />
               );
             })}
@@ -636,6 +742,7 @@ function DREView({ entries, categories, subcategories, period, stockSnapshot = {
                 sign="−"
                 byCat={byCat[c.id]?.bySub || {}}
                 subcategories={subcategories}
+                onViewSub={onViewSub}
               />
             ))}
 
@@ -660,7 +767,7 @@ function DreStat({ label, value, accent, sub }) {
   );
 }
 
-function DreRow({ label, value, pct, sign, byCat, subcategories, strong, faded, note }) {
+function DreRow({ label, value, pct, sign, byCat, subcategories, strong, faded, note, onViewSub }) {
   const [open, setOpen] = useState(false);
   // Mostra subs com valor; mantém também as autofeed zeradas pra indicar integração.
   const subs = byCat ? Object.entries(byCat).filter(([id, v]) => {
@@ -690,8 +797,11 @@ function DreRow({ label, value, pct, sign, byCat, subcategories, strong, faded, 
         if (!sub) return null;
         const total = value || 1;
         const sharePct = total !== 0 ? (val / total) * 100 : 0;
+        const canView = !!onViewSub && !sub.autofeed;
         return (
-          <tr key={subId} style={{ background: "var(--bg-2)" }}>
+          <tr key={subId} style={{ background: "var(--bg-2)", cursor: canView ? "pointer" : "default" }}
+              onClick={() => canView && onViewSub(sub)}
+              title={canView ? "Ver e editar lançamentos desta subcategoria" : undefined}>
             <td style={{ paddingLeft: 36 }}>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--fg-1)" }}>
                 <span style={{ width: 4, height: 4, borderRadius: 50, background: sub.color }} />
@@ -713,8 +823,15 @@ function DreRow({ label, value, pct, sign, byCat, subcategories, strong, faded, 
             </td>
             <td className="num" style={{ color: "var(--fg-3)" }}>{Math.abs(sharePct).toFixed(1)}%</td>
             <td className="dim" style={{ fontSize: 11 }}>
-              <span style={{ display: "inline-block", width: 100, height: 3, background: "var(--bg-3)", borderRadius: 1, overflow: "hidden" }}>
-                <span style={{ display: "block", width: `${Math.min(100, Math.abs(sharePct))}%`, height: "100%", background: sub.color }} />
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <span style={{ display: "inline-block", width: 100, height: 3, background: "var(--bg-3)", borderRadius: 1, overflow: "hidden" }}>
+                  <span style={{ display: "block", width: `${Math.min(100, Math.abs(sharePct))}%`, height: "100%", background: sub.color }} />
+                </span>
+                {canView && (
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--accent-bright)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                    editar →
+                  </span>
+                )}
               </span>
             </td>
           </tr>
@@ -941,7 +1058,7 @@ function FormField({ label, hint, children }) {
   );
 }
 
-function EntryDraft({ categories, subcategories, onClose, onSave, period }) {
+function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, period, initial }) {
   // Receita é lançada no Faturamento — não aparece como subcategoria selecionável aqui.
   const revenueCatIds = new Set(categories.filter((c) => c.kind === "revenue").map((c) => c.id));
   subcategories = subcategories.filter((s) => !revenueCatIds.has(s.category));
@@ -949,13 +1066,17 @@ function EntryDraft({ categories, subcategories, onClose, onSave, period }) {
   // Subcategorias selecionáveis: exclui as autofeed (Ajuste de estoque vem do inventário)
   const pickable = subcategories.filter((s) => !s.autofeed);
   const defaultCat = pickable.find((s) => /fornecedor/i.test(s.name || s.label || ""))?.id || pickable[0]?.id;
-  const [cat, setCat] = useState(defaultCat);
-  const [desc, setDesc] = useState("");
-  const [value, setValue] = useState("");
-  const [comp, setComp] = useState(`${period}-15`);
-  const [paid, setPaid] = useState(`${period}-20`);
-  const [status, setStatus] = useState("paid");
+  const initialValueStr = initial?.value != null
+    ? Number(initial.value).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : "";
+  const [cat, setCat] = useState(initial?.cat || defaultCat);
+  const [desc, setDesc] = useState(initial?.desc || "");
+  const [value, setValue] = useState(initialValueStr);
+  const [comp, setComp] = useState(initial?.comp || `${period}-15`);
+  const [paid, setPaid] = useState(initial?.paid || `${period}-20`);
+  const [status, setStatus] = useState(initial?.status || "paid");
   const [touched, setTouched] = useState(false);
+  const isEditing = !!initial;
 
   const sub = pickable.find((x) => x.id === cat);
   const parent = sub ? findCategory(categories, sub.category) : null;
@@ -988,13 +1109,26 @@ function EntryDraft({ categories, subcategories, onClose, onSave, period }) {
 
   return (
     <ModalShell
-      title="Novo lançamento"
+      title={isEditing ? "Editar lançamento" : "Novo lançamento"}
       subtitle="A DRE usa a data de competência. A data de pagamento é apenas para fluxo de caixa."
       onClose={onClose}
-      footer={<>
-        <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" onClick={save}>Salvar lançamento</button>
-      </>}
+      footer={
+        <div style={{ display: "flex", justifyContent: "space-between", width: "100%", gap: 8 }}>
+          <div>
+            {isEditing && onDelete && (
+              <button className="btn" data-variant="danger" data-size="sm" onClick={onDelete}>
+                <I.Trash size={11} />Excluir
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={save}>
+              {isEditing ? "Salvar alterações" : "Salvar lançamento"}
+            </button>
+          </div>
+        </div>
+      }
     >
       {touched && errorMessages.length > 0 && (
         <div style={{
@@ -1413,6 +1547,85 @@ function NewSubcategoryRow({ categoryId, onCancel, onSave }) {
         <I.Check size={11} />Criar
       </button>
     </div>
+  );
+}
+
+// ---------- Modal · Lançamentos de uma subcategoria (DRE drill-down) ----------
+function SubEntriesModal({ sub, categories, subcategories, entries, period, onClose, onEdit, onDelete }) {
+  const cat = sub ? findCategory(categories, sub.category) : null;
+  // Lista entries da subcategoria no período (já recebemos `entries` filtrado por período)
+  const subEntries = entries
+    .filter((e) => e.cat === sub.id && !e.auto)
+    .sort((a, b) => (b.comp || "").localeCompare(a.comp || ""));
+  const total = subEntries.reduce((s, e) => s + (Number(e.value) || 0), 0);
+
+  return (
+    <ModalShell
+      title={`${sub.name}`}
+      subtitle={`${cat?.name || "—"} · ${period.replace("-", "/")} · ${subEntries.length} lançamento(s)`}
+      onClose={onClose}
+      width={780}
+      footer={<button className="btn" data-variant="primary" data-size="sm" onClick={onClose}>Fechar</button>}
+    >
+      <div style={{
+        padding: "10px 14px", marginBottom: 14,
+        background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4,
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+      }}>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+          Σ Total da subcategoria
+        </span>
+        <span className="mono" style={{ fontSize: 16, fontWeight: 500, color: "var(--fg-0)" }}>
+          {fmt(total)}
+        </span>
+      </div>
+
+      {subEntries.length === 0 ? (
+        <div style={{ padding: 32, textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
+          Sem lançamentos nesta subcategoria neste período.
+        </div>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Descrição</th>
+              <th>Competência</th>
+              <th>Pagamento</th>
+              <th>Status</th>
+              <th className="num">Valor</th>
+              <th style={{ width: 90 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {subEntries.map((e) => {
+              const tone = e.status === "paid" ? "ok" : e.status === "scheduled" ? "info" : "warn";
+              const lbl  = e.status === "paid" ? "Pago" : e.status === "scheduled" ? "Agendado" : "Pendente";
+              return (
+                <tr key={e.id} style={{ cursor: "pointer" }} onClick={() => onEdit?.(e)}>
+                  <td className="row-strong">{e.desc}</td>
+                  <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-1)" }}>{fmtDate(e.comp)}</td>
+                  <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>{fmtDate(e.paid)}</td>
+                  <td><span className="badge" data-tone={tone}>{lbl}</span></td>
+                  <td className="num" style={{ color: "var(--fg-0)" }}>−{fmt(e.value)}</td>
+                  <td onClick={(ev) => ev.stopPropagation()}>
+                    <div style={{ display: "inline-flex", gap: 4 }}>
+                      <button className="btn" data-variant="ghost" data-size="sm" title="Editar"
+                              onClick={() => onEdit?.(e)} style={{ padding: "3px 6px" }}>
+                        <I.Edit size={11} />
+                      </button>
+                      <button className="btn" data-variant="ghost" data-size="sm" title="Excluir"
+                              onClick={() => onDelete?.(e)} style={{ padding: "3px 6px", color: "var(--crit)" }}>
+                        <I.Trash size={11} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </ModalShell>
   );
 }
 

@@ -43,7 +43,7 @@ const _parseNum = (raw) => {
 };
 
 function Revenue({ scope }) {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   // Quando online, começa vazio pra evitar flash de MOCK; offline usa MOCK
   const [entries,   setEntries]   = useState(() =>
     dbStatus.isOnline ? [] : MOCK.REVENUE_ENTRIES.map((e) => ({ ...e }))
@@ -53,6 +53,7 @@ function Revenue({ scope }) {
   const [methodsState, setMethodsState] = useState(
     dbStatus.isOnline ? [] : MOCK.PAYMENT_METHODS
   );
+  const [pageLoading, setPageLoading] = useState(true);
   const [view,      setView]      = useState("daily"); // daily | byop | list
   const _now = new Date();
   const [filterYear,  setFilterYear]  = useState(String(_now.getFullYear()));
@@ -62,37 +63,42 @@ function Revenue({ scope }) {
 
   // Carrega faturamento + métodos de pagamento do DB
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext();
-      if (cancelled) return;
-      const tid = ctx?.tenant?.id;
-      setTenantId(tid || null);
-      if (!tid) return;
-      const [entriesRes, methodsRes] = await Promise.all([
-        dbListRevenueEntries(tid),
-        dbListPaymentMethods(tid),
-      ]);
-      if (cancelled) return;
-      if (entriesRes.source === "db") {
-        setEntries(entriesRes.data || []);
-        setSource("db");
-      }
-      if (methodsRes.data && methodsRes.data.length > 0) {
-        setMethodsState(methodsRes.data.map((m) => ({ id: m.slug, label: m.label, short: m.short_label, color: m.color })));
-      } else if (methodsRes.source === "db") {
-        // Sem métodos cadastrados no tenant — usa default mínimo
-        setMethodsState([
-          { id: "dinheiro", label: "Dinheiro", short: "DIN", color: "#9ca3af" },
-          { id: "debito",   label: "Débito",   short: "DEB", color: "#60a5fa" },
-          { id: "credito",  label: "Crédito",  short: "CRE", color: "#a78bfa" },
-          { id: "pix",      label: "Pix",      short: "PIX", color: "#34d399" },
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id;
+        setTenantId(tid || null);
+        if (!tid) return;
+        const [entriesRes, methodsRes] = await Promise.all([
+          dbListRevenueEntries(tid),
+          dbListPaymentMethods(tid),
         ]);
+        if (cancelled) return;
+        if (entriesRes.source === "db") {
+          setEntries(entriesRes.data || []);
+          setSource("db");
+        }
+        if (methodsRes.data && methodsRes.data.length > 0) {
+          setMethodsState(methodsRes.data.map((m) => ({ id: m.slug, label: m.label, short: m.short_label, color: m.color })));
+        } else if (methodsRes.source === "db") {
+          // Sem métodos cadastrados no tenant — usa default mínimo
+          setMethodsState([
+            { id: "dinheiro", label: "Dinheiro", short: "DIN", color: "#9ca3af" },
+            { id: "debito",   label: "Débito",   short: "DEB", color: "#60a5fa" },
+            { id: "credito",  label: "Crédito",  short: "CRE", color: "#a78bfa" },
+            { id: "pix",      label: "Pix",      short: "PIX", color: "#34d399" },
+          ]);
+        }
+      } finally {
+        if (!cancelled) setPageLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   const ops = MOCK.OPERATIONS.filter((o) => o.id !== "all");
   const methods = methodsState;
@@ -194,6 +200,8 @@ function Revenue({ scope }) {
     setEditing(null);
     window.showToast("Lançamento removido", { tone: "warn" });
   };
+
+  if (pageLoading) return <PageLoading label="Carregando faturamento…" variant="table" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -610,6 +618,8 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
   const [orders,  setOrders]  = useState(initialOrders);
   const [status,  setStatus]  = useState(initial?.status || "confirmed");
   const [confirmDup, setConfirmDup] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   // Se o usuário mudar op/data depois de confirmar, exigir nova confirmação
   useEffect(() => { setConfirmDup(false); }, [op, date]);
   const [methodVals, setMethodVals] = useState(() => {
@@ -690,7 +700,12 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
           <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>⌘ + ↵ para salvar</span>
           <div style={{ display: "flex", gap: 8 }}>
             {onDelete && (
-              <button className="btn" data-variant="danger" data-size="sm" onClick={() => { if (confirm("Excluir este lançamento?")) onDelete(); }}>
+              <button
+                className="btn"
+                data-variant="danger"
+                data-size="sm"
+                onClick={() => setConfirmDelete(true)}
+              >
                 Excluir
               </button>
             )}
@@ -816,6 +831,45 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
           </div>
         </FormRow>
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        tone="danger"
+        title="Excluir lançamento de faturamento?"
+        message={
+          <>
+            Esta ação remove o lançamento de{" "}
+            <strong style={{ color: "var(--fg-0)" }}>
+              {MOCK.opById(op)?.name || op}
+            </strong>{" "}
+            em{" "}
+            <strong style={{ color: "var(--fg-0)" }}>
+              {_isoToBRFull(date)}
+            </strong>
+            {Number(initial?.revenue) > 0 && (
+              <> no valor de <strong style={{ color: "var(--fg-0)" }}>{_fmtBRL(initial.revenue)}</strong></>
+            )}
+            . A exclusão não pode ser desfeita.
+          </>
+        }
+        confirmLabel="Excluir lançamento"
+        cancelLabel="Manter"
+        busy={deleting}
+        onCancel={() => { if (!deleting) setConfirmDelete(false); }}
+        onConfirm={async () => {
+          if (deleting) return;
+          setDeleting(true);
+          try {
+            await onDelete();
+            setConfirmDelete(false);
+          } catch (e) {
+            console.error("[revenue] onDelete threw:", e);
+            window.showToast?.(`Erro ao excluir: ${e?.message || e}`, { tone: "crit", ttl: 5000 });
+          } finally {
+            setDeleting(false);
+          }
+        }}
+      />
 
       {confirmDup && hasDuplicate && (
         <Modal

@@ -4,41 +4,47 @@
 //   Preparos aparecem como insumo disponível em outras fichas e preparos.
 
 function Recipes({ scope }) {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   // ----- Estado das duas coleções
   const [allSheets,       setAllSheets]       = useState(MOCK.TECH_SHEETS);
   const [allPreparations, setAllPreparations] = useState(MOCK.PREPARATIONS);
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource]     = useState("mock");
+  const [pageLoading, setPageLoading] = useState(true);
 
   // Cache de stock items (carregado paralelo às fichas e mantido em window p/ reuso)
   const [stockItems, setStockItems] = useState(window.__stockItemsCache || MOCK.STOCK_ITEMS);
 
   // Carrega fichas + preparos + stock items do DB em paralelo (precarrega o dropdown)
   useEffect(() => {
-    if (!dbStatus.isOnline) return;
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setPageLoading(false); return; }
     let cancelled = false;
     (async () => {
-      const ctx = await dbGetCurrentContext();
-      if (cancelled) return;
-      const tid = ctx?.tenant?.id;
-      setTenantId(tid || null);
-      if (!tid) return;
-      setSource("db"); // Conectado ao Supabase; queries abaixo só podem retornar do DB.
-      const [sheetsRes, prepsRes, stockRes] = await Promise.all([
-        dbListTechSheets(tid),
-        dbListPreparations(tid),
-        dbListStockItems(tid),
-      ]);
-      if (cancelled) return;
-      setAllSheets(sheetsRes.data || []);
-      setAllPreparations(prepsRes.data || []);
-      const items = stockRes.data || [];
-      setStockItems(items);
-      window.__stockItemsCache = items; // cache cross-page
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id;
+        setTenantId(tid || null);
+        if (!tid) return;
+        setSource("db"); // Conectado ao Supabase; queries abaixo só podem retornar do DB.
+        const [sheetsRes, prepsRes, stockRes] = await Promise.all([
+          dbListTechSheets(tid),
+          dbListPreparations(tid),
+          dbListStockItems(tid),
+        ]);
+        if (cancelled) return;
+        setAllSheets(sheetsRes.data || []);
+        setAllPreparations(prepsRes.data || []);
+        const items = stockRes.data || [];
+        setStockItems(items);
+        window.__stockItemsCache = items; // cache cross-page
+      } finally {
+        if (!cancelled) setPageLoading(false);
+      }
     })();
     return () => { cancelled = true; };
-  }, [dbStatus.isOnline]);
+  }, [dbStatus.state, dbStatus.isOnline]);
 
   // ----- Modo: "recipes" (fichas técnicas) | "preparations" (preparos)
   const [mode, setMode] = useState("recipes");
@@ -459,6 +465,8 @@ function Recipes({ scope }) {
 
   const activeOpLabel  = filterOp  === "all" ? "Todas as operações" : MOCK.opById(filterOp).name;
   const activeCatLabel = filterCat === "all" ? "Todas as categorias" : (MOCK.recipeCatById(filterCat)?.label || filterCat);
+
+  if (pageLoading) return <PageLoading label="Carregando fichas técnicas…" variant="table" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -999,6 +1007,8 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
   const [showCatManager, setShowCatManager] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [savingCat, setSavingCat] = useState(false);
+  const [catPendingDelete, setCatPendingDelete] = useState(null);
+  const [deletingCat, setDeletingCat] = useState(false);
 
   const handleCatChange = (e) => setCat(e.target.value);
 
@@ -1024,16 +1034,29 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
     }
   };
 
-  const deleteCat = async (id) => {
-    if (!window.confirm("Excluir esta categoria?")) return;
-    const cli = typeof getSupabaseClient === "function" ? getSupabaseClient() : null;
-    if (tenantId && cli) {
-      const { error } = await cli.from("recipe_categories").delete().eq("id", id);
-      if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit" }); return; }
+  const deleteCat = (id) => {
+    const target = cats.find((c) => c.id === id);
+    if (!target) return;
+    setCatPendingDelete(target);
+  };
+
+  const performDeleteCat = async () => {
+    const target = catPendingDelete;
+    if (!target || deletingCat) return;
+    setDeletingCat(true);
+    try {
+      const cli = typeof getSupabaseClient === "function" ? getSupabaseClient() : null;
+      if (tenantId && cli) {
+        const { error } = await cli.from("recipe_categories").delete().eq("id", target.id);
+        if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit" }); return; }
+      }
+      setCats((prev) => prev.filter((c) => c.id !== target.id));
+      if (cat === target.id) setCat("");
+      window.showToast("Categoria excluída", { tone: "ok" });
+      setCatPendingDelete(null);
+    } finally {
+      setDeletingCat(false);
     }
-    setCats((prev) => prev.filter((c) => c.id !== id));
-    if (cat === id) setCat("");
-    window.showToast("Categoria excluída", { tone: "ok" });
   };
 
   const [op, setOp]       = useState(initial?.op    || defaultOp  || ops[0]?.id || "");
@@ -1225,6 +1248,22 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
           </button>
         </div>
       </form>
+
+      <ConfirmDialog
+        open={!!catPendingDelete}
+        tone="danger"
+        title="Excluir categoria?"
+        message={
+          <>
+            Remover a categoria <strong style={{ color: "var(--fg-0)" }}>{catPendingDelete?.label || catPendingDelete?.name}</strong>. Fichas que estão nela ficarão sem categoria.
+          </>
+        }
+        confirmLabel="Excluir categoria"
+        cancelLabel="Manter"
+        busy={deletingCat}
+        onCancel={() => { if (!deletingCat) setCatPendingDelete(null); }}
+        onConfirm={performDeleteCat}
+      />
     </div>
   );
 }
@@ -1387,6 +1426,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
   const [unitCost, setUnitCost]   = useState("");
   const [cost, setCost]           = useState(initial?.[2] != null ? String(initial[2]).replace(".", ",") : "");
   const [costEdited, setCostEdited] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const onSourceChange = (key) => {
     setSourceKey(key);
@@ -1436,7 +1476,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
           <div>
             {onDelete && (
               <button className="btn" data-variant="danger" data-size="sm"
-                      onClick={() => { if (confirm("Excluir este insumo da ficha?")) onDelete(); }}>
+                      onClick={() => setConfirmDelete(true)}>
                 Excluir
               </button>
             )}
@@ -1519,6 +1559,21 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
           />
         </FormRow>
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        tone="danger"
+        title="Excluir insumo da ficha?"
+        message={
+          <>
+            Remover <strong style={{ color: "var(--fg-0)" }}>{name || "este insumo"}</strong> da ficha técnica. O custo total da receita será recalculado.
+          </>
+        }
+        confirmLabel="Excluir insumo"
+        cancelLabel="Manter"
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => { setConfirmDelete(false); onDelete && onDelete(); }}
+      />
     </Modal>
   );
 }
