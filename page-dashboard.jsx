@@ -2,7 +2,7 @@
 function Dashboard({ scope, setScope, setPage }) {
   const op = MOCK.opById(scope);
   const isConsolidated = scope === "all";
-  const [period, setPeriod] = useState("7d");
+  const [period, setPeriod] = useState("mtd");
   const periodLabel = { "1d": "Hoje", "7d": "Últimos 7 dias", "30d": "Últimos 30 dias", "mtd": "Mês atual" }[period];
   const sess = (typeof useSession === "function") ? useSession() : null;
   const [tenantNameLive, setTenantNameLive] = useState(sess?.tenantName || null);
@@ -34,44 +34,46 @@ function Dashboard({ scope, setScope, setPage }) {
     todayConsumption: [],
     cmvDaily: [],
     requests: [],
+    cmvMovements: [], // saídas (kind=out) do mês até hoje, p/ CMV real por operação
   });
 
-  // Carrega dados do DB
+  // Carrega dados do DB + assina realtime (faturamento/saída atualizam o ranking ao vivo)
   useEffect(() => {
     if (!dbStatus.isOnline) return;
     const sess = (() => { try { return JSON.parse(localStorage.getItem("stockkitchen.session.v1")); } catch { return null; } })();
     const tid = sess?.tenantId;
     if (!tid) return;
 
+    let cancelled = false;
+    let reloadTimer = null;
 
-    const days = period === "1d" ? 1 : period === "7d" ? 7 : period === "30d" ? 30 : 31;
-    const fromDate = new Date(); fromDate.setDate(fromDate.getDate() - days);
-    const fromISO = fromDate.toISOString();
-    const prevFromDate = new Date(); prevFromDate.setDate(prevFromDate.getDate() - days * 2);
-    const prevFromISO = prevFromDate.toISOString();
-    const prevToISO = fromDate.toISOString();
+    const load = async () => {
+      const days = period === "1d" ? 1 : period === "7d" ? 7 : period === "30d" ? 30 : 31;
+      const fromDate = new Date(); fromDate.setDate(fromDate.getDate() - days);
+      const fromISO = fromDate.toISOString();
+      const prevFromDate = new Date(); prevFromDate.setDate(prevFromDate.getDate() - days * 2);
+      const prevFromISO = prevFromDate.toISOString();
+      const prevToISO = fromDate.toISOString();
 
-    // "Hoje" — janela do dia corrente p/ TodayConsumptionCard
-    const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay   = new Date(); endOfDay.setHours(23, 59, 59, 999);
+      const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay   = new Date(); endOfDay.setHours(23, 59, 59, 999);
 
-    // dbListCmvDaily usa business_date (formato YYYY-MM-DD)
-    // CMV por operação sempre olha mês até hoje (independe do filtro de período do dash).
-    const toYMD       = new Date().toISOString().slice(0, 10);
-    const _mtdFirst   = new Date(); _mtdFirst.setDate(1); _mtdFirst.setHours(0, 0, 0, 0);
-    const cmvFromYMD  = _mtdFirst.toISOString().slice(0, 10);
+      const toYMD       = new Date().toISOString().slice(0, 10);
+      const _mtdFirst   = new Date(); _mtdFirst.setDate(1); _mtdFirst.setHours(0, 0, 0, 0);
+      const cmvFromYMD  = _mtdFirst.toISOString().slice(0, 10);
 
-    // dbGetCurrentContext popula window.MOCK.OPERATIONS — sem isso opById(slug) cai no stub "—".
-    Promise.all([
-      dbGetCurrentContext?.(),
-      dbListRevenueEntries(tid, fromISO, null),
-      dbListRevenueEntries(tid, prevFromISO, prevToISO),
-      dbListStockItems(tid),
-      dbListInventories(tid),
-      dbTopConsumedItems(tid, startOfDay.toISOString(), endOfDay.toISOString(), 8),
-      dbListCmvDaily(tid, cmvFromYMD, toYMD),
-      dbListKitchenRequests(tid, { limit: 8 }),
-    ]).then(([, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes]) => {
+      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes] = await Promise.all([
+        dbGetCurrentContext?.(),
+        dbListRevenueEntries(tid, fromISO, null),
+        dbListRevenueEntries(tid, prevFromISO, prevToISO),
+        dbListStockItems(tid),
+        dbListInventories(tid),
+        dbTopConsumedItems(tid, startOfDay.toISOString(), endOfDay.toISOString(), 8),
+        dbListCmvDaily(tid, cmvFromYMD, toYMD),
+        dbListKitchenRequests(tid, { limit: 8 }),
+        dbListStockMovements(tid, _mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 }),
+      ]);
+      if (cancelled) return;
       setDbData({
         revenue:          revRes.data || [],
         revenuePrev:      revPrevRes.data || [],
@@ -80,8 +82,29 @@ function Dashboard({ scope, setScope, setPage }) {
         todayConsumption: consRes.data || [],
         cmvDaily:         cmvRes.data || [],
         requests:         reqRes.data || [],
+        cmvMovements:     movRes.data || [],
       });
-    });
+    };
+
+    // Debounce — várias mudanças em sequência viram um único reload
+    const scheduleReload = () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => { if (!cancelled) load(); }, 400);
+    };
+
+    load();
+
+    const unsubs = [
+      dbSubscribeTable?.("revenue_entries",  tid, scheduleReload),
+      dbSubscribeTable?.("stock_movements",  tid, scheduleReload),
+      dbSubscribeTable?.("goods_receipts",   tid, scheduleReload),
+    ].filter(Boolean);
+
+    return () => {
+      cancelled = true;
+      if (reloadTimer) clearTimeout(reloadTimer);
+      unsubs.forEach((u) => { try { u(); } catch {} });
+    };
   }, [dbStatus.isOnline, period]);
 
   // Computa KPI real a partir de dados do DB ou MOCK
@@ -112,7 +135,7 @@ function Dashboard({ scope, setScope, setPage }) {
 
       {/* KPIs financeiros (linha 1) */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
-        <KpiCard label="Faturamento (7d)" data={(k[scope] || k.all).revenue} accent />
+        <KpiCard label={`Faturamento · ${periodLabel}`} data={(k[scope] || k.all).revenue} accent />
         <KpiCard label="CMV consolidado" data={(k[scope] || k.all).cmv} />
         <KpiCard label="Valor em estoque" data={(k[scope] || k.all).stockValue} />
         <KpiCard label="Alertas estoque" data={(k[scope] || k.all).alerts} onClick={() => setPage("stock")} />
@@ -125,17 +148,22 @@ function Dashboard({ scope, setScope, setPage }) {
           sub={moduleMetrics.inv.lastDate ? `último em ${moduleMetrics.inv.lastDate}` : "sem inventários"}
           tone={moduleMetrics.inv.accuracy >= 95 ? "ok" : moduleMetrics.inv.accuracy >= 90 ? "info" : "warn"}
           onClick={() => setPage("stock")} icon={<I.Box size={11} />} />
-        <ModuleKpi label="Alertas críticos"
+        <ModuleKpi label="Alertas de estoque"
           value={moduleMetrics.alerts.total}
-          sub={`${moduleMetrics.alerts.total} estoque crítico`}
-          tone={moduleMetrics.alerts.total > 0 ? "warn" : "ok"}
+          sub={`${moduleMetrics.alerts.ruptura} ruptura · ${moduleMetrics.alerts.baixo} baixo · ${moduleMetrics.alerts.acimaMax} acima do máx`}
+          tone={moduleMetrics.alerts.ruptura > 0 ? "crit" : moduleMetrics.alerts.total > 0 ? "warn" : "ok"}
           onClick={() => setPage("stock")} icon={<I.AlertTriangle size={11} />} />
       </div>
 
       {/* CMV + Ranking */}
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12 }}>
-        <CmvByOpCard onDrill={(id) => setScope(id)} setPage={setPage} cmvDaily={dbData.cmvDaily} dbOnline={dbStatus.isOnline} />
-        <RankingCard onDrill={(id) => setScope(id)} cmvDaily={dbData.cmvDaily} dbOnline={dbStatus.isOnline} />
+        <CmvByOpCard onDrill={(id) => setScope(id)} setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
+        <RankingCard onDrill={(id) => setScope(id)} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
+      </div>
+
+      {/* Estoque por categoria */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
+        <StockByCategoryCard stock={dbData.stock} onClick={() => setPage("stock")} />
       </div>
 
       {/* Pendências consolidadas + Requisições */}
@@ -264,8 +292,19 @@ function computeDashboardMetrics(scope, period, dbData = {}, dbOnline = false) {
 
   // ===== Alertas consolidados (Stock) — sempre dados reais quando DB online =====
   const stockSource = dbOnline ? (dbData.stock || []) : (MOCK.STOCK_ITEMS || []);
-  const stockCrit = stockSource.filter((i) => (i.qty || 0) < (i.reorder || 0)).length;
-  const alerts = { total: stockCrit };
+  let ruptura = 0, baixo = 0, acimaMax = 0;
+  for (const i of stockSource) {
+    const qty = Number(i.qty) || 0;
+    const reorder = Number(i.reorder) || 0;
+    const max = Number(i.max) || 0;
+    if (qty <= 0) ruptura += 1;
+    else if (reorder > 0 && qty < reorder) baixo += 1;
+    if (max > 0 && qty > max) acimaMax += 1;
+  }
+  const alerts = {
+    total: ruptura + baixo + acimaMax,
+    ruptura, baixo, acimaMax,
+  };
 
   return { inv, alerts };
 }
@@ -299,26 +338,34 @@ function Spark({ accent }) {
   );
 }
 
-function CmvByOpCard({ onDrill, setPage, cmvDaily = [], dbOnline = false }) {
-  // CMV real consolidado por operação (últimos 7 dias) — vem de revenue_entries
-  // (faturamento + COGS já registrados) agrupados por operação.
+function CmvByOpCard({ onDrill, setPage, cmvDaily = [], movements = [], dbOnline = false }) {
+  // CMV real por operação no MTD = COGS (saídas de estoque × custo) ÷ faturamento.
+  // Faturamento vem de cmv_daily; COGS é recalculado aqui a partir de stock_movements
+  // (kind=out) porque revenue_entries.cogs é hoje apenas um placeholder.
   const data = useMemo(() => {
     const m = {};
     for (const row of cmvDaily) {
       if (!row.op) continue;
       if (!m[row.op]) m[row.op] = { op: row.op, revenue: 0, cogs: 0 };
       m[row.op].revenue += row.revenue || 0;
-      m[row.op].cogs    += row.cogs || 0;
+    }
+    for (const mv of movements) {
+      if (mv.kind !== "out") continue;
+      const key = mv.op;
+      if (!key || key === "—") continue;
+      if (!m[key]) m[key] = { op: key, revenue: 0, cogs: 0 };
+      // delta vem positivo no mapping; custo da saída = |qty| × unit_cost
+      m[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
     }
     return Object.values(m)
       .filter((r) => r.revenue > 0)
       .map((r) => {
         const opMeta = MOCK.opById(r.op);
-        const real = (r.cogs / r.revenue) * 100;
+        const real = r.revenue > 0 ? (r.cogs / r.revenue) * 100 : 0;
         return { op: r.op, real, goal: opMeta?.cmvGoal ?? 30, shared: 0 };
       })
       .sort((a, b) => a.real - b.real);
-  }, [cmvDaily]);
+  }, [cmvDaily, movements]);
   const max = 45;
 
   // Faixas absolutas de cor (espelha cmvTone do page-cmv)
@@ -395,28 +442,38 @@ function CmvByOpCard({ onDrill, setPage, cmvDaily = [], dbOnline = false }) {
   );
 }
 
-function RankingCard({ onDrill, cmvDaily = [], dbOnline = false }) {
+function RankingCard({ onDrill, cmvDaily = [], movements = [], dbOnline = false }) {
   const ranking = useMemo(() => {
-    // Agrupa cmvDaily por operação somando revenue+cogs; margem = (rev-cogs)/rev
+    // Margem de contribuição (R$) = faturamento − custo real das saídas de estoque.
+    // revenue_entries.cogs é placeholder (zero); o COGS real vem de stock_movements
+    // (kind=out) ponderado pelo unit_cost — mesmo cálculo do CmvByOpCard.
     const byOp = {};
     for (const row of cmvDaily) {
       if (!row.op) continue;
       if (!byOp[row.op]) byOp[row.op] = { op: row.op, revenue: 0, cogs: 0 };
       byOp[row.op].revenue += row.revenue || 0;
-      byOp[row.op].cogs    += row.cogs || 0;
+    }
+    for (const mv of movements) {
+      if (mv.kind !== "out") continue;
+      const key = mv.op;
+      if (!key || key === "—") continue;
+      if (!byOp[key]) byOp[key] = { op: key, revenue: 0, cogs: 0 };
+      byOp[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
     }
     return Object.values(byOp)
-      .filter((r) => r.revenue > 0)
-      .map((r) => ({ op: r.op, margin: ((r.revenue - r.cogs) / r.revenue) * 100 }))
-      .sort((a, b) => b.margin - a.margin);
-  }, [cmvDaily]);
+      .filter((r) => r.revenue > 0 || r.cogs > 0)
+      .map((r) => ({ op: r.op, contribution: r.revenue - r.cogs }))
+      .sort((a, b) => b.contribution - a.contribution);
+  }, [cmvDaily, movements]);
+
+  const fmtBRL = (v) => `R$ ${Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <div className="card">
       <div className="card-header">
         <div>
-          <h3 className="card-title">Ranking · margem bruta</h3>
-          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Por operação · 100% − CMV real</span>
+          <h3 className="card-title">Ranking · margem de contribuição</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Por operação · receita − CMV real (R$)</span>
         </div>
       </div>
       <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 0 }}>
@@ -427,14 +484,14 @@ function RankingCard({ onDrill, cmvDaily = [], dbOnline = false }) {
         ) : ranking.map((r, i) => {
           const op = MOCK.opById(r.op);
           return (
-            <div key={r.op} style={{ display: "grid", gridTemplateColumns: "20px 1fr 100px", gap: 12, alignItems: "center", padding: "10px 0", borderBottom: i < ranking.length - 1 ? "1px solid var(--line-soft)" : "none", cursor: "pointer" }}
+            <div key={r.op} style={{ display: "grid", gridTemplateColumns: "20px 1fr 140px", gap: 12, alignItems: "center", padding: "10px 0", borderBottom: i < ranking.length - 1 ? "1px solid var(--line-soft)" : "none", cursor: "pointer" }}
                  onClick={() => onDrill(r.op)}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-3)", letterSpacing: "0.04em" }}>0{i + 1}</span>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
                 <span style={{ fontSize: 12.5, color: "var(--fg-0)" }}>{op.name}</span>
               </div>
-              <span className="mono" style={{ fontSize: 14, color: "var(--fg-0)", fontWeight: 500, textAlign: "right" }}>{r.margin.toFixed(1)}%</span>
+              <span className="mono" style={{ fontSize: 14, color: "var(--fg-0)", fontWeight: 500, textAlign: "right" }}>{fmtBRL(r.contribution)}</span>
             </div>
           );
         })}
@@ -511,6 +568,89 @@ function TodayConsumptionCard({ consumption = [], dbOnline = false }) {
   );
 }
 
+function StockByCategoryCard({ stock = [], onClick }) {
+  const data = useMemo(() => {
+    const byCat = {};
+    let totalValue = 0;
+    for (const it of stock) {
+      const v = (Number(it.qty) || 0) * (Number(it.cost) || 0);
+      const k = it.cat || "Sem categoria";
+      byCat[k] = (byCat[k] || 0) + v;
+      totalValue += v;
+    }
+    const arr = Object.entries(byCat).map(([cat, val]) => ({ cat, val })).sort((a, b) => b.val - a.val);
+    return { arr, totalValue, totalItems: stock.length };
+  }, [stock]);
+
+  const top5 = data.arr.slice(0, 5);
+  const max = top5[0]?.val || 1;
+  const palette = ["var(--ok)", "var(--crit)", "var(--fg-3)", "var(--accent-bright)", "var(--warn)"];
+
+  const fmtBRL = (v) => `R$ ${(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const valStr = data.totalValue.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const [intPart, decPart] = valStr.split(",");
+
+  return (
+    <div className="card" style={{ cursor: onClick ? "pointer" : "default" }} onClick={onClick}>
+      <div className="card-header" style={{ alignItems: "flex-start" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <I.Stock size={14} style={{ color: "var(--fg-2)" }} />
+          <div>
+            <h3 className="card-title" style={{ marginBottom: 2 }}>Produtos em estoque</h3>
+            <div style={{ fontSize: 11, color: "var(--fg-3)" }}>Visão geral e principais categorias</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "12px 16px 4px", display: "grid", gridTemplateColumns: "2fr 1fr", gap: 18, alignItems: "flex-end" }}>
+        <div>
+          <div className="h-eyebrow" style={{ marginBottom: 4 }}>Valor em estoque total</div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+            <span style={{ fontSize: 16, color: "var(--fg-2)", fontFamily: "var(--mono)" }}>R$</span>
+            <span className="mono" style={{ fontSize: 38, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.025em", lineHeight: 1 }}>
+              {intPart}
+            </span>
+            <span className="mono" style={{ fontSize: 18, color: "var(--fg-2)" }}>,{decPart}</span>
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div className="h-eyebrow" style={{ marginBottom: 4 }}>Produtos cadastrados</div>
+          <div className="mono" style={{ fontSize: 28, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em" }}>
+            {data.totalItems}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "14px 16px 6px", display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--fg-2)" }}>
+        <I.ArrowUp size={11} style={{ color: "var(--ok)" }} />
+        Valor em estoque por categoria (Top 5)
+      </div>
+
+      <div style={{ padding: "8px 16px 18px", display: "grid", gridTemplateColumns: `repeat(${Math.max(top5.length, 1)}, 1fr)`, gap: 14, alignItems: "end", minHeight: 200 }}>
+        {top5.length === 0 ? (
+          <div style={{ textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>Sem itens cadastrados.</div>
+        ) : top5.map((g, i) => {
+          const h = max > 0 ? Math.max(8, (g.val / max) * 160) : 8;
+          return (
+            <div key={g.cat} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+              <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-1)", whiteSpace: "nowrap" }}>{fmtBRL(g.val)}</span>
+              <div style={{
+                width: "100%", maxWidth: 96, height: h,
+                background: palette[i % palette.length],
+                borderRadius: "3px 3px 0 0",
+                transition: "height 200ms",
+              }} />
+              <span style={{ fontSize: 11, color: "var(--fg-2)", textAlign: "center", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "100%" }} title={g.cat}>
+                {g.cat}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function RecentRequestsCard({ setPage, requests = [], dbOnline = false }) {
   const recent = (dbOnline ? requests : MOCK.REQUESTS).slice(0, 5);
   const statusMap = {
@@ -549,11 +689,18 @@ function RecentRequestsCard({ setPage, requests = [], dbOnline = false }) {
                 return s;
               }, 0);
           const total = rawTotal > 0 ? fmtBRL(rawTotal) : (typeof r.total === "string" ? r.total : fmtBRL(0));
-          // Horário: tenta r.at (string HH:mm já formatada do mapping) ou deriva de r.requestedAt
-          let timeLabel = r.at || "";
-          if (!timeLabel && r.requestedAt) {
-            try { timeLabel = new Date(r.requestedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }); } catch {}
+          // Horário: data + hora · sempre visível
+          let timeLabel = "";
+          if (r.requestedAt) {
+            try {
+              const d = new Date(r.requestedAt);
+              const dd = String(d.getDate()).padStart(2, "0");
+              const mm = String(d.getMonth() + 1).padStart(2, "0");
+              const hhmm = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+              timeLabel = `${dd}/${mm} · ${hhmm}`;
+            } catch {}
           }
+          if (!timeLabel && r.at) timeLabel = r.at;
           return (
             <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: i < recent.length - 1 ? "1px solid var(--line-soft)" : "none" }}>
               <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", width: 72, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(code).slice(0, 8)}</span>

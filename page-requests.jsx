@@ -98,9 +98,8 @@ function Requests({ scope }) {
 
     if (next === "delivered") {
       // Baixa automática do estoque · cada item da requisição vira saída.
-      // Quando online, persiste em stock_movements via dbApplyStockMovement.
-      // Itens novos têm stock_item_id (3º elemento) — lookup exato. Itens
-      // legados (só name + qty) caem pro match por nome como fallback.
+      // Quando online, a baixa já foi feita pelo DB trigger durante o passo "separated".
+      // O frontend só atualiza qty localmente para refletir na UI.
       let moved = 0, missed = 0;
       const missedNames = [];
       const dbOn = source === "db" && tenantId;
@@ -111,15 +110,14 @@ function Requests({ scope }) {
         let stockItem = stockId ? stockItems.find((s) => s.id === stockId) : null;
         if (!stockItem) stockItem = findStockItemByName(name, stockItems);
         if (!stockItem) { missed++; missedNames.push(name); continue; }
-        if (dbOn) {
-          const { error } = await dbApplyStockMovement(tenantId, stockItem.id, -qty, "out", `req:${id}`);
-          if (error) { missed++; missedNames.push(name); continue; }
+        // No modo MOCK, aplica a saída direto; no modo DB o trigger já fez isso.
+        if (!dbOn) {
+          applyStockMovement(stockItem, -qty);
         }
-        applyStockMovement(stockItem, -qty);
         moved++;
       }
       if (dbOn) {
-        // Re-fetch p/ atualizar qty exibidas nos pickers
+        // Re-fetch p/ atualizar qty exibidas nos pickers (refletindo o que o trigger fez)
         const { data } = await dbListStockItems(tenantId);
         if (data) setStockItems(data);
       }
@@ -263,7 +261,17 @@ function Requests({ scope }) {
         <div style={{ flex: 1, padding: "0 28px 24px", overflow: "auto" }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, height: "100%" }}>
             {cols.map((col) => {
-              const colItems = filtered.filter((r) => r.status === col.id);
+              const todayStr = new Date().toDateString();
+              const colItems = filtered.filter((r) => {
+                if (r.status !== col.id) return false;
+                // Coluna "Entregue" mostra apenas as do dia corrente
+                if (col.id === "delivered") {
+                  const t = r.requestedAt || r.deliveredAt;
+                  if (!t) return false;
+                  return new Date(t).toDateString() === todayStr;
+                }
+                return true;
+              });
               return (
                 <div key={col.id} style={{ display: "flex", flexDirection: "column", background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden", minHeight: 200 }}>
                   <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line-soft)", display: "flex", flexDirection: "column", gap: 4 }}>
@@ -297,7 +305,6 @@ function Requests({ scope }) {
           <table className="table">
             <thead>
               <tr>
-                <th style={{ width: 80 }}>ID</th>
                 <th>Operação</th>
                 <th>Solicitante</th>
                 <th className="num">Itens</th>
@@ -313,15 +320,15 @@ function Requests({ scope }) {
                 const tone = r.status === "pending" ? "warn" : r.status === "delivered" ? "ok" : "info";
                 const lbl = { pending: "Pendente", separated: "Separada", delivered: "Entregue" }[r.status];
                 return (
-                  <tr key={r.id}>
-                    <td className="mono" style={{ color: "var(--fg-3)", fontSize: 10.5 }}>{r.id}</td>
+                  <tr key={r.id} onClick={() => setEditingReq(r)} style={{ cursor: "pointer" }}
+                      title="Clique para abrir os detalhes da requisição">
                     <td><span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />{op.name}</span></td>
                     <td className="dim">{r.by}</td>
                     <td className="num">{r.itemsCount}</td>
                     <td className="num">{r.total}</td>
                     <td className="dim mono" style={{ fontSize: 11 }}>{r.age}</td>
                     <td><span className="badge" data-tone={tone}>{lbl}</span></td>
-                    <td>
+                    <td onClick={(e) => e.stopPropagation()}>
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                         {r.status === "pending" && (
                           <>
@@ -578,7 +585,6 @@ function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint }) {
         <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
         <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-0)" }}>{op.name}</span>
         <span style={{ flex: 1 }} />
-        <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)" }}>{r.id}</span>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         {r.items.slice(0, 3).map((it, i) => (
@@ -1091,15 +1097,36 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
   const splitMode = op === SHARED;
   const [splits, setSplits] = useState({}); // { opId: pct }
 
-  // Faturamento por operação (somente lançamentos confirmados) — usado p/ rateio proporcional
+  // Faturamento por operação (somente confirmados) · usado p/ rateio proporcional.
+  // Quando online, busca do Supabase; offline, cai no MOCK.
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const [dbRevenueEntries, setDbRevenueEntries] = useState(null);
+  useEffect(() => {
+    if (!dbStatus.isOnline) { setDbRevenueEntries(null); return; }
+    let cancelled = false;
+    (async () => {
+      const ctx = await dbGetCurrentContext?.();
+      const tid = ctx?.tenant?.id;
+      if (!tid) return;
+      const { data } = await dbListRevenueEntries(tid);
+      if (!cancelled && data) setDbRevenueEntries(data);
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline]);
+
   const revenueByOp = useMemo(() => {
     const r = {};
-    MOCK.REVENUE_ENTRIES.forEach((e) => {
+    const source = dbRevenueEntries || MOCK.REVENUE_ENTRIES || [];
+    // MOCK.OPERATIONS usa id=UUID quando vem do Supabase; e.op é slug, e.operationId é UUID.
+    // Indexa o resultado pelas duas chaves para casar com qualquer formato.
+    source.forEach((e) => {
       if (e.status !== "confirmed") return;
-      r[e.op] = (r[e.op] || 0) + (e.revenue || 0);
+      const rev = e.revenue || 0;
+      if (e.op)          r[e.op]          = (r[e.op]          || 0) + rev;
+      if (e.operationId) r[e.operationId] = (r[e.operationId] || 0) + rev;
     });
     return r;
-  }, []);
+  }, [dbRevenueEntries]);
 
   // Distribui 100% entre os ids segundo um peso (qualquer função peso → número >= 0)
   const distributeBy = (ids, weightFn) => {
@@ -1150,6 +1177,7 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
 
   // Quando muda para "Uso compartilhado", inicia o rateio proporcional ao faturamento.
   // Quando muda para uma operação específica, limpa o rateio.
+  // Recompõe quando o faturamento do DB chegar (assíncrono).
   useEffect(() => {
     if (op === SHARED) {
       const allIds = ops.map((o) => o.id);
@@ -1162,7 +1190,7 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
     } else {
       setSplits({});
     }
-  }, [op]);
+  }, [op, revenueByOp]);
 
   const toggleSplitOp = (opId) => {
     setSplits((cur) => {

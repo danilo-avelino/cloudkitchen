@@ -13,7 +13,6 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    // Extract and verify caller's JWT
     const authHeader = req.headers.get("Authorization") || "";
     const token = authHeader.replace("Bearer ", "");
     if (!token) {
@@ -26,12 +25,14 @@ serve(async (req) => {
       return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: corsHeaders });
     }
 
-    const { tenantId, email, role, ops } = await req.json();
-    if (!tenantId || !email || !role) {
-      return new Response(JSON.stringify({ error: "tenantId, email, role required" }), { status: 400, headers: corsHeaders });
+    const { tenantId, email, password, role, ops, modules, name } = await req.json();
+    if (!tenantId || !email || !role || !password) {
+      return new Response(JSON.stringify({ error: "tenantId, email, password, role required" }), { status: 400, headers: corsHeaders });
+    }
+    if (typeof password !== "string" || password.length < 6) {
+      return new Response(JSON.stringify({ error: "Senha precisa ter pelo menos 6 caracteres" }), { status: 400, headers: corsHeaders });
     }
 
-    // Verify caller is owner/admin of this tenant
     const { data: member } = await callerClient
       .from("tenant_members")
       .select("role")
@@ -45,21 +46,66 @@ serve(async (req) => {
 
     const admin = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
-    // Invite user
-    const { data: invite, error } = await admin.auth.admin.inviteUserByEmail(email, {
-      data: { tenantId, role },
+    // Try to create user with password (already confirmed, no email needed)
+    let userId: string | null = null;
+    const { data: created, error: createErr } = await admin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { tenantId, role, full_name: name || null, name: name || null },
     });
-    if (error) {
-      return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: corsHeaders });
+
+    if (createErr) {
+      // If user already exists, look them up and reset their password
+      const msg = String(createErr.message || "").toLowerCase();
+      if (msg.includes("already") || msg.includes("registered") || msg.includes("exists")) {
+        const { data: list, error: listErr } = await admin.auth.admin.listUsers({ page: 1, perPage: 200 });
+        if (listErr) {
+          return new Response(JSON.stringify({ error: listErr.message }), { status: 500, headers: corsHeaders });
+        }
+        const existing = list?.users?.find((u: any) => (u.email || "").toLowerCase() === email.toLowerCase());
+        if (!existing) {
+          return new Response(JSON.stringify({ error: createErr.message }), { status: 500, headers: corsHeaders });
+        }
+        userId = existing.id;
+        await admin.auth.admin.updateUserById(existing.id, { password, email_confirm: true });
+      } else {
+        return new Response(JSON.stringify({ error: createErr.message }), { status: 500, headers: corsHeaders });
+      }
+    } else {
+      userId = created.user.id;
     }
 
-    // Insert tenant_members row
-    await admin.from("tenant_members").upsert(
-      { tenant_id: tenantId, user_id: invite.user.id, role, ops: ops || [] },
+    if (!userId) {
+      return new Response(JSON.stringify({ error: "Falha ao obter user id" }), { status: 500, headers: corsHeaders });
+    }
+
+    const memberRow: Record<string, unknown> = {
+      tenant_id: tenantId, user_id: userId, role, ops: ops || [],
+    };
+    if (Array.isArray(modules)) memberRow.modules = modules;
+    let { error: upsertErr } = await admin.from("tenant_members").upsert(
+      memberRow,
       { onConflict: "tenant_id,user_id" }
     );
+    // Fallback: migration de modules ainda não aplicada
+    if (upsertErr && /modules/i.test(String(upsertErr.message || ""))) {
+      const { modules: _drop, ...basic } = memberRow as any;
+      ({ error: upsertErr } = await admin.from("tenant_members").upsert(
+        basic, { onConflict: "tenant_id,user_id" }
+      ));
+    }
+    if (upsertErr) {
+      return new Response(JSON.stringify({ error: upsertErr.message }), { status: 500, headers: corsHeaders });
+    }
 
-    return new Response(JSON.stringify({ userId: invite.user.id }), { status: 201, headers: corsHeaders });
+    // Garante full_name em profiles (trigger só preenche no INSERT inicial e
+    // pode ter feito fallback pro email quando o user já existia).
+    if (name && typeof name === "string" && name.trim()) {
+      await admin.from("profiles").update({ full_name: name.trim() }).eq("id", userId);
+    }
+
+    return new Response(JSON.stringify({ userId, email }), { status: 201, headers: corsHeaders });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500, headers: corsHeaders });
   }

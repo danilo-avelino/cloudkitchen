@@ -28,9 +28,11 @@ function LoginPage({ onLogin }) {
         const user = {
           email: cleanEmail,
           name:  ctx?.profile?.full_name || mockUser?.name || cleanEmail.split("@")[0],
-          role:  mockUser?.role || ctx?.member?.role || "viewer",
+          role:  ctx?.member?.role || mockUser?.role || "viewer",
           tenantId: ctx?.tenant?.id || mockUser?.tenantId || null,
           tenantName: ctx?.tenant?.name || mockUser?.tenantName || null,
+          ops: ctx?.member?.ops || [],
+          modules: Array.isArray(ctx?.member?.modules) ? ctx.member.modules : null,
           avatar: mockUser?.avatar || (ctx?.profile?.full_name || "?").split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase(),
           authSource: "supabase",
         };

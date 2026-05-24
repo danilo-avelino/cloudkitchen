@@ -5,6 +5,25 @@
 const _fmtBRL      = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const _fmtBRLShort = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const _isoToBR     = (iso) => { if (!iso) return "—"; const [y, m, d] = iso.split("-"); return `${d}/${m}`; };
+const _isoToBRFull = (iso) => {
+  if (!iso) return "";
+  const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso);
+};
+const _brToISO = (br) => {
+  const m = String(br || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const [_, d, mo, y] = m;
+  const dt = new Date(`${y}-${mo}-${d}T12:00:00`);
+  if (isNaN(dt.getTime())) return null;
+  return `${y}-${mo}-${d}`;
+};
+const _maskBRDate = (raw) => {
+  const digits = String(raw || "").replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+};
 const _todayISO    = () => {
   const d = new Date();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -110,18 +129,27 @@ function Revenue({ scope }) {
   const upsert = async (draft) => {
     const revenue = methods.reduce((s, m) => s + (Number(draft.methods[m.id]) || 0), 0);
     const orders  = Number(draft.orders) || 0;
-    const cogs    = revenue * 0.31; // estimativa via fichas técnicas (até integrar com backend)
+    // COGS real é calculado pelo backend a partir das saídas de estoque do período;
+    // gravar revenue*0.31 aqui mascarava o CMV real (todas operações virando 31%).
+    const cogs    = 0;
 
     // DB path
     if (source === "db" && tenantId) {
       const isUpdate = draft.id && entries.find((e) => e.id === draft.id);
       if (isUpdate) {
         const { error } = await dbUpdateRevenueEntry(draft.id, {
-          cogs, ordersCount: orders, status: draft.status,
+          cogs,
+          ordersCount: orders,
+          status:      draft.status,
+          date:        draft.date,
+          source:      draft.source,
+          notes:       draft.notes,
+          breakdown:   draft.methods,
         });
         if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
-        // Para alterar breakdown, hoje deletamos+recriamos o entry — simplificação
-        setEntries(entries.map((e) => e.id === draft.id ? { ...e, ordersCount: orders, cogs, revenue, breakdown: draft.methods } : e));
+        // Recarrega do banco para garantir consistência (breakdown, totais, etc.)
+        const { data: refreshed } = await dbListRevenueEntries(tenantId);
+        if (refreshed) setEntries(refreshed);
         window.showToast(`Lançamento ${_isoToBR(draft.date)} atualizado no Supabase`, { tone: "ok" });
       } else {
         const { data, error } = await dbInsertRevenueEntry(tenantId, {
@@ -208,7 +236,6 @@ function Revenue({ scope }) {
             {yearsAvailable.map((y) => <option key={y} value={y}>{y}</option>)}
           </select>
           <RevenueViewTabs value={view} onChange={setView} />
-          <button className="btn" data-size="sm" onClick={() => notImplemented("Importação iFood")}>Importar iFood</button>
           <button className="btn" data-variant="primary" data-size="sm" onClick={() => setCreating(true)}>
             <I.Plus size={13} />Lançar venda
           </button>
@@ -259,6 +286,7 @@ function Revenue({ scope }) {
           initial={editing}
           methods={methods}
           ops={ops}
+          entries={entries}
           defaultOp={!editing && scope !== "all" ? scope : null}
           onClose={() => { setCreating(false); setEditing(null); }}
           onSave={upsert}
@@ -573,24 +601,37 @@ function FlatView({ entries, methods, onEdit }) {
 }
 
 // ===== Modal de criação/edição =====
-function RevenueModal({ initial, methods, ops, defaultOp, onClose, onSave, onDelete }) {
+function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose, onSave, onDelete }) {
+  // Aceita tanto MOCK (orders, methods) quanto DB-mapped (ordersCount, breakdown)
+  const initialOrders = initial?.orders ?? initial?.ordersCount ?? "";
+  const initialMethods = initial?.methods ?? initial?.breakdown ?? null;
   const [op,      setOp]      = useState(initial?.op     || defaultOp || ops[0]?.id || "");
   const [date,    setDate]    = useState(initial?.date   || _todayISO());
-  const [orders,  setOrders]  = useState(initial?.orders ?? "");
+  const [orders,  setOrders]  = useState(initialOrders);
   const [status,  setStatus]  = useState(initial?.status || "confirmed");
+  const [confirmDup, setConfirmDup] = useState(false);
+  // Se o usuário mudar op/data depois de confirmar, exigir nova confirmação
+  useEffect(() => { setConfirmDup(false); }, [op, date]);
   const [methodVals, setMethodVals] = useState(() => {
     const init = {};
-    methods.forEach((m) => { init[m.id] = initial?.methods?.[m.id] ?? ""; });
+    methods.forEach((m) => { init[m.id] = initialMethods?.[m.id] ?? ""; });
     return init;
   });
 
   const setMethodValue = (id, raw) => setMethodVals((cur) => ({ ...cur, [id]: raw }));
 
   const total = methods.reduce((s, m) => s + _parseNum(methodVals[m.id]), 0);
-  // Total de pedidos é opcional: vazio vira 0 (usado só p/ ticket médio).
-  const ordersNum = orders === "" ? 0 : Number(orders);
-  const validOrders = Number.isFinite(ordersNum) && ordersNum >= 0;
+  // Total de pedidos é obrigatório para lançar o faturamento.
+  const ordersNum = orders === "" ? NaN : Number(orders);
+  const validOrders = Number.isFinite(ordersNum) && ordersNum > 0;
   const valid = op && date && validOrders && total > 0;
+  const ordersError = !validOrders;
+
+  // Detecta lançamento já existente para mesma operação × data (ignora o próprio em edição)
+  const duplicates = entries.filter((e) =>
+    e.op === op && e.date === date && (!initial || e.id !== initial.id)
+  );
+  const hasDuplicate = duplicates.length > 0;
 
   const submit = async () => {
     console.log("[revenue] submit clicked · valid =", valid, { op, date, ordersNum, total, methodVals });
@@ -601,6 +642,10 @@ function RevenueModal({ initial, methods, ops, defaultOp, onClose, onSave, onDel
       if (!validOrders) reasons.push("total de pedidos");
       if (!(total > 0)) reasons.push("ao menos 1 método > 0");
       window.showToast?.(`Faltam campos: ${reasons.join(", ")}`, { tone: "warn", ttl: 4000 });
+      return;
+    }
+    if (hasDuplicate && !confirmDup) {
+      setConfirmDup(true);
       return;
     }
     const cleanMethods = {};
@@ -672,18 +717,34 @@ function RevenueModal({ initial, methods, ops, defaultOp, onClose, onSave, onDel
             </div>
           )}
         </FormRow>
-        <FormRow label="Data">
-          <input className="input mono" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <FormRow label="Data" hint="dd/mm/aaaa">
+          <input
+            className="input mono"
+            type="text"
+            inputMode="numeric"
+            placeholder="dd/mm/aaaa"
+            maxLength={10}
+            value={_isoToBRFull(date)}
+            onChange={(e) => {
+              const masked = _maskBRDate(e.target.value);
+              const iso = _brToISO(masked);
+              setDate(iso || masked);
+            }}
+          />
         </FormRow>
-        <FormRow label="Total de pedidos">
+        <FormRow label="Total de pedidos" hint={ordersError ? "Obrigatório · informe ao menos 1 pedido" : null}>
           <input
             className="input mono"
             type="number"
-            min="0"
+            min="1"
             inputMode="numeric"
             value={orders}
             onChange={(e) => setOrders(e.target.value)}
             placeholder="0"
+            style={ordersError ? {
+              borderColor: "var(--crit)",
+              boxShadow: "0 0 0 1px var(--crit-line) inset",
+            } : null}
           />
         </FormRow>
       </div>
@@ -755,6 +816,49 @@ function RevenueModal({ initial, methods, ops, defaultOp, onClose, onSave, onDel
           </div>
         </FormRow>
       </div>
+
+      {confirmDup && hasDuplicate && (
+        <Modal
+          title="Já existe um lançamento"
+          subtitle={`${MOCK.opById(op)?.name || op} · ${_isoToBRFull(date)}`}
+          width={460}
+          onClose={() => setConfirmDup(false)}
+          footer={<>
+            <button className="btn" data-size="sm" onClick={() => setConfirmDup(false)}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={submit}>
+              Adicionar mesmo assim
+            </button>
+          </>}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 13, color: "var(--fg-1)", lineHeight: 1.5 }}>
+              Já existe{duplicates.length > 1 ? "m" : ""} <strong style={{ color: "var(--fg-0)" }}>{duplicates.length}</strong> lançamento{duplicates.length > 1 ? "s" : ""} desta operação nesta data:
+            </div>
+            <div style={{
+              background: "var(--bg-2)", border: "1px solid var(--line)",
+              borderRadius: 4, padding: "8px 10px", display: "flex",
+              flexDirection: "column", gap: 6, fontSize: 12,
+            }}>
+              {duplicates.map((d) => (
+                <div key={d.id} style={{ display: "flex", justifyContent: "space-between", color: "var(--fg-1)" }}>
+                  <span className="mono" style={{ color: "var(--fg-3)" }}>#{d.id}</span>
+                  <span>{(d.orders || 0)} pedidos</span>
+                  <span className="mono">{_fmtBRL(d.revenue || 0)}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{
+              padding: "10px 12px", background: "var(--warn-soft)",
+              border: "1px solid var(--warn-line)", borderRadius: 4,
+              display: "flex", alignItems: "center", gap: 10,
+              fontSize: 11.5, color: "var(--warn)",
+            }}>
+              <I.AlertTriangle size={12} />
+              <span>Deseja realmente adicionar <strong>outro</strong> faturamento para o mesmo dia/operação?</span>
+            </div>
+          </div>
+        </Modal>
+      )}
     </Modal>
   );
 }

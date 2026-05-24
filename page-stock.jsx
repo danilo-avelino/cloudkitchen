@@ -25,6 +25,7 @@ function Stock({ scope }) {
   const [showEntry, setShowEntry] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [showAssistant, setShowAssistant] = useState(false);
   const [editingItem, setEditingItem] = useState(null); // insumo sendo editado
 
   // Carrega tenant + items + categorias do DB quando online
@@ -121,12 +122,21 @@ function Stock({ scope }) {
   };
 
   // ===== Categorias · CRUD =====
-  const createCategory = (name) => {
+  const createCategory = async (name) => {
     const v = String(name || "").trim();
     if (!v) return;
     if (allCats.includes(v)) {
       window.showToast(`Categoria "${v}" já existe`, { tone: "warn" });
       return;
+    }
+    // Persiste no DB se online
+    if (source === "db" && tenantId && typeof dbInsertStockCategory === "function") {
+      const { data, error } = await dbInsertStockCategory(tenantId, v);
+      if (error) {
+        window.showToast(`Erro ao criar: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+      if (data) setDbCategories((prev) => [...prev, data]);
     }
     setCategories((prev) => [...prev, v].sort());
     window.showToast(`Categoria "${v}" criada`, { tone: "ok" });
@@ -149,11 +159,24 @@ function Stock({ scope }) {
     );
   };
 
-  const deleteCategory = (name) => {
+  const deleteCategory = async (name) => {
     const inUse = items.some((it) => it.cat === name);
     if (inUse) {
       window.showToast(`Há insumos em "${name}" · migre-os antes de excluir`, { tone: "warn", ttl: 4500 });
       return;
+    }
+    if (!window.confirm(`Excluir a categoria "${name}"?\n\nEssa ação não pode ser desfeita.`)) return;
+    // Persiste no DB se a categoria existir lá
+    if (source === "db" && typeof dbDeleteStockCategory === "function") {
+      const dbCat = dbCategories.find((c) => c.name === name);
+      if (dbCat?.id) {
+        const { error } = await dbDeleteStockCategory(dbCat.id);
+        if (error) {
+          window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+          return;
+        }
+        setDbCategories((prev) => prev.filter((c) => c.id !== dbCat.id));
+      }
     }
     setCategories((prev) => prev.filter((c) => c !== name));
     window.showToast(`Categoria "${name}" excluída`, { tone: "warn" });
@@ -296,16 +319,46 @@ function Stock({ scope }) {
           setDbCategories((prev) => [...prev, newCat]);
         }
       }
+      // Resolve supplierId pelo nome (cria fornecedor se necessário)
+      let supId = draft.supplierId;
+      if (!supId && draft.supplier && draft.supplier.trim()) {
+        const cli = typeof getSupabaseClient === "function" ? getSupabaseClient() : null;
+        if (!cli || !tenantId) {
+          console.warn("[supplier] sem cliente ou tenantId · cli=", !!cli, "tenantId=", tenantId);
+        } else {
+          const { data: existing, error: lookErr } = await cli.from("suppliers")
+            .select("id").eq("tenant_id", tenantId).eq("name", draft.supplier.trim()).maybeSingle();
+          if (lookErr) console.warn("[supplier] erro lookup:", lookErr);
+          if (existing) {
+            supId = existing.id;
+          } else {
+            const { data: created, error: insErr } = await cli.from("suppliers")
+              .insert({ tenant_id: tenantId, name: draft.supplier.trim(), is_active: true })
+              .select("id").single();
+            if (insErr) {
+              console.warn("[supplier] erro insert:", insErr);
+              window.showToast(`Erro ao criar fornecedor: ${insErr.message}`, { tone: "crit" });
+            }
+            supId = created?.id;
+          }
+        }
+      }
+      console.log("[handleEditItem] supplierId final:", supId, "draft.supplier:", draft.supplier);
+      console.log("[handleEditItem] enviando dbUpdateStockItem · draft=", draft, "catId=", catId, "supId=", supId);
       const { data, error } = await dbUpdateStockItem(id, {
         name: draft.name, unit: draft.unit, cost: draft.cost,
         reorder: draft.min, max: draft.max,
+        ...(draft.qty !== undefined ? { qty: draft.qty } : {}),
         exp: draft.exp, catId,
-        supplierId: draft.supplierId || null,
+        supplierId: supId || null,
+        composeCmv: draft.composeCmv,
       });
       if (error) {
-        window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 });
+        console.error("[handleEditItem] erro:", error);
+        window.showToast(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 6000 });
         return;
       }
+      console.log("[handleEditItem] sucesso · data=", data);
       setItems((prev) => prev.map((it) => it.id === id ? data : it));
       setEditingItem(null);
       window.showToast(`Insumo atualizado no Supabase`, { tone: "ok" });
@@ -324,6 +377,7 @@ function Stock({ scope }) {
         cost: draft.cost,
         reorder: draft.min,
         max: draft.max,
+        ...(draft.qty !== undefined ? { qty: draft.qty } : {}),
         exp: draft.exp || it.exp,
         supplier:   supplierName,
         supplierId: draft.supplierId || null,
@@ -384,6 +438,10 @@ function Stock({ scope }) {
           <h1 className="h-title">Estoque</h1>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn" data-size="sm" onClick={() => setShowAssistant(true)}
+                  title="Revisar item a item os que estão sem configuração">
+            ✨ Assistente de estoque
+          </button>
           <button className="btn" data-size="sm" onClick={() => setShowHistory(true)}>Histórico</button>
           <button className="btn" data-size="sm" onClick={() => setShowEntry(true)}>
             <I.Plus size={13} />Entrada manual
@@ -444,9 +502,9 @@ function Stock({ scope }) {
           <table className="table" data-density="compact">
             <thead>
               <tr>
-                <th style={{ width: 90 }}>ID</th>
                 <th>Insumo</th>
                 <th>Categoria</th>
+                <th>Fornecedor</th>
                 <th>Status</th>
                 <th className="num">Qtd</th>
                 <th className="num">Custo médio</th>
@@ -463,9 +521,11 @@ function Stock({ scope }) {
                 const isSelected = selected?.id === it.id;
                 return (
                   <tr key={it.id} onClick={() => setSelected(it)} style={{ cursor: "pointer", background: isSelected ? "var(--bg-hover)" : null }}>
-                    <td className="mono" style={{ color: "var(--fg-3)", fontSize: 10.5 }}>{it.id}</td>
                     <td className="row-strong">{it.name}</td>
                     <td className="dim">{it.cat}</td>
+                    <td className="dim" style={{ fontSize: 11.5 }}>
+                      {it.supplier || <span style={{ color: "var(--fg-4)" }}>—</span>}
+                    </td>
                     <td><span className="badge" data-tone={tone}>{lbl}</span></td>
                     <td className="num" style={{ color: it.qty === 0 ? "var(--crit)" : null }}>{it.qty} {it.unit}</td>
                     <td className="num">R$ {it.cost.toFixed(2)}</td>
@@ -498,6 +558,16 @@ function Stock({ scope }) {
       {showEntry  && <StockEntryModal items={items} onClose={() => setShowEntry(false)} onSave={handleEntry} />}
       {showHistory && <StockHistoryModal onClose={() => setShowHistory(false)} />}
       {showCreate && <NewStockItemModal items={items} categories={allCats} suppliers={suppliers} onClose={() => setShowCreate(false)} onSave={handleCreateItem} />}
+      {showAssistant && (
+        <StockAssistantModal
+          items={items}
+          categories={allCats}
+          suppliers={suppliers}
+          tenantId={tenantId}
+          onClose={() => setShowAssistant(false)}
+          onSaveItem={handleEditItem}
+        />
+      )}
       {editingItem && (
         <NewStockItemModal
           items={items}
@@ -526,24 +596,38 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
   const [cat,  setCat]  = useState(initial?.cat  ?? (existingCats[0] || "Outro"));
   const [unit, setUnit] = useState(initial?.unit ?? "kg");
   const [cost, setCost] = useState(initial?.cost != null ? String(initial.cost) : "");
-  const [qty,  setQty]  = useState("0"); // só usado em modo criação
+  const [qty,  setQty]  = useState(initial?.qty != null ? String(initial.qty) : "0");
   const [min,  setMin]  = useState(initial?.reorder != null ? String(initial.reorder) : "");
   const [max,  setMax]  = useState(initial?.max     != null ? String(initial.max)     : "");
   const [exp,  setExp]  = useState(initial?.exp && initial.exp !== "—" ? initial.exp : "");
   const [supplierId, setSupplierId] = useState(initial?.supplierId ?? "");
+  const [composeCmv, setComposeCmv] = useState(initial?.composeCmv !== false);
   const [saving, setSaving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  const minN  = parseFloat(String(min).replace(",", "."));
-  const maxN  = parseFloat(String(max).replace(",", "."));
-  const valid = name.trim()
-    && cat.trim()
-    && unit.trim()
-    && Number.isFinite(minN) && minN >= 0
-    && Number.isFinite(maxN) && maxN > minN;
+  // Min/max opcionais · vazios viram 0
+  const minN  = Number.isFinite(parseFloat(String(min).replace(",", "."))) ? parseFloat(String(min).replace(",", ".")) : 0;
+  const maxN  = Number.isFinite(parseFloat(String(max).replace(",", "."))) ? parseFloat(String(max).replace(",", ".")) : 0;
+  // Validação granular por campo (para feedback visual)
+  const errs = {
+    name: !name.trim(),
+    cat:  !cat.trim(),
+    unit: !unit.trim(),
+    min:  minN < 0,
+    max:  maxN < 0 || (maxN > 0 && minN > 0 && maxN < minN),
+  };
+  const valid = !errs.name && !errs.cat && !errs.unit && !errs.min && !errs.max;
+  const errorMessages = [
+    errs.name && "Nome do insumo obrigatório",
+    errs.cat  && "Categoria obrigatória",
+    errs.unit && "Unidade obrigatória",
+    errs.min  && "Estoque mínimo não pode ser negativo",
+    errs.max  && "Estoque máximo precisa ser ≥ mínimo",
+  ].filter(Boolean);
 
   const handleSubmit = async () => {
+    console.log("[NewStockItemModal] handleSubmit · valid=", valid, "saving=", saving, "errs=", errs);
     if (saving || !valid) return;
     setSaving(true);
     try {
@@ -552,11 +636,12 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
         cat:  cat.trim(),
         unit: unit.trim(),
         cost: parseFloat(String(cost).replace(",", ".")) || 0,
-        ...(isEdit ? {} : { qty: parseFloat(String(qty).replace(",", ".")) || 0 }),
+        qty: parseFloat(String(qty).replace(",", ".")) || 0,
         min:  minN,
         max:  maxN,
         exp:  exp.trim(),
         supplierId: supplierId || null,
+        composeCmv,
       });
     } finally {
       setSaving(false);
@@ -577,7 +662,7 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
     <Modal
       title={isEdit ? "Editar insumo" : "Novo insumo"}
       subtitle={isEdit
-        ? `${initial.id} · saldo atual ${initial.qty} ${initial.unit} (não editável aqui)`
+        ? `${initial.id} · ajuste mínimo e máximo`
         : "Cadastre um item no estoque com mínimo e máximo."}
       onClose={saving || deleting ? undefined : onClose}
       footer={confirmingDelete ? (
@@ -612,7 +697,8 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <FormRow label="Nome do insumo">
-          <input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Farinha de trigo integral" />
+          <input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Farinha de trigo integral"
+                 style={errs.name ? { borderColor: "var(--crit)" } : null} />
         </FormRow>
 
         <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.8fr 1fr", gap: 12 }}>
@@ -629,7 +715,7 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
                 return;
               }
               setCat(v);
-            }} required>
+            }} required style={errs.cat ? { borderColor: "var(--crit)" } : null}>
               <option value="" disabled>Selecione…</option>
               {existingCats.map((c) => <option key={c} value={c}>{c}</option>)}
               <option value="__new__">+ Criar categoria…</option>
@@ -638,7 +724,7 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
           <FormRow label="Unidade">
             <select className="select" value={unit} onChange={(e) => setUnit(e.target.value)}>
               <option value="kg">kg</option>
-              <option value="und">und</option>
+              <option value="un">un</option>
             </select>
           </FormRow>
           <FormRow label="Custo unit. (R$)">
@@ -646,16 +732,14 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
           </FormRow>
         </div>
 
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: isEdit ? "1fr 1fr" : "1fr 1fr 1fr",
-          gap: 12,
-        }}>
+        <div style={{ display: "grid", gridTemplateColumns: isEdit ? "1fr 1fr" : "1fr 1fr 1fr", gap: 12 }}>
           <FormRow label={`Estoque mínimo (${unit})`} hint="Aciona compra quando atingir.">
-            <input className="input mono" inputMode="decimal" value={min} onChange={(e) => setMin(e.target.value)} placeholder="0" />
+            <input className="input mono" inputMode="decimal" value={min} onChange={(e) => setMin(e.target.value)} placeholder="0"
+                   style={errs.min ? { borderColor: "var(--crit)" } : null} />
           </FormRow>
           <FormRow label={`Estoque máximo (${unit})`} hint="Quantidade alvo após compra.">
-            <input className="input mono" inputMode="decimal" value={max} onChange={(e) => setMax(e.target.value)} placeholder="0" />
+            <input className="input mono" inputMode="decimal" value={max} onChange={(e) => setMax(e.target.value)} placeholder="0"
+                   style={errs.max ? { borderColor: "var(--crit)" } : null} />
           </FormRow>
           {!isEdit && (
             <FormRow label={`Quantidade inicial (${unit})`}>
@@ -678,26 +762,41 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
           </FormRow>
         </div>
 
-        {Number.isFinite(minN) && Number.isFinite(maxN) && maxN <= minN && (
-          <div style={{ fontSize: 11.5, color: "var(--warn)" }}>
-            Estoque máximo precisa ser maior que o mínimo.
+        {errorMessages.length > 0 && (
+          <div style={{
+            padding: "8px 12px", background: "var(--crit-soft)",
+            border: "1px solid var(--crit-line)", borderRadius: 4,
+            fontSize: 11.5, color: "var(--crit)",
+          }}>
+            <strong>Não pode salvar:</strong>
+            <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+              {errorMessages.map((m, i) => <li key={i}>{m}</li>)}
+            </ul>
           </div>
         )}
 
-        {isEdit && (
-          <div style={{
-            padding: "10px 12px", background: "var(--bg-2)",
-            border: "1px solid var(--line)", borderRadius: 4,
-            display: "flex", alignItems: "center", gap: 10,
-            fontSize: 11.5, color: "var(--fg-2)",
-          }}>
-            <I.AlertTriangle size={12} style={{ color: "var(--fg-3)" }} />
-            <span>
-              O <strong style={{ color: "var(--fg-0)" }}>saldo atual</strong> não é alterado por aqui —
-              use <strong>Entrada manual</strong> ou um <strong>Inventário</strong> pra mexer no estoque.
-            </span>
+        <label style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "10px 12px", marginTop: 2,
+          background: composeCmv ? "var(--ok-soft)" : "var(--bg-2)",
+          border: `1px solid ${composeCmv ? "var(--ok-line)" : "var(--line)"}`,
+          borderRadius: 6, cursor: "pointer",
+        }}>
+          <input type="checkbox" checked={composeCmv} onChange={(e) => setComposeCmv(e.target.checked)} />
+          <div style={{ flex: 1, fontSize: 12 }}>
+            <strong style={{ color: "var(--fg-0)" }}>Compõe CMV</strong>
+            <div style={{ color: "var(--fg-3)", fontSize: 10.5, marginTop: 2 }}>
+              Quando desligado, esse insumo é ignorado nos cálculos de CMV (descartáveis, embalagens, limpeza, etc).
+            </div>
+          </div>
+        </label>
+
+        {Number.isFinite(minN) && Number.isFinite(maxN) && maxN < minN && (
+          <div style={{ fontSize: 11.5, color: "var(--warn)" }}>
+            Estoque máximo não pode ser menor que o mínimo.
           </div>
         )}
+
       </div>
     </Modal>
   );
@@ -1071,22 +1170,65 @@ function AllocationPanel({ item, onClose }) {
   const total = item.qty;
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
   const [movements, setMovements] = useState(null);
+  const [consumption7d, setConsumption7d] = useState(null);
+  const [autoMin, setAutoMin] = useState(item.autoMin === true);
+  const [savingAutoMin, setSavingAutoMin] = useState(false);
+
+  useEffect(() => { setAutoMin(item.autoMin === true); }, [item.id, item.autoMin]);
+
+  const toggleAutoMin = async (next) => {
+    setAutoMin(next);
+    if (typeof dbSetStockItemAutoMin === "function") {
+      setSavingAutoMin(true);
+      try {
+        const { error } = await dbSetStockItemAutoMin(item.id, next);
+        if (error) {
+          setAutoMin(!next);
+          window.showToast(`Erro: ${error.message}`, { tone: "crit" });
+        } else {
+          window.showToast(next ? "Auto-cálculo ativado · min/max recalculados" : "Auto-cálculo desativado", { tone: "ok" });
+        }
+      } finally {
+        setSavingAutoMin(false);
+      }
+    }
+  };
 
   useEffect(() => {
-    if (!dbStatus.isOnline || !item.id) { setMovements([]); return; }
+    if (!dbStatus.isOnline || !item.id) { setMovements([]); setConsumption7d({ qty: 0, daily: 0, hasData: false }); return; }
     let cancelled = false;
     (async () => {
       const ctx = await dbGetCurrentContext();
       if (cancelled) return;
       const tid = ctx?.tenant?.id;
       if (!tid) { setMovements([]); return; }
-      const { data, source } = await dbListStockMovements(tid, null, null, { stockItemId: item.id, limit: 8 });
+      const days30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const days7  = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000).toISOString();
+      const [recent, m30, m7] = await Promise.all([
+        dbListStockMovements(tid, null, null, { stockItemId: item.id, limit: 8 }),
+        dbListStockMovements(tid, days30, null, { stockItemId: item.id, limit: 500 }),
+        dbListStockMovements(tid, days7,  null, { stockItemId: item.id, limit: 500 }),
+      ]);
       if (cancelled) return;
-      if (source === "db") setMovements(data || []);
-      else setMovements([]);
+      setMovements(recent.source === "db" ? (recent.data || []) : []);
+      const outs30 = (m30.data || []).filter((m) => m.kind === "out");
+      const outs7  = (m7.data  || []).filter((m) => m.kind === "out");
+      const total30 = outs30.reduce((s, m) => s + Math.abs(Number(m.delta) || 0), 0);
+      const total7  = outs7.reduce((s, m) => s + Math.abs(Number(m.delta) || 0), 0);
+      const useMonthly = total30 > 0;
+      const daily = useMonthly ? (total30 / 30) : (total7 / 7);
+      setConsumption7d({
+        qty: useMonthly ? total30 : total7,
+        daily,
+        window: useMonthly ? 30 : 7,
+        hasData: daily > 0,
+      });
     })();
     return () => { cancelled = true; };
   }, [dbStatus.isOnline, item.id]);
+
+  const suggestedMin = consumption7d?.hasData ? Math.ceil(consumption7d.daily * 3) : null;
+  const suggestedMax = suggestedMin != null ? suggestedMin * 2 : null;
 
   const fmtTime = (iso) => {
     if (!iso) return "—";
@@ -1194,6 +1336,44 @@ function AllocationPanel({ item, onClose }) {
               );
             })}
           </div>
+        )}
+      </div>
+
+      <div style={{ padding: "14px 18px", borderTop: "1px solid var(--line-soft)" }}>
+        <div className="h-eyebrow" style={{ marginBottom: 8 }}>Consumo recente</div>
+        {consumption7d == null ? (
+          <span style={{ fontSize: 11, color: "var(--fg-3)" }}>Carregando…</span>
+        ) : consumption7d.hasData ? (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--fg-1)" }}>
+              <span>Janela: <strong>{consumption7d.window}d</strong></span>
+              <span>Total: <strong className="mono">{consumption7d.qty.toFixed(2)} {item.unit}</strong></span>
+              <span>Média/dia: <strong className="mono">{consumption7d.daily.toFixed(2)} {item.unit}</strong></span>
+            </div>
+            <label style={{
+              display: "flex", alignItems: "center", gap: 8,
+              marginTop: 10, padding: "8px 10px",
+              background: autoMin ? "var(--ok-soft)" : "var(--bg-2)",
+              border: `1px solid ${autoMin ? "var(--ok-line)" : "var(--line)"}`,
+              borderRadius: 4, fontSize: 11.5, color: "var(--fg-1)", cursor: "pointer",
+            }}>
+              <input type="checkbox" checked={autoMin} disabled={savingAutoMin}
+                     onChange={(e) => toggleAutoMin(e.target.checked)} />
+              <span style={{ flex: 1 }}>
+                Auto-calcular min/max ({suggestedMin ?? "—"} / {suggestedMax ?? "—"} {item.unit})
+              </span>
+              {savingAutoMin && <span style={{ fontSize: 10, color: "var(--fg-3)" }}>…</span>}
+            </label>
+            {autoMin && (
+              <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6, lineHeight: 1.4 }}>
+                Sistema atualiza min/max sozinho a cada nova movimentação (média 7d × 3 dias).
+              </div>
+            )}
+          </>
+        ) : (
+          <span style={{ fontSize: 11, color: "var(--fg-3)" }}>
+            Sem movimentações de saída registradas nos últimos 30 dias.
+          </span>
         )}
       </div>
 
@@ -1675,6 +1855,43 @@ function SuppliersView() {
     }
   };
 
+  const deleteCurrent = async () => {
+    if (!editing?.id) {
+      setEditing(null);
+      return;
+    }
+    setBusy(true);
+    try {
+      const { error } = await dbDeleteSupplier(editing.id);
+      if (error) {
+        window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+      setSuppliers((prev) => prev.filter((x) => x.id !== editing.id));
+      window.showToast(`Fornecedor ${editing.sup} excluído`, { tone: "warn" });
+      setEditing(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Calcula quantos insumos cada fornecedor possui
+  const [itemsByFornecedor, setItemsByFornecedor] = useState({});
+  useEffect(() => {
+    if (!tenantId || !dbStatus.isOnline) return;
+    let cancelled = false;
+    dbListStockItems(tenantId).then(({ data }) => {
+      if (cancelled || !data) return;
+      const counts = {};
+      for (const it of data) {
+        const sid = it.supplierId;
+        if (sid) counts[sid] = (counts[sid] || 0) + 1;
+      }
+      setItemsByFornecedor(counts);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId, dbStatus.isOnline, suppliers.length]);
+
   return (
     <div className="card">
       <div className="card-header">
@@ -1716,19 +1933,37 @@ function SuppliersView() {
           ))}
         </tbody>
       </table>
-      {editing && <SupplierModal initial={editing.sup ? editing : null} busy={busy} onClose={() => setEditing(null)} onSave={save} />}
+      {editing && <SupplierModal
+        initial={editing.sup ? editing : null}
+        busy={busy}
+        itemsCount={editing?.id ? (itemsByFornecedor[editing.id] || 0) : 0}
+        onClose={() => setEditing(null)}
+        onSave={save}
+        onDelete={editing?.id && source === "db" ? deleteCurrent : null}
+      />}
     </div>
   );
 }
 
-function SupplierModal({ initial, onClose, onSave, busy }) {
+function SupplierModal({ initial, onClose, onSave, onDelete, itemsCount = 0, busy }) {
   const [sup, setSup]         = useState(initial?.sup || "");
   const [contact, setContact] = useState(initial?.contact || "");
   const [lead, setLead]       = useState(initial?.lead || "24h");
+  const [confirming, setConfirming] = useState(false);
   const valid = !!sup.trim();
+  const canDelete = !!initial && !!onDelete && itemsCount === 0;
   return (
     <Modal title={initial ? "Editar fornecedor" : "Novo fornecedor"} onClose={onClose}
       footer={<>
+        {initial && onDelete && (
+          <button className="btn" data-variant="danger" data-size="sm"
+                  disabled={!canDelete || busy}
+                  onClick={() => setConfirming(true)}
+                  title={canDelete ? "Excluir este fornecedor" : `Não é possível excluir: ${itemsCount} insumo(s) vinculado(s)`}
+                  style={{ marginRight: "auto" }}>
+            <I.Trash size={12} />Excluir fornecedor
+          </button>
+        )}
         <button className="btn" data-size="sm" onClick={onClose} disabled={busy}>Cancelar</button>
         <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || busy}
                 onClick={() => onSave({ sup: sup.trim(), contact: contact.trim(), lead: lead.trim() })}>
@@ -1746,7 +1981,372 @@ function SupplierModal({ initial, onClose, onSave, busy }) {
           <input className="input mono" value={contact} onChange={(e) => setContact(e.target.value)} placeholder="WhatsApp · 11 9 0000-0000" />
         </FormRow>
       </div>
+
+      {initial && !canDelete && (
+        <div style={{ marginTop: 12, padding: "8px 12px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 4, fontSize: 11.5, color: "var(--fg-1)" }}>
+          ⚠ Esse fornecedor está vinculado a <strong>{itemsCount}</strong> insumo(s). Para excluir, primeiro remova o vínculo nos insumos do estoque.
+        </div>
+      )}
+
+      {confirming && (
+        <div onClick={() => setConfirming(false)} style={{
+          position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.6)",
+          display: "grid", placeItems: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: 380, background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 8,
+            padding: 20,
+          }}>
+            <h3 style={{ margin: 0, fontSize: 15, color: "var(--fg-0)" }}>Excluir fornecedor?</h3>
+            <p style={{ fontSize: 12, color: "var(--fg-2)", marginTop: 8 }}>
+              Esta ação não pode ser desfeita. O fornecedor <strong>{initial.sup}</strong> será removido.
+            </p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14 }}>
+              <button className="btn" data-size="sm" onClick={() => setConfirming(false)} disabled={busy}>Cancelar</button>
+              <button className="btn" data-variant="danger" data-size="sm" disabled={busy}
+                      onClick={async () => { await onDelete(); setConfirming(false); }}>
+                {busy ? "Excluindo…" : "Excluir"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Modal>
+  );
+}
+
+// ===================== Assistente de Estoque =====================
+// Walkthrough item-a-item para preencher campos faltantes (categoria, fornecedor,
+// mínimo, máximo). Opção de calcular mínimo automaticamente baseado em consumo 7d.
+function StockAssistantModal({ items, categories = [], suppliers: initialSuppliers = [], tenantId, onClose, onSaveItem }) {
+  // Carrega fornecedores reais do DB (caso a prop venha vazia ou desatualizada)
+  const [suppliers, setSuppliers] = useState(initialSuppliers || []);
+  useEffect(() => {
+    if (!tenantId || typeof dbListSuppliers !== "function") return;
+    let cancelled = false;
+    dbListSuppliers(tenantId).then(({ data }) => {
+      if (!cancelled && Array.isArray(data) && data.length > 0) setSuppliers(data);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [tenantId]);
+  const itemsToReview = useMemo(() => {
+    return items.filter((it) =>
+      !it.cat || it.cat === "Sem categoria" || it.cat === "Outro" ||
+      !it.supplier ||
+      !it.reorder || it.reorder <= 0 ||
+      !it.max || it.max <= 0
+    );
+  }, [items]);
+
+  const [started, setStarted] = useState(false);
+  const [idx, setIdx] = useState(0);
+  const [savingItem, setSavingItem] = useState(false);
+  const [itemAutoMin, setItemAutoMin] = useState(false);
+
+  // Estado por item · editado
+  const [draft, setDraft] = useState({});
+  const [consumption7d, setConsumption7d] = useState(null); // { qty, daily, hasData }
+
+  const current = itemsToReview[idx];
+
+  // Quando o item muda, carrega defaults e consumo 7d
+  useEffect(() => {
+    if (!current) return;
+    setDraft({
+      name: current.name,
+      cat: current.cat || "",
+      supplier: current.supplier || "",
+      cost: current.cost || 0,
+      reorder: current.reorder || "",
+      max: current.max || "",
+      unit: current.unit || "kg",
+      exp: current.exp && current.exp !== "—" ? current.exp : "",
+      composeCmv: current.composeCmv !== false,
+    });
+    setItemAutoMin(current.autoMin === true);
+    setConsumption7d(null);
+    if (tenantId && typeof dbListStockMovements === "function") {
+      const days30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const days7  = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000).toISOString();
+      Promise.all([
+        dbListStockMovements(tenantId, days30, null, { stockItemId: current.id, limit: 500 }),
+        dbListStockMovements(tenantId, days7,  null, { stockItemId: current.id, limit: 500 }),
+      ]).then(([res30, res7]) => {
+        const outs30 = (res30.data || []).filter((m) => m.kind === "out");
+        const outs7  = (res7.data  || []).filter((m) => m.kind === "out");
+        const total30 = outs30.reduce((s, m) => s + Math.abs(Number(m.delta) || 0), 0);
+        const total7  = outs7.reduce((s, m) => s + Math.abs(Number(m.delta) || 0), 0);
+        // Prioriza 30d, fallback 7d
+        const useMonthly = total30 > 0;
+        const daily = useMonthly ? (total30 / 30) : (total7 / 7);
+        setConsumption7d({
+          qty: useMonthly ? total30 : total7,
+          daily,
+          window: useMonthly ? 30 : 7,
+          hasData: daily > 0,
+        });
+      }).catch(() => setConsumption7d({ qty: 0, daily: 0, window: 7, hasData: false }));
+    } else {
+      setConsumption7d({ qty: 0, daily: 0, window: 7, hasData: false });
+    }
+  }, [current?.id, tenantId]);
+
+  // Sugestão automática de mínimo baseada em consumo 7d
+  const suggestedMin = consumption7d?.hasData
+    ? Math.ceil(consumption7d.daily * 3) // 3 dias de buffer
+    : null;
+  const suggestedMax = suggestedMin != null ? suggestedMin * 2 : null;
+
+  const applySuggested = () => {
+    setDraft((d) => ({
+      ...d,
+      reorder: suggestedMin ?? d.reorder,
+      max: suggestedMax ?? d.max,
+    }));
+  };
+
+  const saveAndNext = async () => {
+    if (savingItem || !current) return;
+    setSavingItem(true);
+    try {
+      const patch = {
+        name: draft.name,
+        cat: draft.cat,
+        supplier: draft.supplier,
+        supplierId: draft.supplierId || null,
+        cost: Number(draft.cost) || 0,
+        unit: draft.unit,
+        min: Number(draft.reorder) || 0,
+        max: Number(draft.max) || 0,
+        exp: draft.exp,
+        composeCmv: draft.composeCmv !== false,
+      };
+      await onSaveItem(current.id, patch);
+      // Persiste flag auto_min (dispara trigger que recalcula min/max no banco)
+      if (typeof dbSetStockItemAutoMin === "function") {
+        await dbSetStockItemAutoMin(current.id, itemAutoMin);
+      }
+      if (idx < itemsToReview.length - 1) {
+        setIdx(idx + 1);
+      } else {
+        window.showToast(`Assistente concluído · ${itemsToReview.length} itens revisados`, { tone: "ok" });
+        onClose();
+      }
+    } finally {
+      setSavingItem(false);
+    }
+  };
+
+  const skip = () => {
+    if (idx < itemsToReview.length - 1) setIdx(idx + 1);
+    else onClose();
+  };
+
+  // Tela inicial · explicação
+  if (!started) {
+    return (
+      <div onClick={onClose} style={{
+        position: "fixed", inset: 0, zIndex: 90,
+        background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center",
+      }}>
+        <div onClick={(e) => e.stopPropagation()} style={{
+          width: 540, background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 8,
+          padding: "24px 24px 20px",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <span style={{ fontSize: 22 }}>✨</span>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: "var(--fg-0)" }}>
+              Assistente de Estoque
+            </h2>
+          </div>
+          <p style={{ fontSize: 12.5, lineHeight: 1.55, color: "var(--fg-1)", margin: "0 0 14px" }}>
+            Esse assistente revisa <strong>item a item</strong> os insumos que estão sem alguma configuração importante
+            (categoria, fornecedor, estoque mínimo/máximo). Você confirma os dados e avança.
+          </p>
+
+          <div style={{
+            padding: "12px 14px", background: "var(--bg-2)",
+            border: "1px solid var(--line)", borderRadius: 6,
+            marginBottom: 14, fontSize: 11.5, color: "var(--fg-2)",
+          }}>
+            <strong style={{ color: "var(--fg-0)", fontSize: 12.5, display: "block", marginBottom: 6 }}>
+              Estoque mínimo automático
+            </strong>
+            <span>
+              Em cada item você pode <strong>ligar/desligar</strong> o cálculo automático de mínimo e máximo,
+              baseado no <strong>consumo médio dos últimos 7 dias</strong> (3 dias de buffer).
+              Quando ativado, o sistema atualiza sozinho sempre que houver nova movimentação.
+            </span>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", background: "var(--bg-2)", borderRadius: 6, marginBottom: 16 }}>
+            <span style={{ fontSize: 12, color: "var(--fg-2)" }}>Itens a revisar</span>
+            <span className="mono" style={{ fontSize: 18, fontWeight: 500, color: itemsToReview.length === 0 ? "var(--ok)" : "var(--warn)" }}>
+              {itemsToReview.length}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button className="btn" data-size="sm" onClick={onClose}>Fechar</button>
+            <button className="btn" data-variant="primary" data-size="sm"
+                    disabled={itemsToReview.length === 0}
+                    onClick={() => setStarted(true)}>
+              {itemsToReview.length === 0 ? "Tudo configurado" : "Iniciar revisão →"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!current) return null;
+  const missing = {
+    cat: !current.cat || current.cat === "Sem categoria" || current.cat === "Outro",
+    supplier: !current.supplier,
+    reorder: !current.reorder || current.reorder <= 0,
+    max: !current.max || current.max <= 0,
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 90,
+      background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 620, maxHeight: "90vh", display: "flex", flexDirection: "column",
+        background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 8,
+      }}>
+        {/* Header */}
+        <div style={{ padding: "16px 20px 12px", borderBottom: "1px solid var(--line)" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <span className="h-eyebrow">Item {idx + 1} de {itemsToReview.length}</span>
+            <button className="btn" data-variant="ghost" data-size="sm" onClick={onClose}>×</button>
+          </div>
+          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 500, color: "var(--fg-0)" }}>{current.name}</h2>
+          <div className="bar" style={{ height: 3, marginTop: 10 }}>
+            <i style={{ width: `${((idx + 1) / itemsToReview.length) * 100}%`, background: "var(--accent-bright)" }} />
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Consumo 7d */}
+          <div style={{
+            padding: "10px 12px", background: "var(--bg-2)",
+            border: "1px solid var(--line)", borderRadius: 6, fontSize: 11.5,
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <strong style={{ color: "var(--fg-0)" }}>Consumo últimos 7 dias</strong>
+              {consumption7d == null && <span style={{ color: "var(--fg-3)" }}>carregando…</span>}
+            </div>
+            {consumption7d && consumption7d.hasData ? (
+              <div style={{ color: "var(--fg-1)" }}>
+                Janela usada: <strong>{consumption7d.window} dias</strong> ·
+                Total: <strong className="mono">{consumption7d.qty.toFixed(2)} {current.unit}</strong> ·
+                Média diária: <strong className="mono">{consumption7d.daily.toFixed(2)} {current.unit}</strong>
+                {suggestedMin != null && (
+                  <div style={{ marginTop: 6, padding: "8px 10px", background: "var(--bg-1)", borderRadius: 4, color: "var(--fg-1)", fontSize: 11 }}>
+                    Cálculo: <strong>min {suggestedMin} {current.unit}</strong> · <strong>max {suggestedMax} {current.unit}</strong>
+                    <button className="btn" data-size="sm" style={{ marginLeft: 10 }} onClick={applySuggested}>
+                      Preencher campos
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : consumption7d ? (
+              <div style={{ color: "var(--fg-3)" }}>
+                Sem movimentações registradas nos últimos 30 dias · auto-cálculo indisponível para esse item.
+              </div>
+            ) : null}
+          </div>
+
+          {/* Toggle auto-min por item */}
+          <label style={{
+            display: "flex", alignItems: "center", gap: 10,
+            padding: "10px 12px", background: itemAutoMin ? "var(--ok-soft)" : "var(--bg-2)",
+            border: `1px solid ${itemAutoMin ? "var(--ok-line)" : "var(--line)"}`,
+            borderRadius: 6, cursor: consumption7d?.hasData ? "pointer" : "not-allowed",
+            opacity: consumption7d?.hasData ? 1 : 0.5,
+          }}>
+            <input type="checkbox" checked={itemAutoMin}
+                   disabled={!consumption7d?.hasData}
+                   onChange={(e) => setItemAutoMin(e.target.checked)} />
+            <div style={{ flex: 1, fontSize: 11.5, color: "var(--fg-1)" }}>
+              <strong style={{ color: "var(--fg-0)" }}>Auto-calcular mínimo e máximo</strong>
+              <div style={{ color: "var(--fg-3)", fontSize: 10.5, marginTop: 2 }}>
+                {consumption7d?.hasData
+                  ? "Sistema atualiza min/max a cada movimentação. Você ainda pode editar manualmente quando quiser."
+                  : "Precisa ter histórico de saídas nos últimos 7 dias."}
+              </div>
+            </div>
+          </label>
+
+          {/* Campos */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <FormRow label={`Categoria ${missing.cat ? "·  faltando" : ""}`}>
+              <select className="select" value={draft.cat || ""} onChange={(e) => setDraft({ ...draft, cat: e.target.value })}>
+                <option value="">Selecione…</option>
+                {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </FormRow>
+            <FormRow label={`Fornecedor ${missing.supplier ? "·  faltando" : ""}`}>
+              <select className="select" value={draft.supplier || ""} onChange={(e) => {
+                const v = e.target.value;
+                const sup = (suppliers || []).find((s) => (s.name || s) === v);
+                setDraft({ ...draft, supplier: v, supplierId: sup?.id || null });
+              }}>
+                <option value="">Selecione…</option>
+                {(suppliers || []).map((s) => {
+                  const name = s.name || s;
+                  return <option key={s.id || name} value={name}>{name}</option>;
+                })}
+              </select>
+            </FormRow>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            <FormRow label={`Mínimo (${draft.unit}) ${missing.reorder ? "·  faltando" : ""}`}>
+              <input className="input mono" inputMode="decimal" value={draft.reorder || ""} onChange={(e) => setDraft({ ...draft, reorder: e.target.value })} placeholder="0" />
+            </FormRow>
+            <FormRow label={`Máximo (${draft.unit}) ${missing.max ? "·  faltando" : ""}`}>
+              <input className="input mono" inputMode="decimal" value={draft.max || ""} onChange={(e) => setDraft({ ...draft, max: e.target.value })} placeholder="0" />
+            </FormRow>
+            <FormRow label="Custo unit. (R$)">
+              <input className="input mono" inputMode="decimal" value={draft.cost || ""} onChange={(e) => setDraft({ ...draft, cost: e.target.value })} placeholder="0,00" />
+            </FormRow>
+          </div>
+
+          {/* Toggle Compõe CMV */}
+          <label style={{
+            display: "flex", alignItems: "center", gap: 10,
+            padding: "10px 12px",
+            background: draft.composeCmv !== false ? "var(--ok-soft)" : "var(--bg-2)",
+            border: `1px solid ${draft.composeCmv !== false ? "var(--ok-line)" : "var(--line)"}`,
+            borderRadius: 6, cursor: "pointer",
+          }}>
+            <input type="checkbox" checked={draft.composeCmv !== false}
+                   onChange={(e) => setDraft({ ...draft, composeCmv: e.target.checked })} />
+            <div style={{ flex: 1, fontSize: 11.5, color: "var(--fg-1)" }}>
+              <strong style={{ color: "var(--fg-0)" }}>Compõe CMV</strong>
+              <div style={{ color: "var(--fg-3)", fontSize: 10.5, marginTop: 2 }}>
+                Desligue para insumos que não devem entrar no CMV (descartáveis, embalagens, limpeza, etc).
+              </div>
+            </div>
+          </label>
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line)", display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <button className="btn" data-size="sm" onClick={skip}>Pular</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onClose}>Fechar</button>
+            <button className="btn" data-variant="primary" data-size="sm" disabled={savingItem} onClick={saveAndNext}>
+              {savingItem ? "Salvando…" : (idx === itemsToReview.length - 1 ? "Salvar e finalizar" : "Salvar e próximo →")}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

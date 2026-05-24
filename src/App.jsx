@@ -13,7 +13,7 @@ const TWEAK_DEFAULS = /*EDITMODE-BEGIN*/{
 export function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULS);
   const [scope, setScope] = useState("all");
-  const [page, setPage] = useState("dashboard");
+  const [pageRaw, setPageRaw] = useState("dashboard");
   const [opMenuOpen, setOpMenuOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [user, setUser] = useState(() => getStoredSession());
@@ -43,10 +43,18 @@ export function App() {
     }
   };
 
+  // Gate de acesso a páginas — se o usuário não tem o módulo, redireciona p/ um permitido
+  const allowedPages = typeof getAllowedModules === "function" ? getAllowedModules(user) : ["dashboard"];
+  const page = allowedPages.includes(pageRaw) ? pageRaw : (allowedPages[0] || "dashboard");
+  const setPage = (next) => {
+    if (allowedPages.includes(next)) { setPageRaw(next); return; }
+    window.showToast?.("Sem acesso a esse módulo. Fale com o admin.", { tone: "warn", ttl: 3500 });
+  };
+
   const handleLogout = () => {
     clearStoredSession();
     setUser(null);
-    setPage("dashboard");
+    setPageRaw("dashboard");
     setScope("all");
   };
 

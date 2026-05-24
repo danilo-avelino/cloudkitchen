@@ -46,6 +46,7 @@ function Recipes({ scope }) {
   // ----- Filtros
   const [filterOp,  setFilterOp]  = useState(scope);
   const [filterCat, setFilterCat] = useState("all");
+  const [query,     setQuery]     = useState("");
   useEffect(() => { setFilterOp(scope); }, [scope]);
 
   // ----- Estado UI
@@ -67,14 +68,23 @@ function Recipes({ scope }) {
   const labelSingular  = isPrep ? "preparo" : "ficha";
   const labelPlural    = isPrep ? "preparos" : "fichas técnicas";
 
-  // ----- Filtragem da lista
+  // ----- Filtragem da lista (fichas técnicas ordenadas por CMV desc; preparos mantêm ordem alfabética)
   const items = currentList.filter((it) => {
     // filterOp pode ser UUID (vindo dos chips de MOCK.OPERATIONS recém-populado)
     // enquanto it.op fica como slug ("nippon"). Compara contra ambos os formatos.
     if (filterOp !== "all" && it.op !== filterOp && it.operationId !== filterOp) return false;
     if (filterCat !== "all" && it.cat !== filterCat) return false;
+    if (query.trim()) {
+      const q = query.trim().toLowerCase();
+      const hay = `${it.name || ""} ${it.id || ""}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
     return true;
   });
+
+  if (!isPrep) {
+    items.sort((a, b) => (Number(b.cmv) || 0) - (Number(a.cmv) || 0));
+  }
 
   const [selected, setSelected] = useState(items[0]?.id || null);
   const current = currentList.find((it) => it.id === selected) || items[0];
@@ -163,14 +173,77 @@ function Recipes({ scope }) {
                      { tone: !isPrep && source !== "db" ? "warn" : "ok" });
   };
 
-  const handleDuplicate = (sourceId) => {
+  const handleDuplicate = async (sourceId) => {
     const src = currentList.find((it) => it.id === sourceId);
     if (!src) return;
+
+    const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+    // DB path
+    if (dbStatus.isOnline && tenantId && isUuid(sourceId)) {
+      try {
+        if (isPrep) {
+          const code = `PRP-${Date.now().toString(36).slice(-6).toUpperCase()}`;
+          const { data: newPrep, error } = await dbInsertPreparation(tenantId, {
+            code, op: src.op, operationId: src.operationId,
+            name: `${src.name} (cópia)`, cat: src.cat,
+            yieldQty: src.yieldQty, yieldUnit: src.yieldUnit,
+          });
+          if (error) throw error;
+          const { data: srcItems } = await getSupabaseClient().from("preparation_items")
+            .select("name, qty, unit, unit_cost, total_cost, stock_item_id, source_prep_id, sort_order")
+            .eq("preparation_id", sourceId).order("sort_order");
+          for (const it of (srcItems || [])) {
+            await getSupabaseClient().from("preparation_items").insert({
+              preparation_id: newPrep.id,
+              name: it.name, qty: it.qty, unit: it.unit,
+              unit_cost: it.unit_cost, total_cost: it.total_cost,
+              stock_item_id: it.stock_item_id, source_prep_id: it.source_prep_id,
+              sort_order: it.sort_order,
+            });
+          }
+          const { data: refreshed } = await dbListPreparations(tenantId);
+          if (refreshed) setAllPreparations(refreshed);
+          setSelected(newPrep.id);
+          window.showToast(`Preparo duplicado · ${code}`, { tone: "ok" });
+        } else {
+          const code = `FIC-${Date.now().toString(36).slice(-6).toUpperCase()}`;
+          const { data: newSheet, error } = await dbInsertTechSheet(tenantId, {
+            code, op: src.op, operationId: src.operationId,
+            name: `${src.name} (cópia)`, cat: src.cat,
+            price: src.price, yieldQty: src.yieldQty, yieldUnit: src.yieldUnit,
+            items: [],
+          });
+          if (error) throw error;
+          const { data: srcItems } = await getSupabaseClient().from("tech_sheet_items")
+            .select("display_name, qty, unit, unit_cost, line_cost, stock_item_id, source_prep_id, sort_order")
+            .eq("tech_sheet_id", sourceId).order("sort_order");
+          for (const it of (srcItems || [])) {
+            await getSupabaseClient().from("tech_sheet_items").insert({
+              tech_sheet_id: newSheet.id,
+              display_name: it.display_name, qty: it.qty, unit: it.unit,
+              unit_cost: it.unit_cost,
+              stock_item_id: it.stock_item_id, source_prep_id: it.source_prep_id,
+              sort_order: it.sort_order,
+            });
+          }
+          const { data: refreshed } = await dbListTechSheets(tenantId);
+          if (refreshed) setAllSheets(refreshed);
+          setSelected(newSheet.id);
+          window.showToast(`Ficha duplicada · ${code}`, { tone: "ok" });
+        }
+      } catch (e) {
+        window.showToast(`Erro ao duplicar: ${e.message || e}`, { tone: "crit", ttl: 4500 });
+      }
+      return;
+    }
+
+    // Fallback local (sem DB)
     const id = nextId();
     const cloned = recompute({ ...src, id, name: `${src.name} (cópia)` });
     setCurrentList((prev) => [cloned, ...prev]);
     setSelected(id);
-    window.showToast(`Duplicado como ${id}`, { tone: "ok" });
+    window.showToast(`Duplicado como ${id} (local)`, { tone: "warn" });
   };
 
   const handlePatch = (itemId, partial) => {
@@ -279,37 +352,101 @@ function Recipes({ scope }) {
       : it));
   };
 
-  const handleEditSubmit = (draft) => {
+  const handleEditSubmit = async (draft) => {
     if (!editingId) return;
     const partial = isPrep
       ? { op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit }
       : { op: draft.op, cat: draft.cat, name: draft.name, price: draft.price };
-    handlePatch(editingId, partial);
-    window.showToast(`${capitalize(labelSingular)} ${editingId} atualizado`, { tone: "ok" });
+
+    // DB persist
+    if (dbStatus.isOnline && tenantId) {
+      const updFn = isPrep ? dbUpdatePreparation : dbUpdateTechSheet;
+      const { error } = await updFn(editingId, partial);
+      if (error) {
+        window.showToast(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+      // Recarrega lista para refletir custos recalculados pelos triggers
+      const { data: refreshed } = isPrep
+        ? await dbListPreparations(tenantId)
+        : await dbListTechSheets(tenantId);
+      if (refreshed) {
+        if (isPrep) setAllPreparations(refreshed);
+        else setAllSheets(refreshed);
+      }
+    } else {
+      handlePatch(editingId, partial);
+    }
+    window.showToast(`${capitalize(labelSingular)} atualizado`, { tone: "ok" });
     setEditingId(null);
   };
 
-  const handleDelete = async (itemId) => {
-    const target = currentList.find((it) => it.id === itemId);
-    if (!target) return;
-    if (!confirm(`Excluir "${target.name}"? Esta ação não pode ser desfeita.`)) return;
-
-    // DB path
-    if (dbStatus.isOnline && tenantId) {
-      const delFn = isPrep ? dbDeletePreparation : dbDeleteTechSheet;
-      const { error } = await delFn(itemId);
+  const [recomputing, setRecomputing] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const recomputeAllCosts = async () => {
+    if (recomputing) return;
+    if (!tenantId || !dbStatus.isOnline) {
+      window.showToast("DB offline · sem nada para recalcular", { tone: "warn" });
+      return;
+    }
+    setRecomputing(true);
+    try {
+      const { data, error } = await dbRecomputeAllCosts(tenantId);
       if (error) {
-        window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+        window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 });
         return;
       }
+      // Recarrega tudo
+      const [sheetsRes, prepsRes] = await Promise.all([
+        dbListTechSheets(tenantId),
+        dbListPreparations(tenantId),
+      ]);
+      if (sheetsRes.data) setAllSheets(sheetsRes.data);
+      if (prepsRes.data) setAllPreparations(prepsRes.data);
+      const r = data || {};
+      const total = (r.prep_items_updated || 0) + (r.ts_items_from_stock || 0) + (r.ts_items_from_prep || 0);
+      window.showToast(
+        total === 0
+          ? "Custos já estão atualizados ✓"
+          : `${r.prep_items_updated || 0} preparo(s) · ${r.ts_items_from_stock || 0} ficha(s) do estoque · ${r.ts_items_from_prep || 0} ficha(s) de preparo`,
+        { tone: "ok", ttl: 5000 },
+      );
+    } finally {
+      setRecomputing(false);
     }
+  };
 
-    setCurrentList((prev) => prev.filter((it) => it.id !== itemId));
-    if (selected === itemId) {
-      const remaining = currentList.filter((it) => it.id !== itemId);
-      setSelected(remaining[0]?.id || null);
+  const handleDelete = (itemId) => {
+    const target = currentList.find((it) => it.id === itemId);
+    if (!target) return;
+    setPendingDelete(target);
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting) return;
+    const itemId = pendingDelete.id;
+    setDeleting(true);
+    try {
+      const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+      if (dbStatus.isOnline && tenantId && isUuid(itemId)) {
+        const delFn = isPrep ? dbDeletePreparation : dbDeleteTechSheet;
+        const { error } = await delFn(itemId);
+        if (error) {
+          window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+          return;
+        }
+      }
+      setCurrentList((prev) => prev.filter((it) => it.id !== itemId));
+      if (selected === itemId) {
+        const remaining = currentList.filter((it) => it.id !== itemId);
+        setSelected(remaining[0]?.id || null);
+      }
+      window.showToast(`${capitalize(labelSingular)} excluído`, { tone: "warn" });
+      setPendingDelete(null);
+    } finally {
+      setDeleting(false);
     }
-    window.showToast(`${capitalize(labelSingular)} excluído`, { tone: "warn" });
   };
 
   const handleSave = (itemId) => {
@@ -343,9 +480,15 @@ function Recipes({ scope }) {
           </div>
           <h1 className="h-title">Fichas técnicas</h1>
         </div>
-        <button className="btn" data-variant="primary" data-size="sm" onClick={() => setCreating(true)}>
-          <I.Plus size={13} />{isPrep ? "Novo preparo" : "Nova ficha"}
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn" data-size="sm" onClick={recomputeAllCosts} disabled={recomputing}
+                  title="Recalcula custos: estoque → preparos → fichas técnicas">
+            {recomputing ? "Recalculando…" : "↻ Recalcular custos"}
+          </button>
+          <button className="btn" data-variant="primary" data-size="sm" onClick={() => setCreating(true)}>
+            <I.Plus size={13} />{isPrep ? "Novo preparo" : "Nova ficha"}
+          </button>
+        </div>
       </div>
 
       {/* Tab switcher: Fichas | Preparos */}
@@ -367,14 +510,16 @@ function Recipes({ scope }) {
           ))}
         </div>
         <span style={{ width: 1, height: 18, background: "var(--line)" }} />
-        <span style={filterLabelStyle}>Categoria</span>
-        <select className="select" value={filterCat} onChange={(e) => setFilterCat(e.target.value)} style={{ minWidth: 180 }}>
-          <option value="all">Todas as categorias</option>
-          {MOCK.RECIPE_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-        </select>
+        <input
+          className="input"
+          placeholder={`Buscar ${labelSingular} por nome…`}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          style={{ minWidth: 220, flex: 1, maxWidth: 360 }}
+        />
         <span style={{ flex: 1 }} />
-        {(filterOp !== "all" || filterCat !== "all") && (
-          <button className="btn" data-variant="ghost" data-size="sm" onClick={() => { setFilterOp("all"); setFilterCat("all"); }}>
+        {(filterOp !== "all" || filterCat !== "all" || query) && (
+          <button className="btn" data-variant="ghost" data-size="sm" onClick={() => { setFilterOp("all"); setFilterCat("all"); setQuery(""); }}>
             Limpar filtros
           </button>
         )}
@@ -438,6 +583,42 @@ function Recipes({ scope }) {
           onCancel={() => setEditingId(null)}
           onSubmit={handleEditSubmit}
         />
+      )}
+
+      {pendingDelete && (
+        <Modal
+          title={`Excluir ${labelSingular}`}
+          subtitle={pendingDelete.id}
+          width={460}
+          onClose={deleting ? undefined : () => setPendingDelete(null)}
+          footer={
+            <>
+              <button className="btn" data-size="sm"
+                      onClick={() => setPendingDelete(null)} disabled={deleting}>
+                Cancelar
+              </button>
+              <button className="btn" data-variant="danger" data-size="sm"
+                      onClick={confirmDelete} disabled={deleting}>
+                {deleting ? "Excluindo…" : "Excluir definitivamente"}
+              </button>
+            </>
+          }
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ fontSize: 13, color: "var(--fg-1)", lineHeight: 1.5 }}>
+              Tem certeza que deseja excluir <strong style={{ color: "var(--fg-0)" }}>{pendingDelete.name}</strong>?
+            </div>
+            <div style={{
+              padding: "10px 12px", background: "var(--crit-soft)",
+              border: "1px solid var(--crit-line)", borderRadius: 4,
+              display: "flex", alignItems: "center", gap: 10,
+              fontSize: 11.5, color: "var(--crit)",
+            }}>
+              <I.AlertTriangle size={12} />
+              <span>Esta ação não pode ser desfeita.</span>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -504,15 +685,16 @@ function ListRow({ item, mode, isActive, onSelect, menuOpen, onToggleMenu, onEdi
         padding: "14px 4px 14px 14px", textAlign: "left",
         background: "transparent", border: "none",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
-          <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase" }}>{item.id}</span>
-          <span style={{ flex: 1 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color, flexShrink: 0 }} />
+          <span style={{
+            fontSize: 13, color: "var(--fg-0)", fontWeight: 500, letterSpacing: "-0.005em",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1,
+          }}>{item.name}</span>
           {isPrep
             ? <span className="badge" data-tone="info">PREPARO</span>
             : <span className="badge" data-tone={cmvTone}>{item.cmv.toFixed(1)}%</span>}
         </div>
-        <div style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500, letterSpacing: "-0.005em" }}>{item.name}</div>
         {recipeCat && (
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ width: 4, height: 4, borderRadius: 50, background: recipeCat.color }} />
@@ -615,9 +797,10 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
       <KpiCard label="Preço de venda" data={{ v: `R$ ${price.toFixed(2)}`, d: "no iFood", tone: "up", sub: "" }} />
       <KpiCard label="Custo composto" data={{ v: `R$ ${theo.toFixed(2)}`, d: `${items.length} insumos`, tone: "warn", sub: "" }} />
       <KpiCard label="CMV teórico"    data={{ v: `${cmv.toFixed(1)}%`, d: "meta 30%", tone: cmv > 31 ? "down" : "up", sub: "" }} accent />
-      <KpiCard label="Margem bruta"   data={{
-        v: price > 0 ? `${(((price - theo) / price) * 100).toFixed(1)}%` : "—",
-        d: `R$ ${(price - theo).toFixed(2)} unidade`, tone: "up", sub: ""
+      <KpiCard label="Margem de contribuição"   data={{
+        v: `R$ ${(price - theo).toFixed(2)}`,
+        d: price > 0 ? `${(((price - theo) / price) * 100).toFixed(1)}% por unidade` : "—",
+        tone: "up", sub: ""
       }} />
     </>
   );
@@ -629,7 +812,7 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
             <span style={{ width: 8, height: 8, borderRadius: 50, background: op.color }} />
             <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-              {op.name} · {item.id}{isPrep ? " · preparo" : ""}
+              {op.name}{isPrep ? " · preparo" : ""}
             </span>
           </div>
           <h2 style={{ margin: 0, fontSize: 28, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.025em" }}>{item.name}</h2>
@@ -674,7 +857,11 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
                 Sem insumos · clique em "Adicionar insumo" para compor.
               </td></tr>
             )}
-            {items.map(([name, qty, cost], i) => {
+            {items.map((row, i) => {
+              const [name, qty, cost] = row;
+              const unitCost = row.unitCost != null
+                ? row.unitCost
+                : (row.qty > 0 ? cost / row.qty : 0);
               const pct = item.theo > 0 ? (cost / item.theo) * 100 : 0;
               return (
                 <tr key={i}>
@@ -685,7 +872,7 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
                     </span>
                   </td>
                   <td className="num">{qty}</td>
-                  <td className="num">R$ {cost.toFixed(2)}</td>
+                  <td className="num">R$ {unitCost.toFixed(2)}</td>
                   <td className="num">R$ {cost.toFixed(2)}</td>
                   <td className="num" style={{ color: "var(--fg-2)" }}>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
@@ -856,7 +1043,9 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
   const [yieldQty, setYieldQty]   = useState(initial?.yieldQty != null ? String(initial.yieldQty).replace(".", ",") : "");
   const [yieldUnit, setYieldUnit] = useState(initial?.yieldUnit || "kg");
 
-  const valid = op && cat && name.trim().length > 0 &&
+  // Validação: nome + operação obrigatórios; categoria opcional
+  // (para preparos sem categoria definida, não bloqueia o save)
+  const valid = op && name.trim().length > 0 &&
     (isPrep ? parseFloat(String(yieldQty).replace(",", ".")) > 0 : true);
 
   const [submitting, setSubmitting] = useState(false);
@@ -976,7 +1165,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
 
           {isPrep ? (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12 }}>
-              <Field label="Aproveitamento" hint="Quantidade que esse preparo rende.">
+              <Field label="Rendimento" hint="Quantidade que esse preparo rende.">
                 <input className="input mono" inputMode="decimal" value={yieldQty}
                        onChange={(e) => setYieldQty(e.target.value)} placeholder="1" required />
               </Field>
@@ -998,10 +1187,32 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
               </Field>
             </div>
           ) : (
-            <Field label="Preço de venda (R$)" hint={isEdit ? "Recalcula o CMV teórico automaticamente." : "Pode ser ajustado depois."}>
-              <input className="input" type="text" inputMode="decimal" value={price}
-                     onChange={(e) => setPrice(e.target.value)} placeholder="0,00" />
-            </Field>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 120px", gap: 12 }}>
+              <Field label="Preço de venda (R$)" hint={isEdit ? "Recalcula o CMV teórico automaticamente." : "Pode ser ajustado depois."}>
+                <input className="input" type="text" inputMode="decimal" value={price}
+                       onChange={(e) => setPrice(e.target.value)} placeholder="0,00" />
+              </Field>
+              <Field label="Rendimento" hint="Quantas porções/unidades esta ficha rende.">
+                <input className="input mono" inputMode="decimal" value={yieldQty}
+                       onChange={(e) => setYieldQty(e.target.value)} placeholder="1" />
+              </Field>
+              <Field label="Unidade">
+                <div style={{ display: "flex", gap: 4 }}>
+                  {["kg", "und"].map((u) => (
+                    <button key={u} type="button" className="btn" data-size="sm"
+                            onClick={() => setYieldUnit(u)}
+                            style={{
+                              flex: 1, justifyContent: "center",
+                              background:   yieldUnit === u ? "var(--accent-soft)" : "var(--bg-2)",
+                              borderColor:  yieldUnit === u ? "var(--accent-line)" : "var(--line)",
+                              color:        yieldUnit === u ? "var(--accent-bright)" : "var(--fg-1)",
+                            }}>
+                      {u}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            </div>
           )}
         </div>
         <div style={{
@@ -1019,6 +1230,113 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
 }
 
 // ===== Modal de adicionar/editar insumo (com suporte a Preparos como fonte) =====
+// Combo com busca por digitação · filtra estoque/preparos em tempo real
+function IngredientSearchCombo({ sources, sourceKey, name, onPick, onTypeName }) {
+  const selected = sources.find((s) => s.key === sourceKey);
+  const [query, setQuery] = useState(selected ? selected.name : (name || ""));
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+
+  // Mantém o input sincronizado quando algo é selecionado por fora
+  useEffect(() => {
+    if (selected) setQuery(selected.name);
+  }, [sourceKey]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const norm = (s) => (s || "").toString().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const q = norm(query);
+  const filtered = q
+    ? sources.filter((s) => norm(s.name).includes(q) || norm(s.label).includes(q))
+    : sources;
+  const stock = filtered.filter((s) => s.kind === "stock");
+  const preps = filtered.filter((s) => s.kind === "preparation");
+
+  const handleType = (v) => {
+    setQuery(v);
+    setOpen(true);
+    // Se o usuário digita algo que não bate exatamente, vira modo manual (sourceKey vazio)
+    if (sourceKey) {
+      onTypeName(v);
+    } else {
+      onTypeName(v);
+    }
+  };
+
+  const select = (key) => {
+    onPick(key);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative" }}>
+      <input
+        className="input"
+        value={query}
+        onChange={(e) => handleType(e.target.value)}
+        onFocus={() => setOpen(true)}
+        placeholder="Buscar no estoque ou preparos · ou digitar manual"
+        autoComplete="off"
+      />
+      {open && (
+        <div style={{
+          position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50,
+          background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 4,
+          marginTop: 4, maxHeight: 260, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.35)",
+        }}>
+          {filtered.length === 0 ? (
+            <div style={{ padding: "10px 12px", fontSize: 11.5, color: "var(--fg-3)" }}>
+              Nenhum match · "{query}" será usado como nome manual.
+            </div>
+          ) : (
+            <>
+              {stock.length > 0 && (
+                <>
+                  <div style={{ padding: "6px 12px", fontSize: 9.5, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.08em", background: "var(--bg-2)" }}>
+                    Estoque
+                  </div>
+                  {stock.map((s) => (
+                    <div key={s.key} onMouseDown={(e) => { e.preventDefault(); select(s.key); }}
+                         style={{
+                           padding: "8px 12px", cursor: "pointer", fontSize: 12,
+                           background: s.key === sourceKey ? "var(--bg-2)" : "transparent",
+                           borderBottom: "1px solid var(--line-soft)",
+                         }}>
+                      {s.label}
+                    </div>
+                  ))}
+                </>
+              )}
+              {preps.length > 0 && (
+                <>
+                  <div style={{ padding: "6px 12px", fontSize: 9.5, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.08em", background: "var(--bg-2)" }}>
+                    Preparos
+                  </div>
+                  {preps.map((s) => (
+                    <div key={s.key} onMouseDown={(e) => { e.preventDefault(); select(s.key); }}
+                         style={{
+                           padding: "8px 12px", cursor: "pointer", fontSize: 12,
+                           background: s.key === sourceKey ? "var(--bg-2)" : "transparent",
+                           borderBottom: "1px solid var(--line-soft)",
+                         }}>
+                      {s.label}
+                    </div>
+                  ))}
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function IngredientModal({ initial, stockItems, availablePreparations = [], excludeId, onCancel, onSubmit, onDelete }) {
   const isEdit = !!initial;
   // Recebe stockItems via prop (carregado uma vez no parent · evita fetch a cada abertura)
@@ -1133,22 +1451,14 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
       }
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <FormRow label="Insumo (estoque ou preparo)" hint="Preparos aparecem com 🔧. Escolher auto-preenche nome, unidade e custo.">
-          <select className="select" value={sourceKey} onChange={(e) => onSourceChange(e.target.value)}>
-            <option value="">— escolher manualmente —</option>
-            <optgroup label="Estoque">
-              {sources.filter((s) => s.kind === "stock").map((s) => (
-                <option key={s.key} value={s.key}>{s.label}</option>
-              ))}
-            </optgroup>
-            {sources.some((s) => s.kind === "preparation") && (
-              <optgroup label="Preparos">
-                {sources.filter((s) => s.kind === "preparation").map((s) => (
-                  <option key={s.key} value={s.key}>{s.label}</option>
-                ))}
-              </optgroup>
-            )}
-          </select>
+        <FormRow label="Insumo (estoque ou preparo)" hint="Digite para filtrar · preparos têm 🔧 · clique pra selecionar.">
+          <IngredientSearchCombo
+            sources={sources}
+            sourceKey={sourceKey}
+            name={name}
+            onPick={(key) => onSourceChange(key)}
+            onTypeName={(v) => { setSourceKey(""); setName(v); }}
+          />
           {isPrepSelected && (
             <div style={{
               marginTop: 8, padding: "8px 12px",
@@ -1159,12 +1469,6 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
             </div>
           )}
         </FormRow>
-
-        {!sourceKey && (
-          <FormRow label="Nome do insumo">
-            <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Pão brioche" />
-          </FormRow>
-        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 1fr", gap: 12 }}>
           <FormRow label="Quantidade">

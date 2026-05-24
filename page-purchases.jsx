@@ -268,13 +268,14 @@ function Purchases() {
     if (source === "db" && tenantId) {
       const { data, error } = await dbInsertGoodsReceipt(tenantId, {
         ...newReceipt,
-        code: recId,
         list_id: draft.list_id, // já é uuid (PO id) quando vem do DB
       });
       if (error) {
         window.showToast(`Erro ao salvar recebimento: ${error.message}`, { tone: "crit", ttl: 4500 });
         return;
       }
+      // Usa o código real gerado pelo banco (em vez do recId calculado no cliente)
+      const realRecId = data?.code || recId;
       // Recarrega recebimentos (e listas pra recomputar status)
       const [{ data: refreshedReceipts }, { data: refreshedLists }] = await Promise.all([
         dbListGoodsReceipts(tenantId), dbListPurchaseOrders(tenantId),
@@ -284,29 +285,47 @@ function Purchases() {
       setReceiving(null);
       // Movimentos de estoque (entrada) — cria via DB; trigger atualiza current_qty
       let entered = 0;
+      let missed = 0;
+      const missedNames = [];
       for (const it of newReceipt.items) {
         const inQty = Number(it.qty_received) || 0;
         if (inQty <= 0) continue;
-        // Resolve stock_item_id pela lista
+        // 1) Resolve stock_item_id pela list_item_id
         let stockItemId = null;
         if (it.list_item_id) {
           const li = list.items.find((x) => x.id === it.list_item_id);
-          stockItemId = li?.stock_item_id;
+          stockItemId = li?.stock_item_id || null;
         }
-        if (!stockItemId) continue; // Skip itens sem referência
+        // 2) Fallback por nome (item adicionado manualmente no recebimento)
+        if (!stockItemId) {
+          const match = findStockItemByName(it.name, stockItems);
+          if (match) stockItemId = match.id;
+        }
+        if (!stockItemId) { missed++; missedNames.push(it.name); continue; }
         const { error: mvErr } = await dbApplyStockMovement(
           tenantId,
           stockItemId,
           inQty,
           "in",
-          `Recebimento ${recId} de ${draft.supplier || "—"}`
+          `Recebimento ${realRecId} de ${draft.supplier || "—"}`,
+          Number(it.unit_cost) || undefined,
         );
-        if (!mvErr) entered++;
+        if (mvErr) { missed++; missedNames.push(it.name); continue; }
+        entered++;
       }
-      window.showToast(
-        `Recebimento ${recId} salvo · ${entered} insumo(s) atualizado(s) no estoque`,
-        { tone: "ok", ttl: 4500 },
-      );
+      if (entered > 0) {
+        const { data: refreshedStock } = await dbListStockItems(tenantId);
+        if (refreshedStock) setStockItems(refreshedStock);
+      }
+      const parts = [
+        `Recebimento ${realRecId} salvo`,
+        `${entered} insumo(s) atualizado(s) no estoque`,
+      ];
+      if (missed > 0) parts.push(`${missed} sem match (${missedNames.slice(0, 2).join(", ")}${missed > 2 ? "…" : ""})`);
+      window.showToast(parts.join(" · "), {
+        tone: missed > 0 ? "warn" : "ok",
+        ttl: 4800,
+      });
       return;
     }
 
@@ -374,10 +393,14 @@ function Purchases() {
     const list = lists.find((l) => l.id === id);
     if (!list) return;
     if (source === "db") {
-      const { error } = await dbDeletePurchaseOrder(id);
-      if (error) {
-        window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
-        return;
+      // Lista agrupada pode ter múltiplos POs (um por fornecedor) — deleta todos
+      const ids = Array.isArray(list._pos) && list._pos.length > 0 ? list._pos : [id];
+      for (const poId of ids) {
+        const { error } = await dbDeletePurchaseOrder(poId);
+        if (error) {
+          window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+          return;
+        }
       }
     }
     setLists((prev)    => prev.filter((l) => l.id !== id));
@@ -638,12 +661,12 @@ function PurchaseListRow({ list, onView, onReceive, onDelete }) {
     <div onClick={onView} className="card"
       style={{
         display: "grid",
-        gridTemplateColumns: "100px 1fr 160px 110px 100px auto",
+        gridTemplateColumns: "70px 1fr 160px 110px 100px auto",
         gap: 14, alignItems: "center",
         padding: "14px 16px", textAlign: "left", cursor: "pointer",
       }}>
       <span className="mono" style={{ fontSize: 11, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-        {list.id} · {_isoTimeBR(list.created_at)}
+        {_isoTimeBR(list.created_at)}
       </span>
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500, letterSpacing: "-0.005em" }}>{list.title}</div>
@@ -699,7 +722,7 @@ function PurchaseDetailView({ list, receipts, supplierStatusFor, onBack, onRecei
               <I.Chevron size={11} style={{ transform: "rotate(90deg)" }} />Voltar
             </button>
             <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-              {list.id} · {_isoDateBR(list.created_at)} {_isoTimeBR(list.created_at)} · {list.created_by}
+              {_isoDateBR(list.created_at)} {_isoTimeBR(list.created_at)} · {list.created_by}
             </span>
             <ListStatusBadge status={list.computedStatus || list.status} />
           </div>
@@ -861,14 +884,11 @@ function ReceiptsHistory({ receipts }) {
             return (
               <div key={r.id} style={{
                 display: "grid",
-                gridTemplateColumns: "100px 1fr 90px 110px 100px",
+                gridTemplateColumns: "1fr 90px 110px 100px",
                 gap: 12, alignItems: "center",
                 padding: "12px 16px",
                 borderBottom: idx < receipts.length - 1 ? "1px solid var(--line-soft)" : "none",
               }}>
-                <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                  {r.id}
-                </span>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>
                     {r.supplier}{r.nf_number ? ` · ${r.nf_number}` : ""}
@@ -969,7 +989,10 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
   const totalReceived = lines.reduce((s, ln) => s + ((Number(ln.qty_received) || 0) * (Number(ln.unit_cost) || 0)), 0);
   const divergentCount = lines.filter((ln) => ln.divergent).length;
   const validLines = lines.filter((ln) => ln.name.trim() && Number(ln.qty_received) >= 0);
-  const valid = validLines.length > 0;
+  // Exige observação quando há divergência
+  const needsNotes = divergentCount > 0;
+  const hasNotes = notes.trim().length > 0;
+  const valid = validLines.length > 0 && (!needsNotes || hasNotes);
 
   const submit = () => {
     if (!valid) return;
@@ -1002,14 +1025,17 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
       width={760}
       footer={
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 12 }}>
-          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: divergentCount > 0 ? "var(--warn)" : "var(--fg-3)" }}>
-            {divergentCount > 0
-              ? `${divergentCount} divergência(s) será(ão) registrada(s)`
-              : "Sem divergências detectadas"}
+          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: needsNotes && !hasNotes ? "var(--crit)" : divergentCount > 0 ? "var(--warn)" : "var(--fg-3)" }}>
+            {needsNotes && !hasNotes
+              ? `${divergentCount} divergência(s) · descreva nas observações`
+              : divergentCount > 0
+                ? `${divergentCount} divergência(s) será(ão) registrada(s)`
+                : "Sem divergências detectadas"}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid}>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid}
+                    title={needsNotes && !hasNotes ? "Preencha as Observações para registrar as divergências" : ""}>
               <I.Check size={11} />Confirmar recebimento
             </button>
           </div>
@@ -1103,18 +1129,6 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
                 <I.X size={11} />
               </button>
 
-              {/* Linha auxiliar de divergência */}
-              {isDiverg && (
-                <div style={{ gridColumn: "1 / -1", paddingLeft: 4, marginTop: 2, marginBottom: 4 }}>
-                  <input
-                    className="input"
-                    style={{ fontSize: 11.5, padding: "5px 8px", borderColor: "var(--warn)" }}
-                    placeholder={isManual ? "Motivo do item adicional" : "Motivo da divergência (opcional)"}
-                    value={ln.divergence_reason}
-                    onChange={(e) => setLine(i, "divergence_reason", e.target.value)}
-                  />
-                </div>
-              )}
             </div>
           );
         })}
@@ -1126,8 +1140,17 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
         </button>
       </div>
 
-      <FormRow label="Observações" hint="Ex.: produto substituto, condição da entrega, atraso etc.">
-        <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      <FormRow
+        label={needsNotes ? "Observações · obrigatório (descreva as divergências)" : "Observações"}
+        hint={needsNotes
+          ? "Há divergências de quantidade — informe o motivo antes de confirmar."
+          : "Ex.: produto substituto, condição da entrega, atraso etc."}
+      >
+        <input className="input"
+               value={notes}
+               onChange={(e) => setNotes(e.target.value)}
+               style={needsNotes && !hasNotes ? { borderColor: "var(--crit)" } : null}
+               placeholder={needsNotes ? "Ex.: vieram 3 un em vez de 2 (cortesia do fornecedor)" : ""} />
       </FormRow>
     </Modal>
   );
@@ -1395,82 +1418,13 @@ function SavedListView({ list, onBack, onReceive, onDelete, stockItems = MOCK.ST
           </span>
         </div>
 
-        {bySupplier.map(([supName, items]) => {
-          const supInfo = MOCK.supplierByName ? MOCK.supplierByName(supName) : null;
-          const supTotal = items.reduce((s, it) => s + (it.est_cost || 0), 0);
-          const groupCritical = items.some((it) => it.isCritical);
-          return (
-            <div key={supName} className="card">
-              <div className="card-header">
-                <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                  <I.Truck size={15} style={{ color: groupCritical ? "var(--crit)" : "var(--fg-2)", flexShrink: 0 }} />
-                  <div style={{ minWidth: 0 }}>
-                    <h3 className="card-title" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                      {supName}
-                      {groupCritical && <span className="badge" data-tone="crit">crítico</span>}
-                    </h3>
-                    <div className="card-sub" style={{ display: "block", marginTop: 3 }}>
-                      {items.length} {items.length === 1 ? "item" : "itens"}
-                      {supInfo?.contact ? ` · ${supInfo.contact}` : ""}
-                      {supInfo?.lead ? ` · lead ${supInfo.lead}` : ""}
-                    </div>
-                  </div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
-                  <span className="mono" style={{ fontSize: 14, color: "var(--fg-0)", fontWeight: 500 }}>
-                    {_fmtBRLp(supTotal)}
-                  </span>
-                  <button className="btn" data-size="sm"
-                          onClick={() => copySupplier(supName, items)}
-                          title={`Copiar lista de ${supName} para o WhatsApp (sem custos)`}>
-                    <I.WhatsApp size={12} />Copiar
-                  </button>
-                  <button className="btn" data-size="sm"
-                          onClick={() => printShoppingList(list, [[supName, items]], { single: true })}
-                          title={`Imprimir lista de ${supName}`}>
-                    Imprimir
-                  </button>
-                </div>
-              </div>
-              <table className="table" data-density="compact">
-                <thead>
-                  <tr>
-                    <th>Insumo</th>
-                    <th className="num">Atual</th>
-                    <th className="num">Mín</th>
-                    <th className="num">Máx</th>
-                    <th className="num">Comprar</th>
-                    <th className="num">Custo unit.</th>
-                    <th className="num">Custo composto</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((s) => (
-                    <tr key={s.id}>
-                      <td className="row-strong">
-                        <div>{s.name}</div>
-                        <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.04em", textTransform: "uppercase", marginTop: 2 }}>
-                          {s.stock_item_id || "—"}
-                          {s.isCritical ? <span style={{ color: "var(--crit)", marginLeft: 6 }}>· ruptura</span> : null}
-                        </div>
-                      </td>
-                      <td className="num" style={{ color: s.currentQty == null ? "var(--fg-3)" : (s.currentQty <= 0 ? "var(--crit)" : "var(--fg-1)") }}>
-                        {s.currentQty == null ? "—" : `${s.currentQty} ${s.stockUnit || s.unit}`}
-                      </td>
-                      <td className="num" style={{ color: "var(--fg-2)" }}>{s.reorder ?? "—"}</td>
-                      <td className="num" style={{ color: "var(--fg-2)" }}>{s.max ?? "—"}</td>
-                      <td className="num" style={{ color: "var(--accent-bright)", fontWeight: 500 }}>
-                        {s.qty} {s.unit}
-                      </td>
-                      <td className="num">{_fmtBRLp(s.est_unit_cost)}</td>
-                      <td className="num">{_fmtBRLp(s.est_cost)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        })}
+        <SupplierCardsGrid
+          list={list}
+          bySupplier={bySupplier}
+          total={total}
+          onCopy={copySupplier}
+          onPrint={(items, supName) => printShoppingList(list, [[supName, items]], { single: true })}
+        />
       </div>
     </>
   );
@@ -1531,6 +1485,163 @@ function PStat({ label, value, tone }) {
              : "var(--fg-0)",
       }}>{value}</span>
     </div>
+  );
+}
+
+// ===================== Grid de fornecedores estilo inventário =====================
+function SupplierCardsGrid({ list, bySupplier, total, onCopy, onPrint }) {
+  const [expanded, setExpanded] = useState(null); // supplier name expandido (mostra itens)
+
+  return (
+    <>
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+        gap: 12,
+      }}>
+        {bySupplier.map(([supName, items]) => {
+          const supTotal = items.reduce((s, it) => s + (it.est_cost || 0), 0);
+          const groupCritical = items.some((it) => it.isCritical);
+          const isExpanded = expanded === supName;
+          const pct = total > 0 ? Math.round((supTotal / total) * 100) : 0;
+          return (
+            <div key={supName} style={{
+              padding: "16px 16px 14px",
+              background: "var(--bg-1)",
+              border: `1px solid ${groupCritical ? "var(--crit-line)" : "var(--line)"}`,
+              borderRadius: 6,
+              display: "flex", flexDirection: "column", gap: 10,
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                    <I.Truck size={13} style={{ color: groupCritical ? "var(--crit)" : "var(--fg-2)", flexShrink: 0 }} />
+                    <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--fg-0)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {supName}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: "var(--fg-3)" }}>
+                    {items.length} {items.length === 1 ? "item" : "itens"}
+                    {groupCritical && <span style={{ color: "var(--crit)", marginLeft: 6 }}>· crítico</span>}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+                <span className="mono" style={{ fontSize: 18, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em" }}>
+                  {_fmtBRLp(supTotal)}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--fg-3)" }}>{pct}% da lista</span>
+              </div>
+
+              <div className="bar" style={{ height: 3 }}>
+                <i style={{ width: `${pct}%`, background: groupCritical ? "var(--crit)" : "var(--accent-bright)" }} />
+              </div>
+
+              {/* Itens inline · sempre visíveis */}
+              <div style={{
+                display: "flex", flexDirection: "column", gap: 4,
+                padding: "8px 0 2px",
+                borderTop: "1px solid var(--line-soft)",
+                fontSize: 11,
+                maxHeight: 240, overflowY: "auto",
+              }}>
+                {items.map((s) => (
+                  <div key={s.id} style={{
+                    display: "grid", gridTemplateColumns: "1fr auto",
+                    gap: 6, alignItems: "baseline",
+                    padding: "3px 2px",
+                  }}>
+                    <span style={{
+                      color: s.isCritical ? "var(--crit)" : "var(--fg-1)",
+                      whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                    }} title={s.name}>{s.name}</span>
+                    <span className="mono" style={{ color: "var(--accent-bright)", fontSize: 11, whiteSpace: "nowrap" }}>
+                      {s.qty} {s.unit}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                <button className="btn" data-size="sm" style={{ flex: 1 }}
+                        onClick={() => setExpanded(isExpanded ? null : supName)}>
+                  {isExpanded ? "Ocultar detalhes" : "Detalhes"}
+                </button>
+                <button className="btn" data-size="sm" title="Copiar para WhatsApp"
+                        onClick={() => onCopy(supName, items)}>
+                  <I.WhatsApp size={12} />
+                </button>
+                <button className="btn" data-size="sm" title="Imprimir"
+                        onClick={() => onPrint(items, supName)}>
+                  ⎙
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Detalhe expandido (abaixo do grid) */}
+      {expanded && (() => {
+        const entry = bySupplier.find(([n]) => n === expanded);
+        if (!entry) return null;
+        const [supName, items] = entry;
+        const supTotal = items.reduce((s, it) => s + (it.est_cost || 0), 0);
+        return (
+          <div className="card" style={{ marginTop: 14 }}>
+            <div className="card-header">
+              <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                <I.Truck size={15} style={{ color: "var(--fg-2)" }} />
+                <div>
+                  <h3 className="card-title">{supName}</h3>
+                  <div className="card-sub" style={{ marginTop: 2 }}>
+                    {items.length} {items.length === 1 ? "item" : "itens"} · {_fmtBRLp(supTotal)}
+                  </div>
+                </div>
+              </div>
+              <button className="btn" data-size="sm" data-variant="ghost" onClick={() => setExpanded(null)}>×</button>
+            </div>
+            <table className="table" data-density="compact">
+              <thead>
+                <tr>
+                  <th>Insumo</th>
+                  <th className="num">Atual</th>
+                  <th className="num">Mín</th>
+                  <th className="num">Máx</th>
+                  <th className="num">Comprar</th>
+                  <th className="num">Custo unit.</th>
+                  <th className="num">Custo composto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((s) => (
+                  <tr key={s.id}>
+                    <td className="row-strong">
+                      <div>{s.name}</div>
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.04em", textTransform: "uppercase", marginTop: 2 }}>
+                        {s.stock_item_id || "—"}
+                        {s.isCritical ? <span style={{ color: "var(--crit)", marginLeft: 6 }}>· ruptura</span> : null}
+                      </div>
+                    </td>
+                    <td className="num" style={{ color: s.currentQty == null ? "var(--fg-3)" : (s.currentQty <= 0 ? "var(--crit)" : "var(--fg-1)") }}>
+                      {s.currentQty == null ? "—" : `${s.currentQty} ${s.stockUnit || s.unit}`}
+                    </td>
+                    <td className="num" style={{ color: "var(--fg-2)" }}>{s.reorder ?? "—"}</td>
+                    <td className="num" style={{ color: "var(--fg-2)" }}>{s.max ?? "—"}</td>
+                    <td className="num" style={{ color: "var(--accent-bright)", fontWeight: 500 }}>
+                      {s.qty} {s.unit}
+                    </td>
+                    <td className="num">{_fmtBRLp(s.est_unit_cost)}</td>
+                    <td className="num">{_fmtBRLp(s.est_cost)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      })()}
+    </>
   );
 }
 

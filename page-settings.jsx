@@ -364,17 +364,18 @@ function UsersTab() {
 
   const save = async (u) => {
     if (editing?.userId) {
-      // Edit existing member
+      // Edit existing member · update atômico via edge function `update-member`
       if (dbStatus.isOnline && tenantId) {
-        const { error } = await dbUpdateMemberRole?.(editing.userId, tenantId, {
+        const { error } = await dbUpdateMember?.(tenantId, editing.userId, {
+          name: u.name,
           role: ROLE_TO_DB[u.role],
           ops: u.ops ? [u.ops] : [],
+          modules: Array.isArray(u.modules) ? u.modules : null,
         });
         if (error) {
-          window.showToast(`Erro ao atualizar: ${error.message}`, { tone: "crit" });
+          window.showToast(`Erro ao atualizar: ${error.message}`, { tone: "crit", ttl: 4500 });
           return;
         }
-        // Reload members
         const res = await dbListMembers?.(tenantId);
         if (res?.data) setUsers(res.data);
         window.showToast(`${u.name} atualizado`, { tone: "ok" });
@@ -383,24 +384,27 @@ function UsersTab() {
         window.showToast(`${u.name} atualizado`, { tone: "ok" });
       }
     } else {
-      // Invite new member
+      // Create member with password (no email confirmation)
       if (dbStatus.isOnline && tenantId) {
         const { error } = await dbInviteMember?.(tenantId, {
           email: u.email,
+          password: u.password,
+          name: u.name,
           role: ROLE_TO_DB[u.role],
           ops: u.ops ? [u.ops] : [],
+          modules: Array.isArray(u.modules) ? u.modules : null,
         });
         if (error) {
-          window.showToast(`Erro ao convidar: ${error.message}`, { tone: "crit" });
+          window.showToast(`Erro ao criar usuário: ${error.message}`, { tone: "crit" });
           return;
         }
         // Reload members
         const res = await dbListMembers?.(tenantId);
         if (res?.data) setUsers(res.data);
-        window.showToast(`Convite enviado para ${u.email}`, { tone: "ok" });
+        window.showToast(`${u.name || u.email} criado com acesso ativo`, { tone: "ok" });
       } else {
-        setUsers([...users, { ...u, last: "convite enviado", userId: null }]);
-        window.showToast(`Convite enviado para ${u.email}`, { tone: "ok" });
+        setUsers([...users, { ...u, last: "criado agora", userId: null }]);
+        window.showToast(`${u.name || u.email} criado com acesso ativo`, { tone: "ok" });
       }
     }
     setEditing(null);
@@ -495,15 +499,58 @@ const ROLE_MODULE_PRESETS = {
   "Visualização":     ["dashboard"],
 };
 
+function generatePassword() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  let out = "";
+  const arr = new Uint32Array(12);
+  (window.crypto || window.msCrypto).getRandomValues(arr);
+  for (let i = 0; i < arr.length; i++) out += chars[arr[i] % chars.length];
+  return out;
+}
+
 function UserModal({ initial, onClose, onSave }) {
-  const [name, setName]   = useState(initial?.name || "");
-  const [email, setEmail] = useState(initial?.email || "");
+  const [name, setName]     = useState(initial?.name || "");
+  const [email, setEmail]   = useState(initial?.email || "");
+  const [password, setPassword] = useState(initial ? "" : generatePassword());
+  const [showPwd, setShowPwd]   = useState(true);
+  // Em modo edição: toggle "Trocar senha" — quando ligado, gera nova senha
+  const [changePwd, setChangePwd] = useState(false);
   const [role, setRole]   = useState(initial?.role || "Operador cozinha");
   const [ops, setOps]     = useState(initial?.ops || "todas");
+  const [saving, setSaving] = useState(false);
   const [modules, setModules] = useState(
     initial?.modules || ROLE_MODULE_PRESETS[initial?.role || "Operador cozinha"] || ["dashboard"]
   );
-  const valid = name.trim() && /\S+@\S+\.\S+/.test(email) && modules.length > 0;
+  // Senha é obrigatória ao criar; ao editar só importa se "Trocar senha" estiver ligado
+  const pwdProvided = typeof password === "string" && password.length >= 6;
+  const pwdOk = initial ? (!changePwd || pwdProvided) : pwdProvided;
+  const valid = name.trim() && /\S+@\S+\.\S+/.test(email) && modules.length > 0 && pwdOk;
+
+  const copyPwd = async () => {
+    try {
+      await navigator.clipboard.writeText(password);
+      window.showToast?.("Senha copiada", { tone: "ok", ttl: 1800 });
+    } catch (_) { /* noop */ }
+  };
+
+  const submit = async () => {
+    if (!valid || saving) return;
+    setSaving(true);
+    try {
+      const payload = { name: name.trim(), email: email.trim(), role, ops, modules };
+      if (!initial) payload.password = password;
+      else if (changePwd && pwdProvided) payload.password = password;
+      await onSave(payload);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleChangePwd = (on) => {
+    setChangePwd(on);
+    if (on && !password) setPassword(generatePassword());
+    if (!on) setPassword("");
+  };
 
   // Trocar de papel substitui os módulos pelo preset; o usuário pode ajustar depois.
   const onRoleChange = (next) => {
@@ -519,15 +566,15 @@ function UserModal({ initial, onClose, onSave }) {
   const applyPreset = () => setModules(ROLE_MODULE_PRESETS[role] || []);
 
   return (
-    <Modal title={initial ? "Editar usuário" : "Convidar usuário"}
-      subtitle={initial ? null : "Será enviado um e-mail de convite com link de acesso."}
-      onClose={onClose}
+    <Modal title={initial ? "Editar usuário" : "Criar usuário"}
+      subtitle={initial ? null : "O usuário poderá entrar imediatamente com o e-mail e a senha definidos aqui."}
+      onClose={saving ? undefined : onClose}
       width={560}
       footer={<>
-        <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
-                onClick={() => onSave({ name: name.trim(), email: email.trim(), role, ops, modules })}>
-          {initial ? "Salvar" : "Enviar convite"}
+        <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || saving}
+                onClick={submit}>
+          {saving ? (initial ? "Salvando…" : "Criando…") : (initial ? "Salvar" : "Criar usuário")}
         </button>
       </>}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -537,6 +584,74 @@ function UserModal({ initial, onClose, onSave }) {
         <FormRow label="E-mail">
           <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} disabled={!!initial} />
         </FormRow>
+
+        {!initial && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <FormRow label="Senha inicial" hint="Mínimo 6 caracteres. Compartilhe com o usuário — ele pode trocar depois.">
+              <div style={{ display: "flex", gap: 6 }}>
+                <input className="input mono" type={showPwd ? "text" : "password"}
+                       value={password} onChange={(e) => setPassword(e.target.value)}
+                       style={{ flex: 1 }} />
+                <button type="button" className="btn" data-size="sm" data-variant="ghost"
+                        onClick={() => setShowPwd((v) => !v)} title={showPwd ? "Ocultar" : "Mostrar"}>
+                  {showPwd ? "Ocultar" : "Mostrar"}
+                </button>
+                <button type="button" className="btn" data-size="sm" data-variant="ghost"
+                        onClick={() => setPassword(generatePassword())} title="Gerar nova senha">
+                  ↻ Gerar
+                </button>
+                <button type="button" className="btn" data-size="sm" data-variant="ghost"
+                        onClick={copyPwd} title="Copiar senha">
+                  Copiar
+                </button>
+              </div>
+            </FormRow>
+          </div>
+        )}
+
+        {initial && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <label style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: "10px 12px",
+              background: changePwd ? "var(--warn-soft)" : "var(--bg-2)",
+              border: `1px solid ${changePwd ? "var(--warn-line)" : "var(--line)"}`,
+              borderRadius: 6, cursor: "pointer",
+            }}>
+              <input type="checkbox" checked={changePwd} onChange={(e) => toggleChangePwd(e.target.checked)} />
+              <div style={{ flex: 1, fontSize: 12 }}>
+                <strong style={{ color: "var(--fg-0)" }}>Trocar senha</strong>
+                <div style={{ color: "var(--fg-3)", fontSize: 10.5, marginTop: 2 }}>
+                  Define uma nova senha de acesso para o usuário. A senha atual será invalidada.
+                </div>
+              </div>
+            </label>
+            {changePwd && (
+              <div style={{ marginTop: 10 }}>
+                <FormRow label="Nova senha" hint={pwdProvided ? "Compartilhe com o usuário." : "Mínimo 6 caracteres."}>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input className="input mono" type={showPwd ? "text" : "password"}
+                           value={password} onChange={(e) => setPassword(e.target.value)}
+                           style={{ flex: 1, ...(pwdProvided ? null : { borderColor: "var(--crit)" }) }} />
+                    <button type="button" className="btn" data-size="sm" data-variant="ghost"
+                            onClick={() => setShowPwd((v) => !v)}>
+                      {showPwd ? "Ocultar" : "Mostrar"}
+                    </button>
+                    <button type="button" className="btn" data-size="sm" data-variant="ghost"
+                            onClick={() => setPassword(generatePassword())}>
+                      ↻ Gerar
+                    </button>
+                    <button type="button" className="btn" data-size="sm" data-variant="ghost"
+                            onClick={copyPwd}>
+                      Copiar
+                    </button>
+                  </div>
+                </FormRow>
+              </div>
+            )}
+          </div>
+        )}
+
         <FormRow label="Função">
           <select className="select" value={role} onChange={(e) => onRoleChange(e.target.value)}>
             <option>Super Admin</option>

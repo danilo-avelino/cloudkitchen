@@ -1,16 +1,53 @@
 // Shell: sidebar + topbar + content area + toast wiring
 // (React + hooks vêm como globais via plugin injectLegacyGlobals do Vite)
 
+// Catálogo único de módulos do app — espelha src/App.jsx e page-settings.jsx
+const APP_MODULES = ["dashboard","stock","recipes","revenue","requests","purchases","cmv","finance","settings"];
+
+// Preset padrão por role do banco quando o membro não tem `modules` customizado
+const ROLE_DEFAULT_MODULES = {
+  owner:      APP_MODULES,
+  admin:      APP_MODULES,
+  manager:    APP_MODULES.filter((m) => m !== "settings"),
+  kitchen:    ["dashboard", "stock", "requests", "recipes"],
+  stock:      ["dashboard", "stock", "requests", "purchases"],
+  accountant: ["dashboard", "revenue", "cmv", "finance"],
+  viewer:     ["dashboard"],
+};
+// Compat: roles vindos do MOCK em português
+const ROLE_LABEL_TO_DB = {
+  "Super Admin": "owner", "Gestor de marca": "manager",
+  "Operador cozinha": "kitchen", "Estoquista": "stock",
+  "Contador": "accountant", "Visualização": "viewer",
+};
+
+function getAllowedModules(user) {
+  if (!user) return ["dashboard"];
+  const dbRole = ROLE_LABEL_TO_DB[user.role] || user.role || "viewer";
+  // Owner/admin sempre veem tudo, ignorando customização (evita auto-bloqueio)
+  if (dbRole === "owner" || dbRole === "admin") return APP_MODULES;
+  if (Array.isArray(user.modules) && user.modules.length > 0) {
+    return user.modules.filter((m) => APP_MODULES.includes(m));
+  }
+  return ROLE_DEFAULT_MODULES[dbRole] || ["dashboard"];
+}
+
+window.getAllowedModules = getAllowedModules;
+window.APP_MODULES = APP_MODULES;
+window.ROLE_DEFAULT_MODULES = ROLE_DEFAULT_MODULES;
+
 function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, user }) {
-  const role    = user?.role || "operator";
-  const canAdmin = ["owner", "admin", "manager"].includes(role);
+  const role = user?.role || "operator";
+  const allowed = getAllowedModules(user);
+  const has = (id) => allowed.includes(id);
 
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
   const [stockCrit, setStockCrit] = useState(0);
+  const [stockOut,  setStockOut]  = useState(0);
   const [pendingReq, setPendingReq] = useState(0);
 
   useEffect(() => {
-    if (!dbStatus.isOnline || !user?.tenantId) { setStockCrit(0); setPendingReq(0); return; }
+    if (!dbStatus.isOnline || !user?.tenantId) { setStockCrit(0); setStockOut(0); setPendingReq(0); return; }
     let cancelled = false;
     (async () => {
       try {
@@ -21,7 +58,10 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
         if (cancelled) return;
         const stockItems = stockRes?.data || [];
         const requests   = reqRes?.data   || [];
-        setStockCrit(stockItems.filter((i) => (i.qty || 0) < (i.reorder || 0)).length);
+        const out  = stockItems.filter((i) => (i.qty || 0) <= 0).length;
+        const crit = stockItems.filter((i) => (i.qty || 0) > 0 && (i.qty || 0) < (i.reorder || 0)).length;
+        setStockOut(out);
+        setStockCrit(out + crit);
         setPendingReq(requests.filter((r) => r.status === "pending").length);
       } catch (e) {
         console.warn("[sidebar] falha ao carregar badges:", e);
@@ -32,16 +72,15 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
 
   const allNav = [
     { id: "dashboard",  label: "Dashboard",      icon: I.Dashboard },
-    { id: "stock",      label: "Estoque",         icon: I.Stock,       badge: stockCrit || null },
+    { id: "stock",      label: "Estoque",         icon: I.Stock,       badge: stockCrit || null, badgeTone: stockOut > 0 ? "crit" : "warn" },
     { id: "recipes",    label: "Fichas técnicas", icon: I.Recipe },
     { id: "revenue",    label: "Faturamento",     icon: I.Revenue },
     { id: "requests",   label: "Requisições",     icon: I.Request,     pulse: pendingReq || null },
     { id: "purchases",  label: "Compras",         icon: I.ShoppingList },
     { id: "cmv",        label: "CMV & margem",    icon: I.CMV },
     { id: "finance",    label: "Financeiro & DRE",icon: I.Finance },
-    // Configurações: somente manager+ vê na sidebar; operadores acessam via Topbar
-    ...(canAdmin ? [{ id: "settings", label: "Configurações", icon: I.Settings }] : []),
-  ];
+    { id: "settings",   label: "Configurações",   icon: I.Settings },
+  ].filter((item) => has(item.id));
 
   const initials = user?.name?.split(" ").map((n) => n[0]).slice(0, 2).join("") || "?";
   const tenantName = user?.tenantName || "Cloud Kitchen";
@@ -84,7 +123,13 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
                 {item.label}
               </span>
               {item.pulse && <span style={sb.pulse}>{item.pulse}</span>}
-              {item.badge && !item.pulse && <span style={sb.badgeNum}>{item.badge}</span>}
+              {item.badge && !item.pulse && (
+                <span style={{
+                  ...sb.badgeNum,
+                  ...(item.badgeTone === "crit" ? { background: "var(--crit-soft)", color: "var(--crit)" } :
+                      item.badgeTone === "warn" ? { background: "var(--warn-soft)", color: "var(--warn)" } : null),
+                }}>{item.badge}</span>
+              )}
             </button>
           );
         })}
@@ -92,9 +137,9 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
 
       {/* User */}
       <button
-        style={{ ...sb.user, width: "100%", background: "transparent", textAlign: "left", cursor: "pointer" }}
-        onClick={() => setPage("settings")}
-        title="Abrir configurações"
+        style={{ ...sb.user, width: "100%", background: "transparent", textAlign: "left", cursor: has("settings") ? "pointer" : "default" }}
+        onClick={() => { if (has("settings")) setPage("settings"); }}
+        title={has("settings") ? "Abrir configurações" : user?.name || "Usuário"}
       >
         <div style={sb.avatar}>{initials}</div>
         <div style={{ minWidth: 0, flex: 1 }}>

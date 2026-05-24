@@ -113,7 +113,20 @@ async function dbGetCurrentContext() {
     const { data: { user } } = await _client.auth.getUser();
     if (!user) return null;
     const { data: profile } = await _client.from("profiles").select("*").eq("id", user.id).maybeSingle();
-    const { data: members } = await _client.from("tenant_members").select("tenant_id, role").eq("user_id", user.id);
+    // Seleciona modules separadamente — se a migration de Fase 14 ainda não foi
+    // aplicada (coluna inexistente), cai pra select básico em vez de quebrar tudo.
+    let members = null;
+    {
+      const full = await _client.from("tenant_members")
+        .select("tenant_id, role, ops, modules").eq("user_id", user.id);
+      if (full.error) {
+        const basic = await _client.from("tenant_members")
+          .select("tenant_id, role, ops").eq("user_id", user.id);
+        members = basic.data;
+      } else {
+        members = full.data;
+      }
+    }
     const member = members?.[0] || null;
     let tenant = null;
     if (member) {
@@ -335,9 +348,18 @@ function mapStockItemFromDb(row) {
     composeCmv: row.compose_cmv !== false,
     supplier:  row.supplier?.name || null,
     supplierId: row.supplier_id,
+    autoMin:   row.auto_min_enabled === true,
     alloc,
     notes:     row.notes,
   };
+}
+
+async function dbSetStockItemAutoMin(itemId, enabled) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("stock_items")
+    .update({ auto_min_enabled: !!enabled })
+    .eq("id", itemId);
+  return { error };
 }
 
 async function dbListStockItems(tenantId) {
@@ -346,7 +368,7 @@ async function dbListStockItems(tenantId) {
     const { data, error } = await _client.from("stock_items")
       .select(`
         id, code, name, unit, unit_cost, current_qty, reorder_point,
-        max_qty, expiration_date, compose_cmv, notes, status,
+        max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
         category_id, supplier_id,
         category:stock_categories(id, name, color),
         supplier:suppliers(id, name),
@@ -407,7 +429,7 @@ async function dbUpdateStockItem(id, patch) {
   if (patch.notes       !== undefined) update.notes = patch.notes;
   const { data, error } = await _client.from("stock_items").update(update).eq("id", id).select(`
     id, code, name, unit, unit_cost, current_qty, reorder_point,
-    max_qty, expiration_date, compose_cmv, notes, status,
+    max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
     category_id, supplier_id,
     category:stock_categories(id, name, color),
     supplier:suppliers(id, name),
@@ -458,7 +480,7 @@ async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, sto
     .select(`
       id, kind, qty, unit_cost, notes, performed_at,
       reference_type, reference_id,
-      stock_item:stock_items(id, name, unit),
+      stock_item:stock_items(id, name, unit, compose_cmv),
       operation:operations(id, slug, name)
     `)
     .eq("tenant_id", tenantId)
@@ -474,8 +496,11 @@ async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, sto
     at:    m.performed_at,
     kind:  m.kind,
     delta: Number(m.qty) || 0,
+    unitCost: Number(m.unit_cost) || 0,
+    itemId: m.stock_item?.id || null,
     item:  m.stock_item?.name || "—",
     unit:  m.stock_item?.unit || "",
+    composeCmv: m.stock_item?.compose_cmv !== false,
     op:    m.operation?.slug || (m.kind === "in" ? "—" : "—"),
     ref:   m.notes || m.reference_type || "—",
   }));
@@ -593,8 +618,35 @@ async function dbUpdateRevenueEntry(id, patch) {
   if (patch.ordersCount !== undefined) update.orders_count = patch.ordersCount;
   if (patch.status !== undefined)      update.status = patch.status;
   if (patch.notes !== undefined)       update.notes = patch.notes;
+  if (patch.date !== undefined)        update.business_date = patch.date;
+  if (patch.source !== undefined)      update.source = patch.source;
   const { data, error } = await _client.from("revenue_entries").update(update).eq("id", id).select().single();
-  return { data, error };
+  if (error) return { data, error };
+
+  // Atualiza breakdown · delete + reinsert para refletir mudanças nos métodos
+  if (patch.breakdown !== undefined) {
+    const tenantId = data?.tenant_id;
+    if (!tenantId) return { data, error: new Error("tenant_id ausente no update do faturamento") };
+    const { error: dErr } = await _client.from("revenue_payment_breakdown")
+      .delete().eq("revenue_entry_id", id);
+    if (dErr) return { data, error: dErr };
+    const { data: methods } = await _client.from("payment_methods")
+      .select("id, slug").eq("tenant_id", tenantId);
+    const slugMap = {};
+    (methods || []).forEach((m) => { slugMap[m.slug] = m.id; });
+    const rows = Object.entries(patch.breakdown || {})
+      .filter(([slug, amount]) => slugMap[slug] && Number(amount) > 0)
+      .map(([slug, amount]) => ({
+        revenue_entry_id:  id,
+        payment_method_id: slugMap[slug],
+        amount:            Number(amount) || 0,
+      }));
+    if (rows.length > 0) {
+      const { error: iErr } = await _client.from("revenue_payment_breakdown").insert(rows);
+      if (iErr) return { data, error: iErr };
+    }
+  }
+  return { data, error: null };
 }
 
 async function dbDeleteRevenueEntry(id) {
@@ -748,7 +800,36 @@ async function dbListPurchaseOrders(tenantId) {
     .eq("tenant_id", tenantId)
     .order("created_at", { ascending: false });
   if (error) return { data: null, source: "mock", error };
-  return { data: (data || []).map(mapPurchaseOrderFromDb), source: "db", error: null };
+
+  // Agrupa POs por prefixo do code (LCO-XXXXXX-FORN → LCO-XXXXXX) para mostrar
+  // como UMA lista de compras com múltiplos fornecedores. POs sem prefixo ficam isolados.
+  const flat = (data || []).map(mapPurchaseOrderFromDb);
+  const groups = {};
+  for (const po of flat) {
+    const m = String(po.code || "").match(/^(LCO-[A-Z0-9]+)/i);
+    const groupKey = m ? m[1] : po.id;
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        id: po.id,                       // id do primeiro PO (representa a lista)
+        code: groupKey,
+        title: po.title?.replace(/ \(.*\)$/, "") || `Lista ${groupKey}`,
+        created_at: po.created_at,
+        created_by: po.created_by,
+        status: po.status,
+        notes: po.notes,
+        items: [],
+        _pos: [],                        // ids dos POs que compõem essa lista (uso interno)
+      };
+    }
+    groups[groupKey].items.push(...po.items);
+    groups[groupKey]._pos.push(po.id);
+    // status agregado: se algum aberto, fica aberto
+    if (po.status === "draft" || po.status === "open" || po.status === "ordered") {
+      groups[groupKey].status = po.status;
+    }
+  }
+  const merged = Object.values(groups).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  return { data: merged, source: "db", error: null };
 }
 
 async function dbInsertPurchaseOrder(tenantId, draft) {
@@ -859,16 +940,37 @@ async function dbInsertGoodsReceipt(tenantId, draft) {
   }
   if (!supId) return { data: null, error: new Error(`Fornecedor "${header.supplier}" não encontrado`) };
 
-  const { data: row, error } = await _client.from("goods_receipts").insert({
-    tenant_id:         tenantId,
-    purchase_order_id: header.list_id,
-    supplier_id:       supId,
-    code:              header.code || null,
-    status:            "confirmed",
-    nf_number:         header.nf_number || null,
-    notes:             header.notes || null,
-  }).select().single();
-  if (error) return { data: null, error };
+  // Gera REC-XXXX a partir do max(code) por tenant — ignora código vindo do FE
+  // (evita colisão quando o FE conta só o array local). Faz até 5 tentativas
+  // em caso de race condition na unique constraint (tenant_id, code).
+  const nextReceiptCode = async () => {
+    const { data: rows } = await _client.from("goods_receipts")
+      .select("code").eq("tenant_id", tenantId)
+      .like("code", "REC-%").order("code", { ascending: false }).limit(1);
+    const last = rows?.[0]?.code || "";
+    const n = parseInt(String(last).replace(/\D/g, ""), 10);
+    return `REC-${String((Number.isFinite(n) ? n : 0) + 1).padStart(4, "0")}`;
+  };
+
+  let row = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = await nextReceiptCode();
+    const { data, error } = await _client.from("goods_receipts").insert({
+      tenant_id:         tenantId,
+      purchase_order_id: header.list_id,
+      supplier_id:       supId,
+      code,
+      status:            "confirmed",
+      nf_number:         header.nf_number || null,
+      notes:             header.notes || null,
+    }).select().single();
+    if (!error) { row = data; lastErr = null; break; }
+    lastErr = error;
+    // Retry apenas em colisão de unique key; outros erros propagam
+    if (!/duplicate key|unique/i.test(error.message || "")) break;
+  }
+  if (!row) return { data: null, error: lastErr || new Error("Falha ao gerar código do recebimento") };
 
   const itemRows = items.map((it) => ({
     goods_receipt_id:       row.id,
@@ -899,6 +1001,9 @@ function mapTechSheetFromDb(row) {
     .map((it) => {
       const arr = [it.display_name, `${Number(it.qty)} ${it.unit}`, Number(it.line_cost) || 0];
       arr.id = it.id;
+      arr.unitCost = Number(it.unit_cost) || 0;
+      arr.qty = Number(it.qty) || 0;
+      arr.unit = it.unit;
       return arr;
     });
   const cost = items.reduce((s, it) => s + Number(it[2] || 0), 0);
@@ -958,6 +1063,9 @@ async function dbListPreparations(tenantId) {
           const arr = [it.name, `${Number(it.qty)} ${it.unit}`, Number(it.total_cost) || 0];
           arr.id = it.id;
           arr.stockItemId = it.stock_item_id;
+          arr.unitCost = Number(it.unit_cost) || 0;
+          arr.qty = Number(it.qty) || 0;
+          arr.unit = it.unit;
           return arr;
         });
       const theo = items.reduce((s, it) => s + Number(it[2] || 0), 0);
@@ -995,6 +1103,23 @@ async function dbInsertPreparation(tenantId, draft) {
     yield_unit:   draft.yieldUnit || "kg",
     notes:        draft.notes || null,
   }).select().single();
+  return { data, error };
+}
+
+async function dbUpdatePreparation(id, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const update = {};
+  if (patch.name      !== undefined) update.name = patch.name;
+  if (patch.yieldQty  !== undefined) update.yield_qty = Number(patch.yieldQty) || 1;
+  if (patch.yieldUnit !== undefined) update.yield_unit = patch.yieldUnit;
+  if (patch.notes     !== undefined) update.notes = patch.notes;
+  const { data, error } = await _client.from("preparations").update(update).eq("id", id).select().single();
+  return { data, error };
+}
+
+async function dbRecomputeAllCosts(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.rpc("recompute_all_costs", { p_tenant: tenantId });
   return { data, error };
 }
 
@@ -1336,7 +1461,9 @@ function mapMemberFromDb(row) {
   return {
     userId: row.user_id, email: row.email, name: row.full_name || row.email,
     role: ROLE_LABELS[row.role] || row.role, dbRole: row.role,
-    ops: row.ops || [], joinedAt: row.joined_at
+    ops: row.ops || [],
+    modules: Array.isArray(row.modules) ? row.modules : null,
+    joinedAt: row.joined_at,
   };
 }
 
@@ -1351,7 +1478,7 @@ async function dbListMembers(tenantId) {
   return { data: data.map(mapMemberFromDb), source: "db", error: null };
 }
 
-async function dbInviteMember(tenantId, { email, role, ops }) {
+async function dbInviteMember(tenantId, { email, password, role, ops, modules, name }) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   try {
     const { data: { session } } = await _client.auth.getSession();
@@ -1363,24 +1490,56 @@ async function dbInviteMember(tenantId, { email, role, ops }) {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + session.access_token,
       },
-      body: JSON.stringify({ tenantId, email, role, ops }),
+      body: JSON.stringify({ tenantId, email, password, role, ops, modules, name }),
     });
-    const json = await res.json();
-    if (!res.ok) return { data: null, error: new Error(json.error || "Erro ao convidar") };
+    const rawBody = await res.text();
+    let json = null;
+    try { json = rawBody ? JSON.parse(rawBody) : null; } catch (_) { /* non-JSON */ }
+    if (!res.ok) {
+      const detail = json?.error || rawBody || res.statusText || "sem mensagem";
+      return { data: null, error: new Error(`[${res.status}] ${detail}`) };
+    }
     return { data: json, error: null };
   } catch (e) {
     return { data: null, error: e };
   }
 }
 
-async function dbUpdateMemberRole(userId, tenantId, { role, ops }) {
+// Update único de membro (role/ops/modules em tenant_members + full_name em profiles).
+// Roteia pelo edge function `update-member` (service_role) — bypassa RLS de profiles
+// e evita roundtrips separados que silenciavam por policy.
+async function dbUpdateMember(tenantId, userId, patch) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
-  const { error } = await _client
-    .from("tenant_members")
-    .update({ role, ops: ops || [] })
-    .eq("user_id", userId)
-    .eq("tenant_id", tenantId);
-  return { error };
+  try {
+    const { data: { session } } = await _client.auth.getSession();
+    if (!session) return { error: new Error("Não autenticado") };
+    const url = window.SK_CONFIG?.supabaseUrl + "/functions/v1/update-member";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + session.access_token,
+      },
+      body: JSON.stringify({ tenantId, userId, ...patch }),
+    });
+    const raw = await res.text();
+    let json = null; try { json = raw ? JSON.parse(raw) : null; } catch (_) { /* non-json */ }
+    if (!res.ok) {
+      const detail = json?.error || raw || res.statusText || "sem mensagem";
+      return { error: new Error(`[${res.status}] ${detail}`) };
+    }
+    return { error: null, data: json };
+  } catch (e) {
+    return { error: e };
+  }
+}
+
+// Wrappers de compat — chamam dbUpdateMember por baixo
+async function dbUpdateMemberProfile(userId, { name }, tenantId) {
+  return dbUpdateMember(tenantId, userId, { name });
+}
+async function dbUpdateMemberRole(userId, tenantId, { role, ops, modules }) {
+  return dbUpdateMember(tenantId, userId, { role, ops, modules });
 }
 
 async function dbRemoveMember(userId, tenantId) {
@@ -1448,26 +1607,71 @@ function mapClosingChecklistFromDb(row) {
   };
 }
 
+// Snapshots de valor de estoque (alimentado pelo cron diário)
+async function dbGetStockValueSnapshots(tenantId, period) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client.from("stock_value_snapshots")
+    .select("period, kind, total_value, items_count, snapshot_at")
+    .eq("tenant_id", tenantId)
+    .eq("period", period);
+  if (error) return { data: null, source: "mock", error };
+  const result = { initial: 0, final: 0, initialAt: null, finalAt: null };
+  (data || []).forEach((s) => {
+    result[s.kind] = Number(s.total_value) || 0;
+    result[`${s.kind}At`] = s.snapshot_at;
+  });
+  return { data: result, source: "db", error: null };
+}
+
 async function dbListDreCategories(tenantId) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const { data, error } = await _client
     .from("dre_categories")
-    .select("*")
+    .select("*, group:dre_groups(slug, label, sign, is_subtotal)")
     .eq("tenant_id", tenantId)
     .order("sort_order", { ascending: true });
   if (error) return { data: null, source: "mock", error };
-  return { data, source: "db", error: null };
+  // Mapeia "kind" a partir do slug do grupo para o front (que espera c.kind)
+  // Front conhece: revenue, deduction, cogs, expense, financial
+  const SLUG_TO_KIND = {
+    revenue: "revenue",
+    deductions: "deduction",
+    cmv: "cogs",
+    fixed_expenses: "expense",
+    personnel: "expense",
+    operational: "expense",
+    logistics: "expense",
+    financial: "financial",
+    owner: "expense",
+  };
+  const mapped = (data || []).map((c) => ({
+    ...c,
+    kind: SLUG_TO_KIND[c.group?.slug] || "expense",
+    groupSlug: c.group?.slug,
+    sign: c.group?.sign,
+    isSubtotal: c.group?.is_subtotal,
+    order: c.sort_order ?? 99, // front usa c.order
+  }));
+  return { data: mapped, source: "db", error: null };
 }
 
 async function dbListDreSubcategories(tenantId) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const { data, error } = await _client
     .from("dre_subcategories")
-    .select("*, category:dre_categories(id, name, color)")
+    .select("*, category:dre_categories(id, name, color, group_id)")
     .eq("tenant_id", tenantId)
     .order("sort_order", { ascending: true });
   if (error) return { data: null, source: "mock", error };
-  return { data, source: "db", error: null };
+  // Mapeia "category" para apontar para o id (front usa sub.category como id da categoria pai)
+  const mapped = (data || []).map((s) => ({
+    ...s,
+    category: s.category_id,
+    categoryName: s.category?.name,
+    order: s.sort_order ?? 99,
+    label: s.name,
+  }));
+  return { data: mapped, source: "db", error: null };
 }
 
 async function dbListFinanceEntries(tenantId, period) {
@@ -1746,18 +1950,20 @@ Object.assign(window, {
   dbListStockCategories, dbInsertStockCategory, dbRenameStockCategory, dbDeleteStockCategory,
   dbListSuppliers, dbInsertSupplier, dbUpdateSupplier, dbDeleteSupplier,
   dbListStockItems, dbInsertStockItem, dbUpdateStockItem, dbDeleteStockItem, dbApplyStockMovement, dbListStockMovements,
+  dbSetStockItemAutoMin,
   dbListPaymentMethods,
   dbListRevenueEntries, dbInsertRevenueEntry, dbUpdateRevenueEntry, dbDeleteRevenueEntry,
   dbListKitchenRequests, dbInsertKitchenRequest, dbUpdateKitchenRequestStatus, dbDeleteKitchenRequest,
   dbListPurchaseOrders, dbInsertPurchaseOrder, dbDeletePurchaseOrder,
   dbListGoodsReceipts, dbInsertGoodsReceipt,
   dbListTechSheets, dbInsertTechSheet, dbUpdateTechSheet, dbDeleteTechSheet,
-  dbListPreparations, dbInsertPreparation, dbDeletePreparation,
+  dbListPreparations, dbInsertPreparation, dbUpdatePreparation, dbDeletePreparation, dbRecomputeAllCosts,
   dbInsertPreparationItem, dbUpdatePreparationItem, dbDeletePreparationItem,
   dbInsertTechSheetItem, dbUpdateTechSheetItem, dbDeleteTechSheetItem,
   dbListInventories, dbInsertInventory, dbUpdateInventory,
-  dbListMembers, dbInviteMember, dbUpdateMemberRole, dbRemoveMember,
+  dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
+  dbGetStockValueSnapshots,
   dbListClosingChecklist, dbUpdateClosingChecklistItem,
   dbInsertDreCategory, dbInsertDreSubcategory, dbDeleteDreCategory, dbDeleteDreSubcategory,
   dbListCmvDaily, dbTopConsumedItems,

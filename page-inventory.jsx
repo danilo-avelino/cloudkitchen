@@ -369,7 +369,7 @@ function printInventorySheet(inv) {
   });
   const cats = Object.entries(byCat).sort(([a],[b]) => a.localeCompare(b));
 
-  const sections = cats.map(([catName, catItems]) => {
+  const sections = cats.map(([catName, catItems], idx) => {
     const rows = catItems.map((it, i) => {
       const expected = it.expected != null ? Number(it.expected).toLocaleString("pt-BR", { maximumFractionDigits: 3 }) : "—";
       return `<tr>
@@ -382,7 +382,13 @@ function printInventorySheet(inv) {
       </tr>`;
     }).join("");
     return `<section class="cat-section">
-      <h2>${esc(catName)} <span class="sub">· ${catItems.length} ${catItems.length === 1 ? "item" : "itens"}</span></h2>
+      <div class="cat-banner">
+        <div class="cat-num">${String(idx + 1).padStart(2, "0")}</div>
+        <div class="cat-title">
+          <h2>${esc(catName)}</h2>
+          <div class="cat-sub">${catItems.length} ${catItems.length === 1 ? "item" : "itens"} · Inventário ${esc(inv.id || "—")}</div>
+        </div>
+      </div>
       <table>
         <thead>
           <tr>
@@ -399,9 +405,18 @@ function printInventorySheet(inv) {
       <div class="cat-sig">
         <div><span>Contado por:</span> ____________________________</div>
         <div><span>Data/hora:</span> _______________</div>
+        <div><span>Conferido por:</span> ____________________________</div>
       </div>
     </section>`;
   }).join("");
+
+  // Índice (capa)
+  const indexRows = cats.map(([catName, catItems], idx) => `<tr>
+    <td class="num">${String(idx + 1).padStart(2, "0")}</td>
+    <td>${esc(catName)}</td>
+    <td class="num">${catItems.length}</td>
+    <td class="check-cell"></td>
+  </tr>`).join("");
 
   const html = `<!doctype html>
 <html lang="pt-BR"><head>
@@ -411,8 +426,15 @@ function printInventorySheet(inv) {
   * { box-sizing: border-box; }
   body { font: 11px/1.4 -apple-system, "Segoe UI", sans-serif; color: #111; margin: 0; padding: 14mm 12mm; }
   h1 { font-size: 17px; margin: 0 0 4px; }
-  h2 { font-size: 14px; margin: 18px 0 8px; padding: 6px 10px; background: #eef; border-left: 4px solid #339; }
-  h2 .sub { font-weight: 400; color: #555; font-size: 11px; margin-left: 6px; }
+  h2 { font-size: 22px; margin: 0; padding: 0; color: #fff; letter-spacing: -0.01em; }
+  .cat-banner { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; padding: 18px 20px; background: #1a3a6c; color: #fff; border-radius: 6px; }
+  .cat-banner .cat-num { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 700; opacity: 0.5; min-width: 50px; }
+  .cat-banner .cat-title { flex: 1; }
+  .cat-banner .cat-sub { font-size: 10.5px; opacity: 0.75; margin-top: 3px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .index-section { margin-bottom: 20px; page-break-after: always; }
+  .index-section h2 { color: #1a3a6c; font-size: 18px; margin: 14px 0 10px; padding: 0; background: none; border: none; }
+  .index-section table th, .index-section table td { font-size: 12px; padding: 8px 10px; }
+  .index-section .check-cell { width: 100px; }
   .meta { font-size: 11px; color: #555; margin-bottom: 8px; display: flex; gap: 20px; flex-wrap: wrap; }
   .meta b { color: #111; font-weight: 600; }
   table { width: 100%; border-collapse: collapse; }
@@ -449,6 +471,22 @@ function printInventorySheet(inv) {
   <span><b>Categorias:</b> ${cats.length}</span>
   ${inv.notes ? `<span><b>Obs:</b> ${esc(inv.notes)}</span>` : ""}
 </div>
+
+<section class="index-section">
+  <h2>Índice de Categorias</h2>
+  <table>
+    <thead>
+      <tr>
+        <th class="num">#</th>
+        <th>Categoria</th>
+        <th class="num">Itens</th>
+        <th class="check-cell">Concluído</th>
+      </tr>
+    </thead>
+    <tbody>${indexRows}</tbody>
+  </table>
+</section>
+
 ${sections || `<p style="color:#888;text-align:center;padding:24px">Sem itens neste inventário.</p>`}
 <div class="sig">
   <div><div class="line"></div>Conferente geral</div>
@@ -1123,11 +1161,25 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
 
       {step === 1 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {(!responsible.trim() || selectedCats.length === 0) && (
+            <div style={{
+              padding: "8px 12px", background: "var(--crit-soft)",
+              border: "1px solid var(--crit-line)", borderRadius: 4,
+              fontSize: 11.5, color: "var(--crit)",
+            }}>
+              <strong>Para avançar, preencha:</strong>
+              <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                {!responsible.trim()       && <li>Responsável pela contagem</li>}
+                {selectedCats.length === 0 && <li>Selecione ao menos 1 categoria</li>}
+              </ul>
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <FormRow label="Responsável pela contagem">
               <input className="input" autoFocus value={responsible}
                      onChange={(e) => setResponsible(e.target.value)}
-                     placeholder="Quem vai conduzir o inventário" />
+                     placeholder="Quem vai conduzir o inventário"
+                     style={!responsible.trim() ? { borderColor: "var(--crit)" } : null} />
             </FormRow>
             <FormRow label="Itens no escopo" hint="Calculado a partir das categorias">
               <div style={{
@@ -1140,8 +1192,12 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
           </div>
           <div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
-              <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                Categorias
+              <span style={{
+                fontFamily: "var(--mono)", fontSize: 10,
+                color: selectedCats.length === 0 ? "var(--crit)" : "var(--fg-3)",
+                letterSpacing: "0.08em", textTransform: "uppercase",
+              }}>
+                Categorias {selectedCats.length === 0 && "·  obrigatório"}
               </span>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
                 {selectedCats.length}/{allCats.length}
@@ -1245,9 +1301,8 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
   );
 }
 
-// Etapa 2 · Contagem com chips de categoria para focar uma categoria por vez
+// Etapa 2 · Dashboard de categorias + contagem focada por categoria
 function CountingStep({ scopedItems, counts, setCount, filledCount }) {
-  // Categorias disponíveis no escopo + contagem (preenchido / total) por categoria
   const cats = useMemo(() => {
     const map = {};
     scopedItems.forEach((it) => {
@@ -1259,68 +1314,114 @@ function CountingStep({ scopedItems, counts, setCount, filledCount }) {
     return Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
   }, [scopedItems, counts]);
 
-  const [filterCat, setFilterCat] = useState("all");
-  const visibleItems = filterCat === "all"
-    ? scopedItems
-    : scopedItems.filter((it) => (it.cat || "Sem categoria") === filterCat);
+  const [focusedCat, setFocusedCat] = useState(null);
 
+  if (focusedCat) {
+    const visibleItems = scopedItems.filter((it) => (it.cat || "Sem categoria") === focusedCat);
+    const catInfo = cats.find((c) => c.name === focusedCat);
+    const catFilled = catInfo?.filled || 0;
+    const catTotal = catInfo?.total || 0;
+    return (
+      <div>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "10px 12px", background: "var(--bg-2)",
+          border: "1px solid var(--line)", borderRadius: 4,
+          marginBottom: 12,
+        }}>
+          <button className="btn" data-size="sm" data-variant="ghost" onClick={() => setFocusedCat(null)}>
+            ← Voltar
+          </button>
+          <div style={{ fontSize: 13, color: "var(--fg-0)", flex: 1, fontWeight: 500 }}>
+            {focusedCat}
+          </div>
+          <span className="mono" style={{
+            fontSize: 11.5,
+            color: catFilled === catTotal ? "var(--ok)" : "var(--fg-2)",
+            fontWeight: 500,
+          }}>
+            {catFilled} / {catTotal} contados
+          </span>
+        </div>
+        <CountingTable
+          items={visibleItems}
+          counts={counts}
+          onSetCount={setCount}
+          mode="blind"
+        />
+      </div>
+    );
+  }
+
+  // Dashboard de categorias (cards estilo da referência)
   return (
     <div>
       <div style={{
         display: "flex", alignItems: "center", gap: 12,
         padding: "10px 12px", background: "var(--bg-2)",
         border: "1px solid var(--line)", borderRadius: 4,
-        marginBottom: 10,
+        marginBottom: 14,
       }}>
         <I.Box size={14} style={{ color: "var(--fg-2)" }} />
         <div style={{ fontSize: 12, color: "var(--fg-1)", flex: 1 }}>
-          Contagem <strong style={{ color: "var(--fg-0)" }}>às cegas</strong> · digite a quantidade sem ver o esperado.
-          Filtre por categoria para conferir em blocos menores.
+          Selecione uma categoria para iniciar a contagem. Você pode fazer em etapas e voltar quando quiser.
         </div>
-        <span className="mono" style={{ fontSize: 11, color: filledCount === scopedItems.length ? "var(--ok)" : "var(--fg-2)", fontWeight: 500 }}>
-          {filledCount} / {scopedItems.length}
+        <span className="mono" style={{ fontSize: 11.5, color: filledCount === scopedItems.length ? "var(--ok)" : "var(--fg-2)", fontWeight: 500 }}>
+          {filledCount} / {scopedItems.length} contados
         </span>
       </div>
 
-      {/* Chips de categoria */}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-        <CatChip active={filterCat === "all"} onClick={() => setFilterCat("all")}
-                 label="Todas" filled={filledCount} total={scopedItems.length} />
-        {cats.map((c) => (
-          <CatChip key={c.name} active={filterCat === c.name}
-                   onClick={() => setFilterCat(c.name)}
-                   label={c.name} filled={c.filled} total={c.total} />
-        ))}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+        gap: 12,
+      }}>
+        {cats.map((c) => {
+          const pct = c.total > 0 ? Math.round((c.filled / c.total) * 100) : 0;
+          const done = c.filled === c.total && c.total > 0;
+          return (
+            <div key={c.name} style={{
+              padding: "16px 14px 14px",
+              background: "var(--bg-1)",
+              border: `1px solid ${done ? "var(--ok-line)" : "var(--line)"}`,
+              borderRadius: 6,
+              display: "flex", flexDirection: "column", gap: 10,
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--fg-0)" }}>{c.name}</div>
+                <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)" }}>
+                  {c.filled}/{c.total} itens
+                </span>
+              </div>
+
+              <div style={{ textAlign: "center", padding: "8px 0 6px" }}>
+                <div style={{
+                  fontSize: 26, fontWeight: 500,
+                  color: done ? "var(--ok)" : "var(--fg-0)",
+                  letterSpacing: "-0.02em",
+                  fontFamily: "var(--mono)",
+                }}>{pct}%</div>
+                <div style={{
+                  fontSize: 9, color: "var(--fg-3)",
+                  textTransform: "uppercase", letterSpacing: "0.08em",
+                  marginTop: 2,
+                }}>progresso da categoria</div>
+              </div>
+
+              <div className="bar" style={{ height: 3 }}>
+                <i style={{ width: `${pct}%`, background: done ? "var(--ok)" : "var(--accent-bright)" }} />
+              </div>
+
+              <button className="btn" data-variant="primary" data-size="sm"
+                      onClick={() => setFocusedCat(c.name)}
+                      style={{ width: "100%", marginTop: 4 }}>
+                {done ? "Revisar categoria" : (c.filled > 0 ? "Continuar contagem" : "Iniciar categoria")}
+              </button>
+            </div>
+          );
+        })}
       </div>
-
-      <CountingTable
-        items={visibleItems}
-        counts={counts}
-        onSetCount={setCount}
-        mode="blind"
-      />
     </div>
-  );
-}
-
-function CatChip({ active, onClick, label, filled, total }) {
-  const done = filled === total && total > 0;
-  return (
-    <button onClick={onClick} style={{
-      padding: "5px 11px",
-      background: active ? "var(--accent-bright)" : (done ? "var(--ok-soft)" : "var(--bg-2)"),
-      color: active ? "var(--fg-on-accent)" : (done ? "var(--ok)" : "var(--fg-1)"),
-      border: `1px solid ${active ? "var(--accent-bright)" : (done ? "var(--ok-line)" : "var(--line)")}`,
-      borderRadius: 99, fontSize: 11.5, cursor: "pointer",
-      display: "inline-flex", alignItems: "center", gap: 6,
-    }}>
-      <span>{label}</span>
-      <span style={{
-        fontFamily: "var(--mono)", fontSize: 10,
-        opacity: 0.8,
-      }}>{filled}/{total}</span>
-      {done && !active && <span style={{ fontSize: 10 }}>✓</span>}
-    </button>
   );
 }
 

@@ -26,3 +26,6 @@ dist/
 # Uploads de teste
 uploads/*
 !uploads/.gitkeep
+
+# TestSprite (testes gerados + relatórios mudam a cada run)
+testsprite_tests/

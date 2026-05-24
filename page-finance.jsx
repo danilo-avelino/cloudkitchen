@@ -68,6 +68,7 @@ function Finance() {
   const [categories,    setCategories]    = useState(MOCK.DRE_CATEGORIES);
   const [subcategories, setSubcategories] = useState(MOCK.DRE_SUBCATEGORIES);
   const [checklist, setChecklist] = useState(MOCK.CLOSING_CHECKLIST);
+  const [stockSnapshot, setStockSnapshot] = useState({ initial: 0, final: 0, initialAt: null, finalAt: null });
   const [draftOpen, setDraftOpen] = useState(false);
   const [fillItem, setFillItem] = useState(null);
   const [addingChecklist, setAddingChecklist] = useState(false);
@@ -87,17 +88,19 @@ function Finance() {
       const tid = ctx?.tenant?.id;
       if (cancelled || !tid) return;
       setTenantId(tid);
-      const [catsRes, subsRes, entriesRes, checkRes] = await Promise.all([
+      const [catsRes, subsRes, entriesRes, checkRes, snapRes] = await Promise.all([
         dbListDreCategories?.(tid) || { data: null },
         dbListDreSubcategories?.(tid) || { data: null },
         dbListFinanceEntries?.(tid, period) || { data: null },
         dbListClosingChecklist?.(tid, period) || { data: null },
+        dbGetStockValueSnapshots?.(tid, period) || { data: null },
       ]);
       if (cancelled) return;
       if (catsRes.data) { setCategories(catsRes.data); setSource("db"); }
       if (subsRes.data) setSubcategories(subsRes.data);
       if (entriesRes.data) setEntries(entriesRes.data);
       if (checkRes.data) setChecklist(checkRes.data);
+      if (snapRes.data) setStockSnapshot(snapRes.data);
     })();
     return () => { cancelled = true; };
   }, [dbStatus.isOnline, period]);
@@ -109,17 +112,49 @@ function Finance() {
     allEntries.filter((e) => monthOf(e.comp) === period),
   [allEntries, period]);
 
-  const addEntry = (e) => {
+  const addEntry = async (e) => {
+    // DB path · persiste e recarrega lista do período
+    if (dbStatus.isOnline && tenantId && typeof dbInsertFinanceEntry === "function") {
+      const { data, error } = await dbInsertFinanceEntry(tenantId, e);
+      if (error) {
+        window.showToast?.(`Erro ao salvar lançamento: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return null;
+      }
+      const refreshed = await dbListFinanceEntries?.(tenantId, period);
+      if (refreshed?.data) setEntries(refreshed.data);
+      setDraftOpen(false);
+      window.showToast?.("Lançamento salvo", { tone: "ok" });
+      return data?.id || null;
+    }
+    // Fallback local
     const id = "LAN-" + (1100 + entries.length);
     setEntries([{ ...e, id }, ...entries]);
     setDraftOpen(false);
+    window.showToast?.("Lançamento salvo localmente (offline)", { tone: "warn" });
     return id;
   };
 
-  const fillChecklistItem = ({ item, value, comp, paid, status }) => {
-    const id = "LAN-" + (1100 + entries.length);
+  const fillChecklistItem = async ({ item, value, comp, paid, status }) => {
     const desc = `${item.label} · ${period.replace("-", "/")}`;
-    setEntries([{ id, cat: item.cat, desc, value, comp, paid, status }, ...entries]);
+    const draft = { cat: item.cat, desc, value, comp, paid, status };
+    if (dbStatus.isOnline && tenantId && typeof dbInsertFinanceEntry === "function") {
+      const { data, error } = await dbInsertFinanceEntry(tenantId, draft);
+      if (error) {
+        window.showToast?.(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+      const refreshed = await dbListFinanceEntries?.(tenantId, period);
+      if (refreshed?.data) setEntries(refreshed.data);
+      const newId = data?.id;
+      setChecklist(checklist.map((c) => c.id === item.id
+        ? { ...c, status: "filled", actual: value, entryIds: [...(c.entryIds || []), newId].filter(Boolean) }
+        : c));
+      setFillItem(null);
+      window.showToast?.("Lançamento salvo", { tone: "ok" });
+      return;
+    }
+    const id = "LAN-" + (1100 + entries.length);
+    setEntries([{ id, ...draft }, ...entries]);
     setChecklist(checklist.map((c) => c.id === item.id
       ? { ...c, status: "filled", actual: value, entryIds: [...c.entryIds, id] }
       : c));
@@ -228,7 +263,7 @@ function Finance() {
 
       <div style={{ flex: 1, overflow: "auto" }}>
         {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} />}
-        {tab === "dre"       && <DREView entries={inPeriod} categories={categories} subcategories={subcategories} period={period} />}
+        {tab === "dre"       && <DREView entries={inPeriod} categories={categories} subcategories={subcategories} period={period} stockSnapshot={stockSnapshot} />}
         {tab === "checklist" && <ChecklistView checklist={checklist} categories={categories} subcategories={subcategories} onFill={setFillItem} period={period} />}
       </div>
 
@@ -406,7 +441,6 @@ function EntriesView({ entries, subcategories, categories }) {
       <table className="table">
         <thead>
           <tr>
-            <th style={{ width: 90 }}>ID</th>
             <th>Descrição</th>
             <th>Subcategoria</th>
             <th>Categoria DRE</th>
@@ -418,7 +452,7 @@ function EntriesView({ entries, subcategories, categories }) {
         </thead>
         <tbody>
           {sorted.length === 0 && (
-            <tr><td colSpan="8" style={{ padding: "32px", textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
+            <tr><td colSpan="7" style={{ padding: "32px", textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
               Sem lançamentos de despesa neste período. Receitas são consolidadas em <span style={{ color: "var(--accent-bright)" }}>Faturamento</span>.
             </td></tr>
           )}
@@ -429,7 +463,6 @@ function EntriesView({ entries, subcategories, categories }) {
             const lbl = e.status === "paid" ? "Pago" : e.status === "scheduled" ? "Agendado" : "Pendente";
             return (
               <tr key={e.id}>
-                <td className="mono" style={{ color: "var(--fg-3)", fontSize: 10.5 }}>{e.id}</td>
                 <td className="row-strong">{e.desc}</td>
                 <td className="dim">
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -452,7 +485,7 @@ function EntriesView({ entries, subcategories, categories }) {
 }
 
 // ---------- DRE ----------
-function DREView({ entries, categories, subcategories, period }) {
+function DREView({ entries, categories, subcategories, period, stockSnapshot = { initial: 0, final: 0 } }) {
   // Agrega valores por categoria/subcategoria
   const byCat = {};
   categories.forEach((c) => { byCat[c.id] = { total: 0, bySub: {} }; });
@@ -502,14 +535,25 @@ function DREView({ entries, categories, subcategories, period }) {
 
   const pct = (v) => receita > 0 ? ((v / receita) * 100).toFixed(1) + "%" : "—";
 
-  // CMV real (método contábil) para o painel de cima — usa STOCK_BALANCE
-  // Para tenants novos sem inventário fechado, EI/EF = 0
-  const ei = (typeof isDbOnline === "function" && isDbOnline()) ? 0 : (MOCK.STOCK_BALANCE?.initial?.value || 0);
-  const ef = (typeof isDbOnline === "function" && isDbOnline()) ? 0 : (MOCK.STOCK_BALANCE?.final?.value || 0);
-  // Compras = soma das subcategorias da CMV que não são autofeed
+  // CMV real (método contábil) — usa snapshots do cron diário (EI = início do mês, EF = saldo atual/fim)
+  // Fallback: MOCK (modo offline)
+  const dbOn = typeof isDbOnline === "function" && isDbOnline();
+  const ei = dbOn ? (stockSnapshot.initial || 0) : (MOCK.STOCK_BALANCE?.initial?.value || 0);
+  // EF só entra na equação se houver EI registrado (evita distorcer mês sem snapshot inicial)
+  const ef = ei > 0
+    ? (dbOn ? (stockSnapshot.final || 0) : (MOCK.STOCK_BALANCE?.final?.value || 0))
+    : 0;
+  // Compras = soma das subcategorias do grupo CMV (lançamentos manuais)
+  // CMV real (contábil) = Estoque Inicial + Compras − Estoque Final
+  const cmvCatIds = categories
+    .filter((c) => c.kind === "cogs" || c.groupSlug === "cmv" || c.id === "cmv")
+    .map((c) => c.id);
   const comprasTotal = subcategories
-    .filter((s) => s.category === "cmv" && !s.autofeed)
-    .reduce((s, sub) => s + ((byCat.cmv?.bySub?.[sub.id]) || 0), 0);
+    .filter((s) => cmvCatIds.includes(s.category) && !s.autofeed)
+    .reduce((acc, sub) => {
+      const catBucket = cmvCatIds.map((cid) => byCat[cid]).find(Boolean);
+      return acc + ((catBucket?.bySub?.[sub.id]) || 0);
+    }, 0);
   const cmvReal = ei + comprasTotal - ef;
 
   // Ordena categorias por order (e separa por "side" da DRE)
@@ -524,12 +568,16 @@ function DREView({ entries, categories, subcategories, period }) {
           <div>
             <div className="h-eyebrow" style={{ marginBottom: 6 }}>CMV Real · método contábil</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 13, color: "var(--fg-1)", letterSpacing: "-0.005em" }}>
-              Estoque inicial <span style={{ color: "var(--fg-3)" }}>+</span> Compras <span style={{ color: "var(--fg-3)" }}>−</span> Estoque final
+              {ei > 0
+                ? <>Estoque inicial <span style={{ color: "var(--fg-3)" }}>+</span> Compras <span style={{ color: "var(--fg-3)" }}>−</span> Estoque final</>
+                : <>Compras <span style={{ color: "var(--fg-3)" }}>(sem inventário inicial)</span></>}
             </div>
           </div>
-          <DreStat label={`EI · ${fmtDate(MOCK.STOCK_BALANCE.initial.date)}`} value={fmt(ei)} />
+          <DreStat label={`EI${stockSnapshot.initialAt ? ` · ${fmtDate(stockSnapshot.initialAt)}` : ""}`} value={fmt(ei)} />
           <DreStat label="(+) Compras" value={fmt(comprasTotal)} />
-          <DreStat label={`EF · ${fmtDate(MOCK.STOCK_BALANCE.final.date)}${MOCK.STOCK_BALANCE.final.projected ? "*" : ""}`} value={fmt(ef)} />
+          {ei > 0 && (
+            <DreStat label={`EF${stockSnapshot.finalAt ? ` · ${fmtDate(stockSnapshot.finalAt)}` : ""}`} value={fmt(ef)} />
+          )}
           <DreStat label="= CMV real" value={fmt(cmvReal)} accent sub={receita ? `${((cmvReal / receita) * 100).toFixed(1)}% da receita` : ""} />
         </div>
       </div>
@@ -894,23 +942,49 @@ function FormField({ label, hint, children }) {
 }
 
 function EntryDraft({ categories, subcategories, onClose, onSave, period }) {
+  // Receita é lançada no Faturamento — não aparece como subcategoria selecionável aqui.
+  const revenueCatIds = new Set(categories.filter((c) => c.kind === "revenue").map((c) => c.id));
+  subcategories = subcategories.filter((s) => !revenueCatIds.has(s.category));
+  categories = categories.filter((c) => c.kind !== "revenue");
   // Subcategorias selecionáveis: exclui as autofeed (Ajuste de estoque vem do inventário)
   const pickable = subcategories.filter((s) => !s.autofeed);
-  const [cat, setCat] = useState(pickable[0]?.id);
+  const defaultCat = pickable.find((s) => /fornecedor/i.test(s.name || s.label || ""))?.id || pickable[0]?.id;
+  const [cat, setCat] = useState(defaultCat);
   const [desc, setDesc] = useState("");
   const [value, setValue] = useState("");
   const [comp, setComp] = useState(`${period}-15`);
   const [paid, setPaid] = useState(`${period}-20`);
-  const [status, setStatus] = useState("scheduled");
+  const [status, setStatus] = useState("paid");
+  const [touched, setTouched] = useState(false);
 
   const sub = pickable.find((x) => x.id === cat);
   const parent = sub ? findCategory(categories, sub.category) : null;
 
-  const save = () => {
-    const v = parseFloat(String(value).replace(/\./g, "").replace(",", "."));
-    if (!desc || !v) return;
-    onSave({ cat, desc, value: v, comp, paid, status });
+  const parsedValue = parseFloat(String(value).replace(/\./g, "").replace(",", "."));
+  const errs = {
+    desc:  !desc.trim(),
+    value: !Number.isFinite(parsedValue) || parsedValue <= 0,
+    cat:   !cat,
+    comp:  !comp,
   };
+  const show = (k) => touched && errs[k];
+  const errorMessages = [
+    errs.desc  && "Descrição obrigatória",
+    errs.value && "Valor precisa ser maior que zero",
+    errs.cat   && "Selecione uma subcategoria",
+    errs.comp  && "Data de competência obrigatória",
+  ].filter(Boolean);
+
+  const save = () => {
+    if (Object.values(errs).some(Boolean)) {
+      setTouched(true);
+      window.showToast?.(`Faltam campos: ${errorMessages.join(", ")}`, { tone: "warn", ttl: 4000 });
+      return;
+    }
+    onSave({ cat, desc, value: parsedValue, comp, paid, status });
+  };
+
+  const errBorder = { borderColor: "var(--crit)", boxShadow: "0 0 0 1px var(--crit-line) inset" };
 
   return (
     <ModalShell
@@ -922,15 +996,34 @@ function EntryDraft({ categories, subcategories, onClose, onSave, period }) {
         <button className="btn" data-variant="primary" data-size="sm" onClick={save}>Salvar lançamento</button>
       </>}
     >
+      {touched && errorMessages.length > 0 && (
+        <div style={{
+          padding: "8px 12px", marginBottom: 12,
+          background: "var(--crit-soft)", border: "1px solid var(--crit-line)",
+          borderRadius: 4, fontSize: 11.5, color: "var(--crit)",
+        }}>
+          <strong>Não pode salvar:</strong>
+          <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+            {errorMessages.map((m, i) => <li key={i}>{m}</li>)}
+          </ul>
+        </div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-        <FormField label="Descrição">
-          <input className="input" placeholder="Ex.: Aluguel cozinha · maio" value={desc} onChange={(e) => setDesc(e.target.value)} />
+        <FormField label="Descrição" hint={show("desc") ? "Obrigatório" : null}>
+          <input className="input" placeholder="Ex.: Aluguel cozinha · maio" value={desc}
+                 onChange={(e) => setDesc(e.target.value)}
+                 style={show("desc") ? errBorder : null} />
         </FormField>
-        <FormField label="Valor (R$)">
-          <input className="input mono" placeholder="0,00" value={value} onChange={(e) => setValue(e.target.value)} />
+        <FormField label="Valor (R$)" hint={show("value") ? "Informe um valor maior que zero" : null}>
+          <input className="input mono" placeholder="0,00" value={value}
+                 onChange={(e) => setValue(e.target.value)}
+                 style={show("value") ? errBorder : null} />
         </FormField>
-        <FormField label="Subcategoria" hint={parent ? `Entrará em: ${parent.name}` : null}>
-          <select className="select" value={cat} onChange={(e) => setCat(e.target.value)}>
+        <FormField label="Subcategoria"
+                   hint={show("cat") ? "Selecione uma subcategoria" : (parent ? `Entrará em: ${parent.name}` : null)}>
+          <select className="select" value={cat || ""} onChange={(e) => setCat(e.target.value)}
+                  style={show("cat") ? errBorder : null}>
+            {!cat && <option value="" disabled>— Selecione —</option>}
             {categories.sort((a, b) => a.order - b.order).map((c) => (
               <optgroup key={c.id} label={c.name}>
                 {pickable.filter((s) => s.category === c.id).map((s) => (
@@ -947,8 +1040,9 @@ function EntryDraft({ categories, subcategories, onClose, onSave, period }) {
             <option value="pending">Pendente</option>
           </select>
         </FormField>
-        <FormField label="Data de competência" hint="Mês contábil — usado na DRE">
-          <input className="input mono" type="date" value={comp} onChange={(e) => setComp(e.target.value)} />
+        <FormField label="Data de competência" hint={show("comp") ? "Obrigatório" : "Mês contábil — usado na DRE"}>
+          <input className="input mono" type="date" value={comp} onChange={(e) => setComp(e.target.value)}
+                 style={show("comp") ? errBorder : null} />
         </FormField>
         <FormField label="Data de pagamento" hint="Quando sai/entra do caixa">
           <input className="input mono" type="date" value={paid} onChange={(e) => setPaid(e.target.value)} />
@@ -966,7 +1060,7 @@ function FillDraft({ item, categories, subcategories, period, onClose, onSave })
   const dueDay = item.due ? String(item.due).padStart(2, "0") : "15";
   const [comp, setComp] = useState(`${period}-${dueDay}`);
   const [paid, setPaid] = useState(`${period}-${dueDay}`);
-  const [status, setStatus] = useState("scheduled");
+  const [status, setStatus] = useState("paid");
 
   const save = () => {
     const v = parseFloat(String(value).replace(/\./g, "").replace(",", "."));

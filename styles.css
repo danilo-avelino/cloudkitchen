@@ -218,6 +218,23 @@ input, select, textarea { font-family: inherit; }
 .input:focus, .select:focus { border-color: var(--accent-line); }
 .input::placeholder { color: var(--fg-3); }
 
+/* Date/time pickers nativos · força o calendário em modo escuro
+   (Chromium/Edge respeitam color-scheme; o ícone fica claro automaticamente) */
+.input[type="date"],
+.input[type="datetime-local"],
+.input[type="time"],
+.input[type="month"],
+.input[type="week"] {
+  color-scheme: dark;
+}
+:root { color-scheme: dark; }
+.input::-webkit-calendar-picker-indicator {
+  filter: invert(0.8);
+  opacity: 0.7;
+  cursor: pointer;
+}
+.input::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+
 /* Table */
 .table {
   width: 100%;
