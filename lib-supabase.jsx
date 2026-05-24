@@ -943,13 +943,20 @@ async function dbInsertGoodsReceipt(tenantId, draft) {
   // Gera REC-XXXX a partir do max(code) por tenant — ignora código vindo do FE
   // (evita colisão quando o FE conta só o array local). Faz até 5 tentativas
   // em caso de race condition na unique constraint (tenant_id, code).
+  // Filtra códigos no formato REC-NNNN (1-9 dígitos) — códigos legados/maiores
+  // perdem precisão em parseInt e geram loop infinito de duplicate key.
   const nextReceiptCode = async () => {
     const { data: rows } = await _client.from("goods_receipts")
       .select("code").eq("tenant_id", tenantId)
-      .like("code", "REC-%").order("code", { ascending: false }).limit(1);
-    const last = rows?.[0]?.code || "";
-    const n = parseInt(String(last).replace(/\D/g, ""), 10);
-    return `REC-${String((Number.isFinite(n) ? n : 0) + 1).padStart(4, "0")}`;
+      .like("code", "REC-%");
+    let max = 0;
+    for (const r of rows || []) {
+      const m = /^REC-(\d{1,9})$/.exec(r.code || "");
+      if (!m) continue;
+      const n = parseInt(m[1], 10);
+      if (n > max) max = n;
+    }
+    return `REC-${String(max + 1).padStart(4, "0")}`;
   };
 
   let row = null;
@@ -1577,33 +1584,32 @@ function mapFinanceEntryFromDb(row) {
     paid: paid ? String(paid).slice(0, 10) : null,
     status: row.status,
     auto: row.auto_source || row.auto || undefined,
+    checklistItemId: row.checklist_item_id || null,
   };
 }
 
 function mapClosingChecklistFromDb(row) {
-  const status = row.derived_status
-    || (row.done ? "filled" : row.status)
-    || "pending";
+  // Templates de checklist: o STATUS é derivado no cliente por competência,
+  // não vindo da view (que conta todas as entries de qualquer mês).
   return {
-    id: row.id,
-    cat: row.subcategory_id || row.category_id || row.code || null,
-    label: row.label,
+    id:         row.id,
+    // Front usa `cat` como id da SUBCATEGORIA DRE (cor/nome na linha).
+    // Cai pro category_id se a subcategoria não estiver associada.
+    cat:        row.subcategory_id || row.category_id || null,
+    label:      row.label,
     recurrence: row.recurrence || "monthly",
-    due: row.due_day ?? row.due ?? null,
-    owner: row.owner_role || row.owner || "",
-    status: status === "filled" ? "filled" : status === "estimated" ? "estimated" : "pending",
-    expected: Number(row.expected_amount ?? row.expected) || 0,
-    actual: row.actual_amount != null
-      ? Number(row.actual_amount)
-      : row.actual != null
-        ? Number(row.actual)
-        : row.done
-          ? Number(row.expected_amount ?? row.expected) || null
-          : null,
-    entryIds: row.entry_ids || row.entryIds || [],
-    required: row.is_required ?? row.required ?? true,
-    source: row.source || "",
-    formula: row.formula || "",
+    due:        row.due_day ?? null,
+    owner:      row.owner_role || "",
+    status:     "pending",   // recomputado em Finance com base nos entries do período
+    expected:   Number(row.expected_amount) || 0,
+    actual:     null,         // idem
+    entryIds:   [],           // idem
+    required:   row.is_required ?? true,
+    source:     row.source || "",
+    formula:    row.formula || "",
+    // Mês a partir do qual o item passa a aparecer no checklist (YYYY-MM).
+    // Derivado de created_at — itens criados em maio não retroagem pra abril.
+    startPeriod: row.created_at ? String(row.created_at).slice(0, 7) : null,
   };
 }
 
@@ -1679,7 +1685,7 @@ async function dbListFinanceEntries(tenantId, period) {
   const range = financePeriodRange(period);
   if (!range) return { data: [], source: "db", error: null };
 
-  let { data, error } = await _client
+  const { data, error } = await _client
     .from("finance_entries")
     .select("*, subcategory:dre_subcategories(id, name, category_id)")
     .eq("tenant_id", tenantId)
@@ -1687,38 +1693,23 @@ async function dbListFinanceEntries(tenantId, period) {
     .lte("competence_date", range.end)
     .order("competence_date", { ascending: false });
 
-  if (error) {
-    const retry = await _client
-      .from("financial_entries")
-      .select("*, category:dre_categories(id, name, code)")
-      .eq("tenant_id", tenantId)
-      .gte("competence_date", range.start)
-      .lte("competence_date", range.end)
-      .order("competence_date", { ascending: false });
-    data = retry.data;
-    error = retry.error;
-  }
-
   if (error) return { data: null, source: "mock", error };
   return { data: (data || []).map(mapFinanceEntryFromDb), source: "db", error: null };
 }
 
 async function dbInsertFinanceEntry(tenantId, draft) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
-  const { data, error } = await _client
-    .from("finance_entries")
-    .insert({
-      tenant_id: tenantId,
-      subcategory_id: draft.cat,
-      description: draft.desc || "",
-      value: Number(draft.value) || 0,
-      competence_date: draft.comp,
-      payment_date: draft.paid || null,
-      status: draft.status || "pending",
-      notes: draft.notes || null,
-    })
-    .select()
-    .single();
+  const { data, error } = await _client.from("finance_entries").insert({
+    tenant_id:         tenantId,
+    subcategory_id:    draft.cat,
+    description:       draft.desc || "",
+    value:             Number(draft.value) || 0,
+    competence_date:   draft.comp,
+    payment_date:      draft.paid || null,
+    status:            draft.status || "pending",
+    notes:             draft.notes || null,
+    checklist_item_id: draft.checklistItemId || null,
+  }).select().single();
   return { data, error };
 }
 
@@ -1745,43 +1736,80 @@ async function dbDeleteFinanceEntry(id) {
   return { error };
 }
 
-async function dbListClosingChecklist(tenantId, period) {
+async function dbListClosingChecklist(tenantId, _period) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
-
-  // Não filtrar `period` no PostgREST: schema canônico não tem essa coluna (gera 400).
-  // Se a coluna existir (fase 12), filtramos no cliente depois do fetch.
-  let { data, error } = await _client
-    .from("closing_checklist_items")
+  // Lemos da view pra obter actual_amount + derived_status (filled/estimated/pending)
+  // calculados a partir de finance_entries linkados via checklist_item_id.
+  // `_period` mantido por compat com chamadores; checklist canonical é template
+  // recorrente, não por competência.
+  const { data, error } = await _client
+    .from("v_closing_checklist")
     .select("*")
     .eq("tenant_id", tenantId)
     .order("sort_order", { ascending: true });
-
-  if (error) {
-    const view = await _client
-      .from("v_closing_checklist")
-      .select("*")
-      .eq("tenant_id", tenantId)
-      .order("sort_order", { ascending: true });
-    if (view.error) return { data: null, source: "mock", error: view.error };
-    data = view.data;
-  } else if (period && data?.length && Object.prototype.hasOwnProperty.call(data[0], "period")) {
-    data = data.filter((row) => row.period === period);
-  }
-
+  if (error) return { data: null, source: "mock", error };
   return { data: (data || []).map(mapClosingChecklistFromDb), source: "db", error: null };
 }
 
-async function dbUpdateClosingChecklistItem(id, done) {
+async function dbUpdateClosingChecklistItem(id, patch) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
-  const { data: { user } } = await _client.auth.getUser();
-  const { error } = await _client
-    .from("closing_checklist_items")
-    .update({
-      done,
-      done_at: done ? new Date().toISOString() : null,
-      done_by: done && user ? user.id : null,
-    })
-    .eq("id", id);
+  const update = {};
+  if (patch.label !== undefined)      update.label = String(patch.label).trim();
+  if (patch.recurrence !== undefined) update.recurrence = patch.recurrence;
+  if (patch.due !== undefined)        update.due_day = patch.due == null ? null : Number(patch.due);
+  if (patch.owner !== undefined)      update.owner_role = patch.owner || null;
+  if (patch.expected !== undefined)   update.expected_amount = Number(patch.expected) || 0;
+  if (patch.required !== undefined)   update.is_required = !!patch.required;
+  if (patch.source !== undefined)     update.source = patch.source || null;
+  if (patch.formula !== undefined)    update.formula = patch.formula || null;
+  if (patch.cat !== undefined && patch.cat) {
+    // `cat` no front é subcategory_id; armazenamos como subcategory_id e
+    // resolvemos o category_id pai (NOT NULL).
+    const { data: sub } = await _client.from("dre_subcategories")
+      .select("category_id").eq("id", patch.cat).maybeSingle();
+    if (!sub?.category_id) return { error: new Error("Subcategoria inválida") };
+    update.category_id = sub.category_id;
+    update.subcategory_id = patch.cat;
+  }
+  if (Object.keys(update).length === 0) return { error: null };
+  const { error } = await _client.from("closing_checklist_items").update(update).eq("id", id);
+  return { error };
+}
+
+async function dbInsertClosingChecklistItem(tenantId, draft /*, period */) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  // closing_checklist_items.category_id é NOT NULL (DRE category).
+  // Front guarda subcategoria em draft.cat — armazenamos como subcategory_id
+  // e resolvemos o category_id pai para satisfazer o NOT NULL.
+  let categoryId = null;
+  if (draft.cat) {
+    const { data: sub } = await _client.from("dre_subcategories")
+      .select("category_id").eq("id", draft.cat).maybeSingle();
+    categoryId = sub?.category_id || null;
+  }
+  if (!categoryId) {
+    return { data: null, error: new Error("Selecione uma subcategoria válida (categoria DRE não encontrada)") };
+  }
+  const { data, error } = await _client.from("closing_checklist_items").insert({
+    tenant_id:       tenantId,
+    category_id:     categoryId,
+    subcategory_id:  draft.cat,
+    label:           String(draft.label || "").trim(),
+    recurrence:      draft.recurrence || "monthly",
+    due_day:         draft.due == null ? null : Number(draft.due),
+    owner_role:      draft.owner || null,
+    expected_amount: Number(draft.expected) || 0,
+    is_required:     draft.required ?? true,
+    source:          draft.source || null,
+    formula:         draft.formula || null,
+    sort_order:      draft.sort_order ?? 99,
+  }).select().single();
+  return { data, error };
+}
+
+async function dbDeleteClosingChecklistItem(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("closing_checklist_items").delete().eq("id", id);
   return { error };
 }
 
@@ -1964,7 +1992,7 @@ Object.assign(window, {
   dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
   dbGetStockValueSnapshots,
-  dbListClosingChecklist, dbUpdateClosingChecklistItem,
+  dbListClosingChecklist, dbUpdateClosingChecklistItem, dbInsertClosingChecklistItem, dbDeleteClosingChecklistItem,
   dbInsertDreCategory, dbInsertDreSubcategory, dbDeleteDreCategory, dbDeleteDreSubcategory,
   dbListCmvDaily, dbTopConsumedItems,
   dbUploadEvidence, dbGetSignedUrl,

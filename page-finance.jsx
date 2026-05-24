@@ -23,6 +23,27 @@ const fmtDate = (iso) => {
 };
 const monthOf = (iso) => iso ? iso.slice(0, 7) : "";
 
+// Urgência de um item do checklist em relação ao vencimento no período selecionado.
+// "overdue" → já passou da data; "soon" → ≤5 dias do vencimento; "none" → ainda longe ou
+// item sem data de vencimento (variáveis). Retorna { level, daysLeft }.
+const CHECKLIST_SOON_DAYS = 5;
+function getChecklistUrgency(item, period) {
+  if (!item || item.recurrence === "variable" || !item.due) return { level: "none", daysLeft: null };
+  const [y, m] = (period || "").split("-").map(Number);
+  if (!y || !m) return { level: "none", daysLeft: null };
+  const dueDay = Math.max(1, Math.min(31, Number(item.due)));
+  const dueDate = new Date(y, m - 1, dueDay);
+  // Se day overflow (ex.: dia 31 de fev) o JS rola pro mês seguinte — clampa pro último
+  // dia do mês original p/ não distorcer ("vence no fim do mês").
+  if (dueDate.getMonth() !== m - 1) dueDate.setDate(0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  dueDate.setHours(0, 0, 0, 0);
+  const daysLeft = Math.round((dueDate - today) / 86400000);
+  if (daysLeft < 0) return { level: "overdue", daysLeft };
+  if (daysLeft <= CHECKLIST_SOON_DAYS) return { level: "soon", daysLeft };
+  return { level: "none", daysLeft };
+}
+
 // Paleta default p/ cores de subcategorias novas
 const DRE_SUB_COLORS = [
   "#2d8c66", "#b04545", "#c2843a", "#3d6cb0",
@@ -75,6 +96,8 @@ function Finance() {
   const [viewingSub, setViewingSub] = useState(null); // { sub } — abre modal com lançamentos da subcategoria
   const [fillItem, setFillItem] = useState(null);
   const [addingChecklist, setAddingChecklist] = useState(false);
+  const [editingChecklistItem, setEditingChecklistItem] = useState(null);
+  const [confirmDeleteChecklist, setConfirmDeleteChecklist] = useState(null);
   const [showStructure, setShowStructure] = useState(false);
 
   // DB state
@@ -120,6 +143,27 @@ function Finance() {
   const inPeriod    = useMemo(() =>
     allEntries.filter((e) => monthOf(e.comp) === period),
   [allEntries, period]);
+
+  // Status do checklist é DERIVADO por competência: cada item-template é
+  // re-avaliado com base nos lançamentos do período (linkados via checklistItemId).
+  // Assim "Taxas iFood" preenchida em Maio volta a aparecer "Pendente" em Junho.
+  // Itens criados em Maio NÃO aparecem em Abril (não retroagem).
+  const checklistForPeriod = useMemo(() => {
+    const visible = checklist.filter((c) => !c.startPeriod || c.startPeriod <= period);
+    return visible.map((c) => {
+      const linked = inPeriod.filter((e) => e.checklistItemId === c.id);
+      if (linked.length > 0) {
+        const total = linked.reduce((s, e) => s + (Number(e.value) || 0), 0);
+        return { ...c, status: "filled", actual: total, entryIds: linked.map((e) => e.id) };
+      }
+      // Sem entries no período → preserva status canned (mock) ou recai em pending/estimated
+      if (c.status === "filled" && (!c.entryIds || c.entryIds.length === 0)) {
+        const fallback = c.expected > 0 ? "estimated" : "pending";
+        return { ...c, status: fallback, actual: null, entryIds: [] };
+      }
+      return c;
+    });
+  }, [checklist, inPeriod, period]);
 
   const addEntry = async (e) => {
     // DB path · persiste e recarrega lista do período
@@ -185,28 +229,24 @@ function Finance() {
 
   const fillChecklistItem = async ({ item, value, comp, paid, status }) => {
     const desc = `${item.label} · ${period.replace("-", "/")}`;
-    const draft = { cat: item.cat, desc, value, comp, paid, status };
+    // Só linka no DB se o id for UUID real (mocks usam "chk-*").
+    const checklistItemId = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(String(item.id)) ? item.id : null;
+    const draft = { cat: item.cat, desc, value, comp, paid, status, checklistItemId };
     if (dbStatus.isOnline && tenantId && typeof dbInsertFinanceEntry === "function") {
-      const { data, error } = await dbInsertFinanceEntry(tenantId, draft);
+      const { error } = await dbInsertFinanceEntry(tenantId, draft);
       if (error) {
         window.showToast?.(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
         return;
       }
       const refreshed = await dbListFinanceEntries?.(tenantId, period);
       if (refreshed?.data) setEntries(refreshed.data);
-      const newId = data?.id;
-      setChecklist(checklist.map((c) => c.id === item.id
-        ? { ...c, status: "filled", actual: value, entryIds: [...(c.entryIds || []), newId].filter(Boolean) }
-        : c));
+      // Status do item é derivado por checklistForPeriod — não setamos manualmente.
       setFillItem(null);
       window.showToast?.("Lançamento salvo", { tone: "ok" });
       return;
     }
     const id = "LAN-" + (1100 + entries.length);
-    setEntries([{ id, ...draft }, ...entries]);
-    setChecklist(checklist.map((c) => c.id === item.id
-      ? { ...c, status: "filled", actual: value, entryIds: [...c.entryIds, id] }
-      : c));
+    setEntries([{ id, ...draft, checklistItemId: item.id }, ...entries]);
     setFillItem(null);
   };
 
@@ -309,13 +349,13 @@ function Finance() {
             {tab === "checklist" && <button className="btn" data-variant="primary" data-size="sm" onClick={() => setAddingChecklist(true)}><I.Plus size={13} />Adicionar item</button>}
           </div>
         </div>
-        <FinanceTabs tab={tab} setTab={setTab} checklist={checklist} />
+        <FinanceTabs tab={tab} setTab={setTab} checklist={checklistForPeriod} period={period} />
       </div>
 
       <div style={{ flex: 1, overflow: "auto" }}>
         {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} onEdit={setEditingEntry} onDelete={setConfirmDeleteEntry} />}
         {tab === "dre"       && <DREView entries={inPeriod} categories={categories} subcategories={subcategories} period={period} stockSnapshot={stockSnapshot} onViewSub={setViewingSub} />}
-        {tab === "checklist" && <ChecklistView checklist={checklist} categories={categories} subcategories={subcategories} onFill={setFillItem} period={period} />}
+        {tab === "checklist" && <ChecklistView checklist={checklistForPeriod} categories={categories} subcategories={subcategories} onFill={setFillItem} onEdit={setEditingChecklistItem} onDelete={setConfirmDeleteChecklist} period={period} />}
       </div>
 
       {draftOpen  && <EntryDraft  categories={categories} subcategories={subcategories} onClose={() => setDraftOpen(false)} onSave={addEntry} period={period} />}
@@ -366,11 +406,86 @@ function Finance() {
           categories={categories}
           subcategories={subcategories}
           onClose={() => setAddingChecklist(false)}
-          onSave={(item) => {
+          onSave={async (item) => {
+            if (dbStatus.isOnline && tenantId && typeof dbInsertClosingChecklistItem === "function") {
+              const { data, error } = await dbInsertClosingChecklistItem(tenantId, item, period);
+              if (error) {
+                window.showToast?.(`Erro ao adicionar: ${error.message}`, { tone: "crit", ttl: 4500 });
+                return;
+              }
+              const refreshed = await dbListClosingChecklist?.(tenantId, period);
+              if (refreshed?.data) setChecklist(refreshed.data);
+              setAddingChecklist(false);
+              window.showToast("Item adicionado ao checklist", { tone: "ok" });
+              return;
+            }
             const id = "chk-" + (1000 + checklist.length);
-            setChecklist([{ ...item, id, status: "pending", actual: null, entryIds: [] }, ...checklist]);
+            const startPeriod = new Date().toISOString().slice(0, 7);
+            setChecklist([{ ...item, id, status: "pending", actual: null, entryIds: [], startPeriod }, ...checklist]);
             setAddingChecklist(false);
-            window.showToast("Item adicionado ao checklist", { tone: "ok" });
+            window.showToast("Item adicionado ao checklist (offline)", { tone: "warn" });
+          }}
+        />
+      )}
+      {editingChecklistItem && (
+        <ChecklistItemDraft
+          initial={editingChecklistItem}
+          categories={categories}
+          subcategories={subcategories}
+          onClose={() => setEditingChecklistItem(null)}
+          onDelete={() => setConfirmDeleteChecklist(editingChecklistItem)}
+          onSave={async (patch) => {
+            if (dbStatus.isOnline && tenantId && typeof dbUpdateClosingChecklistItem === "function") {
+              const { error } = await dbUpdateClosingChecklistItem(editingChecklistItem.id, patch);
+              if (error) {
+                window.showToast?.(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
+                return;
+              }
+              const refreshed = await dbListClosingChecklist?.(tenantId, period);
+              if (refreshed?.data) setChecklist(refreshed.data);
+              setEditingChecklistItem(null);
+              window.showToast("Item atualizado", { tone: "ok" });
+              return;
+            }
+            setChecklist(checklist.map((c) => c.id === editingChecklistItem.id ? { ...c, ...patch } : c));
+            setEditingChecklistItem(null);
+            window.showToast("Item atualizado (offline)", { tone: "warn" });
+          }}
+        />
+      )}
+      {confirmDeleteChecklist && (
+        <ConfirmDialog
+          open={!!confirmDeleteChecklist}
+          tone="danger"
+          title="Excluir item do checklist?"
+          message={
+            <>
+              Esta ação remove <strong style={{ color: "var(--fg-0)" }}>{confirmDeleteChecklist.label}</strong> do checklist de fechamento — o item deixa de aparecer nos próximos meses.
+              {" "}
+              <span style={{ color: "var(--fg-2)" }}>
+                Os lançamentos já feitos em qualquer mês <strong style={{ color: "var(--fg-1)" }}>permanecem intactos na DRE</strong>; apenas o vínculo com este item é desfeito.
+              </span>
+              {" "}A exclusão não pode ser desfeita.
+            </>
+          }
+          confirmLabel="Excluir"
+          cancelLabel="Cancelar"
+          onCancel={() => setConfirmDeleteChecklist(null)}
+          onConfirm={async () => {
+            if (dbStatus.isOnline && tenantId && typeof dbDeleteClosingChecklistItem === "function") {
+              const { error } = await dbDeleteClosingChecklistItem(confirmDeleteChecklist.id);
+              if (error) {
+                window.showToast?.(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+                return;
+              }
+              const refreshed = await dbListClosingChecklist?.(tenantId, period);
+              if (refreshed?.data) setChecklist(refreshed.data);
+            } else {
+              setChecklist(checklist.filter((c) => c.id !== confirmDeleteChecklist.id));
+            }
+            setConfirmDeleteChecklist(null);
+            setEditingChecklistItem(null);
+            window.showToast("Item excluído", { tone: "warn" });
           }}
         />
       )}
@@ -395,36 +510,53 @@ function findCategory(categories, id)    { return categories.find((c) => c.id ==
 function findSubcategory(subs, id)       { return subs.find((s) => s.id === id);            }
 function subsByCategory(subs, catId)     { return subs.filter((s) => s.category === catId); }
 
-function ChecklistItemDraft({ categories, subcategories, onClose, onSave }) {
-  const [label, setLabel]     = useState("");
-  const [cat, setCat]         = useState(subcategories[0]?.id);
-  const [recurrence, setRec]  = useState("monthly");
-  const [due, setDue]         = useState("");
-  const [owner, setOwner]     = useState("");
-  const [expected, setExp]    = useState("");
-  const [required, setReq]    = useState(true);
-  const [source, setSource]   = useState("");
+function ChecklistItemDraft({ categories, subcategories, onClose, onSave, onDelete, initial }) {
+  const isEditing = !!initial;
+  const [label, setLabel]     = useState(initial?.label || "");
+  const [cat, setCat]         = useState(initial?.cat || subcategories[0]?.id);
+  const [recurrence, setRec]  = useState(initial?.recurrence || "monthly");
+  const [due, setDue]         = useState(initial?.due != null ? String(initial.due) : "");
+  const [owner, setOwner]     = useState(initial?.owner && initial.owner !== "—" ? initial.owner : "");
+  const [expected, setExp]    = useState(initial?.expected
+    ? Number(initial.expected).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : "");
+  const [required, setReq]    = useState(initial?.required ?? true);
+  const [source, setSource]   = useState(initial?.source && initial.source !== "Manual" ? initial.source : "");
 
   const valid = label.trim() && cat;
+  const buildPatch = () => ({
+    label: label.trim(), cat, recurrence,
+    due: due ? Number(due) : null,
+    owner: owner.trim() || "—",
+    expected: parseFloat(String(expected).replace(/\./g, "").replace(",", ".")) || 0,
+    required, source: source.trim() || "Manual",
+  });
 
   return (
     <ModalShell
-      title="Adicionar item ao checklist"
-      subtitle="Crie uma obrigação recorrente que aparecerá no fechamento mensal."
+      title={isEditing ? "Editar item do checklist" : "Adicionar item ao checklist"}
+      subtitle={isEditing
+        ? "Atualize os dados desta obrigação recorrente."
+        : "Crie uma obrigação recorrente que aparecerá no fechamento mensal."}
       onClose={onClose}
-      footer={<>
-        <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
-                onClick={() => onSave({
-                  label: label.trim(), cat, recurrence,
-                  due: due ? Number(due) : null,
-                  owner: owner.trim() || "—",
-                  expected: parseFloat(String(expected).replace(",", ".")) || 0,
-                  required, source: source.trim() || "Manual",
-                })}>
-          Adicionar item
-        </button>
-      </>}
+      footer={
+        <div style={{ display: "flex", justifyContent: "space-between", width: "100%", gap: 8 }}>
+          <div>
+            {isEditing && onDelete && (
+              <button className="btn" data-variant="danger" data-size="sm" onClick={onDelete}>
+                <I.Trash size={11} />Excluir
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
+                    onClick={() => onSave(buildPatch())}>
+              {isEditing ? "Salvar alterações" : "Adicionar item"}
+            </button>
+          </div>
+        </div>
+      }
     >
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
         <FormField label="Descrição">
@@ -472,16 +604,29 @@ function ChecklistItemDraft({ categories, subcategories, onClose, onSave }) {
   );
 }
 
-function FinanceTabs({ tab, setTab, checklist }) {
-  const pending = checklist.filter((c) => c.status !== "filled" && c.required).length;
+function FinanceTabs({ tab, setTab, checklist, period }) {
+  // Conta só itens obrigatórios pendentes que JÁ estão próximos ou vencidos.
+  // Pendentes longe do vencimento não alertam (era o caso da screenshot do usuário).
+  let overdue = 0, soon = 0;
+  for (const c of checklist) {
+    if (!c.required || c.status === "filled") continue;
+    const u = getChecklistUrgency(c, period);
+    if (u.level === "overdue") overdue++;
+    else if (u.level === "soon") soon++;
+  }
+  const count = overdue + soon;
+  const tone = overdue > 0 ? "crit" : "warn";
+  const badgeStyle = tone === "crit"
+    ? { background: "var(--crit-soft)", color: "var(--crit)", border: "1px solid var(--crit-line)" }
+    : { background: "rgba(194,132,58,0.14)", color: "var(--warn)", border: "1px solid rgba(194,132,58,0.3)" };
   const tabs = [
     { id: "entries",   label: "Lançamentos" },
     { id: "dre",       label: "DRE" },
-    { id: "checklist", label: "Checklist de fechamento", count: pending },
+    { id: "checklist", label: "Checklist de fechamento", count },
   ];
   return (
     <div style={{ display: "flex", gap: 0, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
-      {tabs.map(({ id, label, count }) => {
+      {tabs.map(({ id, label, count: c }) => {
         const active = tab === id;
         return (
           <button key={id} onClick={() => setTab(id)} style={{
@@ -491,14 +636,16 @@ function FinanceTabs({ tab, setTab, checklist }) {
             fontWeight: active ? 500 : 400, letterSpacing: "-0.005em",
             borderBottom: `2px solid ${active ? "var(--accent-bright)" : "transparent"}`,
             marginBottom: -1, display: "inline-flex", alignItems: "center", gap: 8,
-          }}>
+          }}
+          title={id === "checklist" && c > 0
+            ? `${overdue > 0 ? `${overdue} vencido(s)` : ""}${overdue > 0 && soon > 0 ? " · " : ""}${soon > 0 ? `${soon} próximo(s) do vencimento` : ""}`
+            : undefined}>
             {label}
-            {count > 0 && (
+            {c > 0 && (
               <span style={{
                 fontFamily: "var(--mono)", fontSize: 10, padding: "1px 6px",
-                background: "rgba(194,132,58,0.14)", color: "var(--warn)",
-                border: "1px solid rgba(194,132,58,0.3)", borderRadius: 99, letterSpacing: "0.04em",
-              }}>{count}</span>
+                borderRadius: 99, letterSpacing: "0.04em", ...badgeStyle,
+              }}>{c}</span>
             )}
           </button>
         );
@@ -859,8 +1006,8 @@ function DreSub({ label, value, pct, tone, bold }) {
 }
 
 // ---------- Checklist de fechamento ----------
-function ChecklistView({ checklist, categories, subcategories, onFill, period }) {
-  const [filter, setFilter] = useState("all");
+function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, onDelete, period }) {
+  const [filter, setFilter] = useState("pending");
 
   const filtered = checklist.filter((c) => {
     if (filter === "pending") return c.status !== "filled";
@@ -917,6 +1064,19 @@ function ChecklistView({ checklist, categories, subcategories, onFill, period })
         })}
       </div>
 
+      {checklist.length === 0 && (
+        <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
+          <div style={{ fontSize: 13.5, color: "var(--fg-1)", marginBottom: 6, letterSpacing: "-0.005em" }}>
+            Nenhum item no checklist ainda
+          </div>
+          <div style={{ fontSize: 12, color: "var(--fg-3)", maxWidth: 480, margin: "0 auto" }}>
+            Cadastre as obrigações recorrentes do seu fechamento (aluguel, energia, folha, taxas dos apps…) clicando em
+            <strong style={{ color: "var(--accent-bright)" }}> + Adicionar item</strong> no canto superior direito.
+            Cada item aparece em todos os meses e fica marcado como preenchido quando você lança o valor real.
+          </div>
+        </div>
+      )}
+
       {categories.sort((a, b) => a.order - b.order).map((g) => {
         const items = grouped[g.id];
         if (!items || items.length === 0) return null;
@@ -948,7 +1108,7 @@ function ChecklistView({ checklist, categories, subcategories, onFill, period })
                 </tr>
               </thead>
               <tbody>
-                {items.map((c) => <ChecklistRow key={c.id} item={c} subcategories={subcategories} onFill={onFill} />)}
+                {items.map((c) => <ChecklistRow key={c.id} item={c} subcategories={subcategories} period={period} onFill={onFill} onEdit={onEdit} onDelete={onDelete} />)}
               </tbody>
             </table>
           </div>
@@ -958,14 +1118,25 @@ function ChecklistView({ checklist, categories, subcategories, onFill, period })
   );
 }
 
-function ChecklistRow({ item, subcategories, onFill }) {
+function ChecklistRow({ item, subcategories, period, onFill, onEdit, onDelete }) {
   const sub = findSubcategory(subcategories, item.cat);
   const recLabel = { monthly: "Mensal", biweekly: "Quinzenal", weekly: "Semanal", variable: "Variável" }[item.recurrence];
+  const urgency = getChecklistUrgency(item, period);
+  // Pendentes longe do vencimento ficam neutros (info/cinza); só fica crit se vencido.
+  const pendingTone = urgency.level === "overdue" ? "crit" : urgency.level === "soon" ? "warn" : "info";
+  const pendingLabel = urgency.level === "overdue" ? "Vencido" : "Pendente";
   const statusInfo = {
-    filled:    { tone: "ok",   label: "Preenchido" },
-    estimated: { tone: "warn", label: "Estimado" },
-    pending:   { tone: "crit", label: "Pendente" },
+    filled:    { tone: "ok",       label: "Preenchido" },
+    estimated: { tone: "warn",     label: "Estimado" },
+    pending:   { tone: pendingTone, label: pendingLabel },
   }[item.status];
+  const dueCaption = item.status === "filled" || urgency.level === "none" || urgency.daysLeft == null
+    ? null
+    : urgency.level === "overdue"
+      ? `vencido há ${Math.abs(urgency.daysLeft)}d`
+      : urgency.daysLeft === 0
+        ? "vence hoje"
+        : `em ${urgency.daysLeft}d`;
   const drift = item.actual !== null && item.actual !== undefined ? item.actual - item.expected : null;
   const driftPct = drift !== null && item.expected ? (drift / item.expected) * 100 : null;
   return (
@@ -997,7 +1168,15 @@ function ChecklistRow({ item, subcategories, onFill }) {
         </span>
       </td>
       <td className="dim" style={{ fontSize: 11.5 }}>{recLabel}</td>
-      <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>{item.due ? `dia ${String(item.due).padStart(2, "0")}` : "—"}</td>
+      <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>
+        {item.due ? `dia ${String(item.due).padStart(2, "0")}` : "—"}
+        {dueCaption && (
+          <div style={{
+            fontFamily: "var(--mono)", fontSize: 10, marginTop: 2, letterSpacing: "0.04em",
+            color: urgency.level === "overdue" ? "var(--crit)" : "var(--warn)",
+          }}>{dueCaption}</div>
+        )}
+      </td>
       <td className="dim" style={{ fontSize: 11.5 }}>{item.owner}</td>
       <td className="num" style={{ color: "var(--fg-2)" }}>{fmt(item.expected || 0)}</td>
       <td className="num">
@@ -1014,14 +1193,28 @@ function ChecklistRow({ item, subcategories, onFill }) {
       </td>
       <td><span className="badge" data-tone={statusInfo.tone}>{statusInfo.label}</span></td>
       <td>
-        {item.status !== "filled" && (
-          <button className="btn" data-variant="primary" data-size="sm" onClick={() => onFill(item)}>
-            Preencher
-          </button>
-        )}
-        {item.status === "filled" && item.entryIds.length > 0 && (
-          <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>{item.entryIds.length} lanç.</span>
-        )}
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          {item.status !== "filled" && onFill && (
+            <button className="btn" data-variant="primary" data-size="sm" onClick={() => onFill(item)}>
+              Preencher
+            </button>
+          )}
+          {item.status === "filled" && item.entryIds.length > 0 && (
+            <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>{item.entryIds.length} lanç.</span>
+          )}
+          {onEdit && (
+            <button className="btn" data-variant="ghost" data-size="sm" title="Editar item"
+                    onClick={() => onEdit(item)} style={{ padding: "3px 6px" }}>
+              <I.Edit size={11} />
+            </button>
+          )}
+          {onDelete && (
+            <button className="btn" data-variant="ghost" data-size="sm" title="Excluir item"
+                    onClick={() => onDelete(item)} style={{ padding: "3px 6px", color: "var(--crit)" }}>
+              <I.Trash size={11} />
+            </button>
+          )}
+        </div>
       </td>
     </tr>
   );
@@ -1630,3 +1823,5 @@ function SubEntriesModal({ sub, categories, subcategories, entries, period, onCl
 }
 
 window.Finance = Finance;
+// Exposto pro Sidebar calcular o badge de urgência do checklist sem duplicar lógica.
+window.getChecklistUrgency = getChecklistUrgency;

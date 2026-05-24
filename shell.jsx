@@ -45,24 +45,52 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   const [stockCrit, setStockCrit] = useState(0);
   const [stockOut,  setStockOut]  = useState(0);
   const [pendingReq, setPendingReq] = useState(0);
+  // Checklist financeiro: itens vencidos / próximos do vencimento neste mês.
+  const [financeOverdue, setFinanceOverdue] = useState(0);
+  const [financeSoon,    setFinanceSoon]    = useState(0);
 
   useEffect(() => {
-    if (!dbStatus.isOnline || !user?.tenantId) { setStockCrit(0); setStockOut(0); setPendingReq(0); return; }
+    if (!dbStatus.isOnline || !user?.tenantId) {
+      setStockCrit(0); setStockOut(0); setPendingReq(0);
+      setFinanceOverdue(0); setFinanceSoon(0);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {
-        const [stockRes, reqRes] = await Promise.all([
+        const currentPeriod = new Date().toISOString().slice(0, 7);
+        const [stockRes, reqRes, checkRes, entriesRes] = await Promise.all([
           dbListStockItems(user.tenantId),
           dbListKitchenRequests(user.tenantId),
+          typeof dbListClosingChecklist === "function" ? dbListClosingChecklist(user.tenantId) : Promise.resolve({ data: [] }),
+          typeof dbListFinanceEntries  === "function" ? dbListFinanceEntries(user.tenantId, currentPeriod)  : Promise.resolve({ data: [] }),
         ]);
         if (cancelled) return;
         const stockItems = stockRes?.data || [];
         const requests   = reqRes?.data   || [];
+        const checklist  = checkRes?.data || [];
+        const entries    = entriesRes?.data || [];
         const out  = stockItems.filter((i) => (i.qty || 0) <= 0).length;
         const crit = stockItems.filter((i) => (i.qty || 0) > 0 && (i.qty || 0) < (i.reorder || 0)).length;
         setStockOut(out);
         setStockCrit(out + crit);
         setPendingReq(requests.filter((r) => r.status === "pending").length);
+
+        // Conta itens obrigatórios ainda pendentes neste mês com urgência soon/overdue.
+        // Itens criados em meses futuros ainda não valem (não retroagem pro mês atual).
+        let over = 0, sn = 0;
+        const urgFn = typeof window.getChecklistUrgency === "function" ? window.getChecklistUrgency : null;
+        for (const c of checklist) {
+          if (!c.required) continue;
+          if (c.startPeriod && c.startPeriod > currentPeriod) continue;
+          const filled = entries.some((e) => e.checklistItemId === c.id);
+          if (filled) continue;
+          const u = urgFn ? urgFn(c, currentPeriod) : { level: "none" };
+          if (u.level === "overdue") over++;
+          else if (u.level === "soon") sn++;
+        }
+        setFinanceOverdue(over);
+        setFinanceSoon(sn);
       } catch (e) {
         console.warn("[sidebar] falha ao carregar badges:", e);
       }
@@ -78,7 +106,7 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     { id: "requests",   label: "Requisições",     icon: I.Request,     pulse: pendingReq || null },
     { id: "purchases",  label: "Compras",         icon: I.ShoppingList },
     { id: "cmv",        label: "CMV & margem",    icon: I.CMV },
-    { id: "finance",    label: "Financeiro & DRE",icon: I.Finance },
+    { id: "finance",    label: "Financeiro & DRE",icon: I.Finance, badge: (financeOverdue + financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
     { id: "settings",   label: "Configurações",   icon: I.Settings },
   ].filter((item) => has(item.id));
 
@@ -282,17 +310,28 @@ function StatusBar({ scope }) {
       )}
       <span style={statusBar.spacer} />
       <span style={statusBar.item}>{time}</span>
-      <span style={statusBar.item}>v2.4.1</span>
+      <span style={statusBar.item}>v1.1</span>
     </div>
   );
 }
 
 function Toasts({ toasts }) {
+  const dotColor = (tone) => {
+    if (tone === "ok") return "var(--ok)";
+    if (tone === "warn") return "var(--warn)";
+    if (tone === "crit") return "var(--crit)";
+    return "var(--accent-bright)";
+  };
+  const critStyle = {
+    borderColor: "var(--crit-line)",
+    background: "var(--crit-soft)",
+    color: "var(--crit)",
+  };
   return (
     <div className="toast-wrap">
       {toasts.map((t) => (
-        <div key={t.id} className="toast">
-          <span className="dot" style={{ background: t.tone === "ok" ? "var(--ok)" : t.tone === "warn" ? "var(--warn)" : "var(--accent-bright)" }} />
+        <div key={t.id} className="toast" style={t.tone === "crit" ? critStyle : undefined}>
+          <span className="dot" style={{ background: dotColor(t.tone) }} />
           <span>{t.msg}</span>
           <span className="meta">{t.meta}</span>
         </div>

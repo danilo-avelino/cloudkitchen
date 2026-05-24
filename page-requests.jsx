@@ -168,6 +168,7 @@ function Requests({ scope }) {
         code,
         priority:  draft.priority,
         by:        draft.by || "Cozinha",
+        notes:     draft.notes || null,
         items:     draft.lines.map((ln) => ({
           name:          ln.name,
           stock_item_id: ln.stock_item_id || null,
@@ -217,6 +218,7 @@ function Requests({ scope }) {
       age: "agora",
       items: draft.lines.map((ln) => [ln.name, ln.qty, ln.stock_item_id || null]),
       splits,
+      notes: draft.notes || null,
     };
     setItems((prev) => [newReq, ...prev]);
     setCreating(false);
@@ -628,6 +630,16 @@ function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint }) {
           </div>
         </div>
       )}
+      {r.notes && (
+        <div style={{
+          padding: "6px 8px", borderRadius: 3,
+          background: "var(--bg-1)", border: "1px solid var(--line-soft)",
+          fontSize: 11, color: "var(--fg-1)", fontStyle: "italic",
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+        }}>
+          “{r.notes}”
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 8, borderTop: "1px solid var(--line-soft)" }}>
         <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>{r.at} · {r.age}</span>
         <span style={{ flex: 1 }} />
@@ -683,6 +695,11 @@ function PrintTicket({ request }) {
       {request.priority === "high" && (
         <div className="bold center" style={{ marginTop: "2mm", border: "1px solid black", padding: "1mm" }}>
           ** PRIORIDADE ALTA **
+        </div>
+      )}
+      {request.notes && (
+        <div style={{ marginTop: "2mm", whiteSpace: "pre-wrap" }}>
+          <span className="bold">Obs.:</span> {request.notes}
         </div>
       )}
 
@@ -745,6 +762,17 @@ function EditRequestModal({ request, onCancel, onSubmit, stockItems = MOCK.STOCK
   const validLines = lines.filter((ln) => ln.stock_item_id && parseFloat(String(ln.qty).replace(",", ".")) > 0);
   const valid = validLines.length > 0;
   const op = MOCK.opById(request.op);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmitClick = async () => {
+    if (submitting || !valid) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({ lines: validLines.map((ln) => buildSubmitLine(ln)) });
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <Modal
@@ -754,12 +782,10 @@ function EditRequestModal({ request, onCancel, onSubmit, stockItems = MOCK.STOCK
       width={820}
       minHeight="92vh"
       footer={<>
-        <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
-                onClick={() => onSubmit({
-                  lines: validLines.map((ln) => buildSubmitLine(ln)),
-                })}>
-          Salvar alterações
+        <button className="btn" data-size="sm" onClick={onCancel} disabled={submitting}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || submitting}
+                onClick={handleSubmitClick}>
+          {submitting ? "Salvando…" : "Salvar alterações"}
         </button>
       </>}
     >
@@ -1099,6 +1125,7 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
   const [op, setOp] = useState(defaultOp || ops[0]?.id || "");
   const [by, setBy] = useState("");
   const [priority, setPriority] = useState("normal");
+  const [notes, setNotes] = useState("");
   const [lines, setLines] = useState([{ stock_item_id: "", qty: "" }]);
 
   // Rateio entre operações (ativo quando op === SHARED)
@@ -1242,18 +1269,30 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
       op: primaryOp,
       by: by.trim(),
       priority,
+      notes: notes.trim() || null,
       lines: validLines.map((ln) => buildSubmitLine(ln, stockItems)),
       splits: splitsArr,
     };
   };
 
+  const [submitting, setSubmitting] = useState(false);
+  const handleSubmitClick = async () => {
+    if (submitting || !valid) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(buildSubmitPayload());
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <Modal title="Nova requisição" subtitle="A cozinha solicita itens; o estoquista aprova e separa." onClose={onCancel} width={820} minHeight="92vh"
       footer={<>
-        <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
-                onClick={() => onSubmit(buildSubmitPayload())}>
-          Enviar requisição
+        <button className="btn" data-size="sm" onClick={onCancel} disabled={submitting}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || submitting}
+                onClick={handleSubmitClick}>
+          {submitting ? "Enviando…" : "Enviar requisição"}
         </button>
       </>}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 14 }}>
@@ -1378,6 +1417,19 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
       )}
 
       <StockLinesEditor lines={lines} setLines={setLines} allowAdd stockItems={stockItems} />
+
+      <div style={{ marginTop: 14 }}>
+        <FormRow label="Observação">
+          <textarea
+            className="input"
+            placeholder="Ex.: urgente para o jantar, entregar embalado, etc."
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={3}
+            style={{ resize: "vertical", minHeight: 60, fontFamily: "inherit" }}
+          />
+        </FormRow>
+      </div>
     </Modal>
   );
 }

@@ -36,6 +36,9 @@ function Dashboard({ scope, setScope, setPage }) {
     cmvDaily: [],
     requests: [],
     cmvMovements: [], // saídas (kind=out) do mês até hoje, p/ CMV real por operação
+    dreCategories: [],
+    dreSubcategories: [],
+    financeEntries: [], // do mês corrente, p/ KPI "Compras do mês"
   });
 
   // Carrega dados do DB + assina realtime (faturamento/saída atualizam o ranking ao vivo)
@@ -63,8 +66,9 @@ function Dashboard({ scope, setScope, setPage }) {
       const toYMD       = new Date().toISOString().slice(0, 10);
       const _mtdFirst   = new Date(); _mtdFirst.setDate(1); _mtdFirst.setHours(0, 0, 0, 0);
       const cmvFromYMD  = _mtdFirst.toISOString().slice(0, 10);
+      const currentPeriod = `${_mtdFirst.getFullYear()}-${String(_mtdFirst.getMonth() + 1).padStart(2, "0")}`;
 
-      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes] = await Promise.all([
+      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes, dreCatRes, dreSubRes, finRes] = await Promise.all([
         dbGetCurrentContext?.(),
         dbListRevenueEntries(tid, fromISO, null),
         dbListRevenueEntries(tid, prevFromISO, prevToISO),
@@ -74,6 +78,9 @@ function Dashboard({ scope, setScope, setPage }) {
         dbListCmvDaily(tid, cmvFromYMD, toYMD),
         dbListKitchenRequests(tid, { limit: 8 }),
         dbListStockMovements(tid, _mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 }),
+        dbListDreCategories?.(tid) || { data: null },
+        dbListDreSubcategories?.(tid) || { data: null },
+        dbListFinanceEntries?.(tid, currentPeriod) || { data: null },
       ]);
       if (cancelled) return;
       setDbData({
@@ -85,6 +92,9 @@ function Dashboard({ scope, setScope, setPage }) {
         cmvDaily:         cmvRes.data || [],
         requests:         reqRes.data || [],
         cmvMovements:     movRes.data || [],
+        dreCategories:    dreCatRes.data || [],
+        dreSubcategories: dreSubRes.data || [],
+        financeEntries:   finRes.data || [],
       });
       setPageLoading(false);
     };
@@ -101,6 +111,7 @@ function Dashboard({ scope, setScope, setPage }) {
       dbSubscribeTable?.("revenue_entries",  tid, scheduleReload),
       dbSubscribeTable?.("stock_movements",  tid, scheduleReload),
       dbSubscribeTable?.("goods_receipts",   tid, scheduleReload),
+      dbSubscribeTable?.("finance_entries",  tid, scheduleReload),
     ].filter(Boolean);
 
     return () => {
@@ -115,6 +126,34 @@ function Dashboard({ scope, setScope, setPage }) {
 
   // Métricas dos novos módulos (Inventário)
   const moduleMetrics = useMemo(() => computeDashboardMetrics(scope, period, dbData, dbStatus.isOnline), [scope, period, dbData, dbStatus.isOnline]);
+
+  // Compras do mês corrente · soma das subcategorias do grupo CMV (exclui autofeed
+  // "Ajuste de estoque"). Mesma fórmula do `comprasTotal` da DRE em page-finance.
+  const comprasMes = useMemo(() => {
+    const cats = dbData.dreCategories || [];
+    const subs = dbData.dreSubcategories || [];
+    const entries = dbData.financeEntries || [];
+    const cmvCatIds = new Set(
+      cats.filter((c) => c.kind === "cogs" || c.groupSlug === "cmv" || c.id === "cmv").map((c) => c.id),
+    );
+    const cmvSubIds = new Set(
+      subs.filter((s) => cmvCatIds.has(s.category) && !s.autofeed).map((s) => s.id),
+    );
+    return entries
+      .filter((e) => cmvSubIds.has(e.cat))
+      .reduce((acc, e) => acc + (Number(e.value) || 0), 0);
+  }, [dbData.dreCategories, dbData.dreSubcategories, dbData.financeEntries]);
+
+  // Totais de entradas e saídas de estoque no mês (R$) · |qty| × custo unitário
+  const stockFlows = useMemo(() => {
+    let entradas = 0, saidas = 0;
+    for (const mv of (dbData.cmvMovements || [])) {
+      const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+      if (mv.kind === "in")  entradas += value;
+      if (mv.kind === "out") saidas   += value;
+    }
+    return { entradas, saidas };
+  }, [dbData.cmvMovements]);
 
   if (pageLoading) return <PageLoading label="Carregando dashboard…" variant="dashboard" />;
 
@@ -143,11 +182,18 @@ function Dashboard({ scope, setScope, setPage }) {
         <KpiCard label={`Faturamento · ${periodLabel}`} data={(k[scope] || k.all).revenue} accent />
         <KpiCard label="CMV consolidado" data={(k[scope] || k.all).cmv} />
         <KpiCard label="Valor em estoque" data={(k[scope] || k.all).stockValue} />
-        <KpiCard label="Alertas estoque" data={(k[scope] || k.all).alerts} onClick={() => setPage("stock")} />
+        <KpiCard label="Compras do mês" data={{
+          v: `R$ ${(comprasMes / 1000).toFixed(1)}k`,
+          d: new Date().toLocaleDateString("pt-BR", { month: "long" }),
+          tone: "info",
+          sub: "via DRE · CMV",
+        }} onClick={() => setPage("finance")} />
       </div>
 
-      {/* KPIs operacionais — novos módulos (linha 2) */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+      {/* Fluxos de estoque + KPIs operacionais — linha única compacta */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in" />
+        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" />
         <ModuleKpi label="Precisão de estoque"
           value={moduleMetrics.inv.accuracy ? `${moduleMetrics.inv.accuracy.toFixed(0)}%` : "—"}
           sub={moduleMetrics.inv.lastDate ? `último em ${moduleMetrics.inv.lastDate}` : "sem inventários"}
@@ -858,6 +904,18 @@ function ConsolidatedAlertsCard({ setPage, stock = [], dbOnline = false }) {
   );
 }
 
+
+// FlowKpi · card minimalista com rótulo e valor total em R$ (sem delta nem sparkline)
+function FlowKpi({ label, value, tone }) {
+  const color = tone === "in" ? "var(--ok)" : tone === "out" ? "var(--crit)" : "var(--fg-0)";
+  const fmt = Number(value || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (
+    <div className="kpi">
+      <div className="label">{label}</div>
+      <div className="value" style={{ color }}>R$ {fmt}</div>
+    </div>
+  );
+}
 
 window.Dashboard = Dashboard;
 window.KpiCard   = KpiCard;

@@ -379,11 +379,9 @@ function printInventorySheet(inv) {
 
   const sections = cats.map(([catName, catItems], idx) => {
     const rows = catItems.map((it, i) => {
-      const expected = it.expected != null ? Number(it.expected).toLocaleString("pt-BR", { maximumFractionDigits: 3 }) : "—";
       return `<tr>
         <td class="num">${i + 1}</td>
         <td>${esc(it.name)}</td>
-        <td class="num">${expected}</td>
         <td class="unit">${esc(it.unit || "un")}</td>
         <td class="count"></td>
         <td class="notes"></td>
@@ -402,7 +400,6 @@ function printInventorySheet(inv) {
           <tr>
             <th class="num">#</th>
             <th>Insumo</th>
-            <th class="num">Esperado</th>
             <th class="unit">Un.</th>
             <th>Contagem manual</th>
             <th>Observações</th>
