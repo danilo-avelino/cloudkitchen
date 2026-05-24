@@ -42,6 +42,10 @@ function injectLegacyGlobals() {
 }
 
 export default defineConfig({
+  // GH Pages serve a partir de /<repo>/; em dev e em hospedagens com domínio
+  // raiz (Vercel, Netlify, domínio customizado), mantém "/". O workflow do GH
+  // Pages exporta BASE_PATH=/cloudkitchen/ antes do build.
+  base: process.env.BASE_PATH || "/",
   plugins: [react(), injectLegacyGlobals()],
   esbuild: {
     loader: "jsx",
