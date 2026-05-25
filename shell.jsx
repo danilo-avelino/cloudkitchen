@@ -2,7 +2,9 @@
 // (React + hooks vêm como globais via plugin injectLegacyGlobals do Vite)
 
 // Catálogo único de módulos do app — espelha src/App.jsx e page-settings.jsx
+// "saas" é exclusivo do superadmin (gestão multi-tenant da plataforma).
 const APP_MODULES = ["dashboard","stock","recipes","revenue","requests","purchases","cmv","finance","dre","settings"];
+const SUPERADMIN_MODULES = ["saas"];
 
 // Preset padrão por role do banco quando o membro não tem `modules` customizado
 const ROLE_DEFAULT_MODULES = {
@@ -23,6 +25,9 @@ const ROLE_LABEL_TO_DB = {
 
 function getAllowedModules(user) {
   if (!user) return ["dashboard"];
+  // Superadmin: só "Gestão SaaS" (escopo é global, não há tenant pra operar).
+  // Se quiser entrar como owner de algum tenant específico, usar conta diferente.
+  if (user.isSuperadmin === true || user.role === "superadmin") return SUPERADMIN_MODULES;
   const dbRole = ROLE_LABEL_TO_DB[user.role] || user.role || "viewer";
   // Owner/admin sempre veem tudo, ignorando customização (evita auto-bloqueio)
   if (dbRole === "owner" || dbRole === "admin") return APP_MODULES;
@@ -98,7 +103,9 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     return () => { cancelled = true; };
   }, [dbStatus.isOnline, user?.tenantId, page]);
 
+  const isSuperadmin = user?.isSuperadmin === true || user?.role === "superadmin";
   const allNav = [
+    { id: "saas",       label: "Gestão SaaS",     icon: I.Trophy },
     { id: "dashboard",  label: "Dashboard",      icon: I.Dashboard },
     { id: "stock",      label: "Estoque",         icon: I.Stock,       badge: stockCrit || null, badgeTone: stockOut > 0 ? "crit" : "warn" },
     { id: "recipes",    label: "Fichas técnicas", icon: I.Recipe },
@@ -112,7 +119,9 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   ].filter((item) => has(item.id));
 
   const initials = user?.name?.split(" ").map((n) => n[0]).slice(0, 2).join("") || "?";
-  const tenantName = user?.tenantName || "Cloud Kitchen";
+  const tenantName = isSuperadmin
+    ? "StockKitchen · Plataforma"
+    : (user?.tenantName || "Cloud Kitchen");
 
   return (
     <aside style={sb.aside}>
@@ -124,8 +133,10 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
         <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
           <div style={sb.tenantName}>{tenantName}</div>
           <div style={sb.tenantId}>
-            {user?.tenantId ? user.tenantId.slice(0, 8).toUpperCase() : "LOCAL"}
-            {(() => {
+            {isSuperadmin
+              ? "MULTI-TENANT"
+              : (user?.tenantId ? user.tenantId.slice(0, 8).toUpperCase() : "LOCAL")}
+            {!isSuperadmin && (() => {
               const n = (window.MOCK?.OPERATIONS || []).filter((o) => o.id !== "all").length;
               return n > 0 ? ` · ${n} ops` : "";
             })()}
@@ -198,6 +209,7 @@ function Topbar({ page, scope, theme, setTheme, user, onLogout }) {
   }, [userMenuOpen]);
 
   const titleMap = {
+    saas: "Gestão SaaS",
     dashboard: "Dashboard",
     stock: "Estoque",
     recipes: "Fichas técnicas",

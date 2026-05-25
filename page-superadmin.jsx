@@ -52,7 +52,7 @@ function _saMapTenantFromDb(row) {
   };
 }
 
-function SuperAdmin({ user, onLogout }) {
+function SuperAdmin({ user, onLogout, embedded = false }) {
   const [tab, setTab] = useState("overview");
   const dbStatus = useDbStatus ? useDbStatus() : { state: "checking", isOnline: false };
   const [tenants, setTenants] = useState(() => dbStatus.isOnline ? [] : MOCK.SYSTEM_TENANTS);
@@ -215,17 +215,66 @@ function SuperAdmin({ user, onLogout }) {
     return { ok: true };
   };
 
+  // Conteúdo das abas — usado tanto no shell standalone quanto embedded.
+  const content = (
+    <>
+      {tab === "overview" && (
+        <SaOverview
+          totalMRR={totalMRR} activeCount={activeCount} trialCount={trialCount}
+          suspended={suspended} totalUsers={totalUsers} totalOps={totalOps}
+          totalRevenue30d={totalRevenue30d}
+          tenants={tenants}
+        />
+      )}
+      {tab === "tenants" && (
+        <SaTenants
+          tenants={filtered} allTenants={tenants} totalCount={tenants.length}
+          search={search} setSearch={setSearch}
+          statusFilter={statusFilter} setStatusFilter={setStatusFilter}
+          onSetStatus={setTenantStatus}
+          onCreate={createTenant}
+          onUpdate={updateTenant}
+          onDelete={deleteTenant}
+          onReload={reloadTenants}
+          loading={loadingTenants}
+          dbOnline={dbStatus.isOnline}
+        />
+      )}
+      {tab === "users" && <SaUsers />}
+      {tab === "system" && <SaSystem />}
+    </>
+  );
+
+  // Modo embedded · renderiza só a sub-nav de abas + conteúdo.
+  // Sidebar/Topbar do AppShell cuidam de logout, tema, identidade.
+  if (embedded) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "12px 24px", borderBottom: "1px solid var(--line-soft)",
+          background: "var(--bg-1)",
+        }}>
+          <SaTabs tab={tab} setTab={setTab} />
+          <div style={{ flex: 1 }} />
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+            {tenants.length} tenant{tenants.length === 1 ? "" : "s"}
+          </div>
+        </div>
+        <div style={{ flex: 1, overflow: "auto" }}>{content}</div>
+      </div>
+    );
+  }
+
+  // Modo standalone · header próprio com logout (compat: chamado direto sem AppShell)
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden", background: "var(--bg-0)" }}>
-      {/* Topbar custom · superadmin */}
       <header style={{
         display: "flex", alignItems: "center",
         padding: "12px 24px", borderBottom: "1px solid var(--line)",
         background: "var(--bg-1)",
       }}>
-        <div style={{
-          display: "flex", alignItems: "center", gap: 12, flex: 1,
-        }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1 }}>
           <div style={{
             width: 28, height: 28, borderRadius: 4,
             background: "linear-gradient(135deg, #c2843a, #b04545)",
@@ -262,34 +311,7 @@ function SuperAdmin({ user, onLogout }) {
           </button>
         </div>
       </header>
-
-      {/* Conteúdo */}
-      <div style={{ flex: 1, overflow: "auto" }}>
-        {tab === "overview" && (
-          <SaOverview
-            totalMRR={totalMRR} activeCount={activeCount} trialCount={trialCount}
-            suspended={suspended} totalUsers={totalUsers} totalOps={totalOps}
-            totalRevenue30d={totalRevenue30d}
-            tenants={tenants}
-          />
-        )}
-        {tab === "tenants" && (
-          <SaTenants
-            tenants={filtered} allTenants={tenants} totalCount={tenants.length}
-            search={search} setSearch={setSearch}
-            statusFilter={statusFilter} setStatusFilter={setStatusFilter}
-            onSetStatus={setTenantStatus}
-            onCreate={createTenant}
-            onUpdate={updateTenant}
-            onDelete={deleteTenant}
-            onReload={reloadTenants}
-            loading={loadingTenants}
-            dbOnline={dbStatus.isOnline}
-          />
-        )}
-        {tab === "users" && <SaUsers />}
-        {tab === "system" && <SaSystem />}
-      </div>
+      <div style={{ flex: 1, overflow: "auto" }}>{content}</div>
     </div>
   );
 }
