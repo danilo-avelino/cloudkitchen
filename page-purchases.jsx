@@ -396,6 +396,61 @@ function Purchases() {
     });
   };
 
+  // Aplica edições feitas na modal "Editar lista" — patches por item + remoções.
+  // changes = { updates: [{ id, qty, est_unit_cost }], deletes: [id] }
+  // Retorna { ok: bool, errors: [str] }; o caller é responsável por fechar a modal.
+  const handleUpdateListItems = async (listId, changes) => {
+    const updates = Array.isArray(changes?.updates) ? changes.updates : [];
+    const deletes = Array.isArray(changes?.deletes) ? changes.deletes : [];
+    const errors = [];
+
+    if (source === "db") {
+      for (const u of updates) {
+        const patch = {};
+        if (u.qty !== undefined)            patch.qty       = Number(u.qty) || 0;
+        if (u.est_unit_cost !== undefined)  patch.unit_cost = Number(u.est_unit_cost) || 0;
+        const { error } = await dbUpdatePurchaseOrderItem(u.id, patch);
+        if (error) errors.push(`update ${u.id}: ${error.message}`);
+      }
+      for (const id of deletes) {
+        const { error } = await dbDeletePurchaseOrderItem(id);
+        if (error) errors.push(`delete ${id}: ${error.message}`);
+      }
+      // Refetch — assim o agrupamento por PO/lista é recalculado
+      const { data: refreshed } = await dbListPurchaseOrders(tenantId);
+      if (refreshed) setLists(refreshed);
+    } else {
+      // MOCK: edita em memória
+      setLists((prev) => prev.map((l) => {
+        if (l.id !== listId) return l;
+        const delSet = new Set(deletes);
+        const updMap = new Map(updates.map((u) => [u.id, u]));
+        const nextItems = l.items
+          .filter((it) => !delSet.has(it.id))
+          .map((it) => {
+            const u = updMap.get(it.id);
+            if (!u) return it;
+            const qty = u.qty !== undefined ? Number(u.qty) || 0 : it.qty;
+            const cost = u.est_unit_cost !== undefined ? Number(u.est_unit_cost) || 0 : it.est_unit_cost;
+            return { ...it, qty, est_unit_cost: cost, est_cost: qty * cost };
+          });
+        return { ...l, items: nextItems };
+      }));
+    }
+
+    if (errors.length > 0) {
+      window.showToast(`Salvou com erros: ${errors[0]}`, { tone: "crit", ttl: 5000 });
+      return { ok: false, errors };
+    }
+    const summary = [];
+    if (updates.length > 0) summary.push(`${updates.length} ajustado(s)`);
+    if (deletes.length > 0) summary.push(`${deletes.length} removido(s)`);
+    if (summary.length > 0) {
+      window.showToast(`Lista atualizada · ${summary.join(" · ")}`, { tone: "ok", ttl: 3500 });
+    }
+    return { ok: true, errors: [] };
+  };
+
   const handleDeleteList = async (id) => {
     const list = lists.find((l) => l.id === id);
     if (!list) return;
@@ -437,6 +492,7 @@ function Purchases() {
           onBack={() => setViewingSavedListId(null)}
           onReceive={() => { setSelectedListId(viewingSavedList.id); setViewingSavedListId(null); }}
           onDelete={() => setConfirmDeleteId(viewingSavedList.id)}
+          onUpdateItems={(changes) => handleUpdateListItems(viewingSavedList.id, changes)}
         />
       ) : selectedList ? (
         <PurchaseDetailView
@@ -1265,7 +1321,7 @@ function OriginalListModal({ list, supplier, onClose }) {
 // ============ SAVED LIST VIEW · snapshot estilo Shopping (mín/máx + copiar) ============
 // Mostra os itens da lista salva com referência ao estoque atual (qty, mín, máx).
 // Permite copiar p/ WhatsApp (full ou por fornecedor) e atalhos pra Receber/Excluir.
-function SavedListView({ list, onBack, onReceive, onDelete, stockItems = MOCK.STOCK_ITEMS || [] }) {
+function SavedListView({ list, onBack, onReceive, onDelete, onUpdateItems, stockItems = MOCK.STOCK_ITEMS || [] }) {
   const total = list.items.reduce((s, it) => s + (it.est_cost || 0), 0);
   const status = list.computedStatus || list.status;
   const fullyReceived = status === "received";
@@ -1433,6 +1489,7 @@ function SavedListView({ list, onBack, onReceive, onDelete, stockItems = MOCK.ST
           total={total}
           onCopy={copySupplier}
           onPrint={(items, supName) => printShoppingList(list, [[supName, items]], { single: true })}
+          onUpdateItems={onUpdateItems}
         />
       </div>
     </>
@@ -1498,8 +1555,10 @@ function PStat({ label, value, tone }) {
 }
 
 // ===================== Grid de fornecedores estilo inventário =====================
-function SupplierCardsGrid({ list, bySupplier, total, onCopy, onPrint }) {
-  const [expanded, setExpanded] = useState(null); // supplier name expandido (mostra itens)
+function SupplierCardsGrid({ list, bySupplier, total, onCopy, onPrint, onUpdateItems }) {
+  const [editing, setEditing] = useState(null); // supplier name sendo editado (abre modal)
+
+  const editingEntry = editing ? bySupplier.find(([n]) => n === editing) : null;
 
   return (
     <>
@@ -1511,7 +1570,6 @@ function SupplierCardsGrid({ list, bySupplier, total, onCopy, onPrint }) {
         {bySupplier.map(([supName, items]) => {
           const supTotal = items.reduce((s, it) => s + (it.est_cost || 0), 0);
           const groupCritical = items.some((it) => it.isCritical);
-          const isExpanded = expanded === supName;
           const pct = total > 0 ? Math.round((supTotal / total) * 100) : 0;
           return (
             <div key={supName} style={{
@@ -1574,8 +1632,9 @@ function SupplierCardsGrid({ list, bySupplier, total, onCopy, onPrint }) {
 
               <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
                 <button className="btn" data-size="sm" style={{ flex: 1 }}
-                        onClick={() => setExpanded(isExpanded ? null : supName)}>
-                  {isExpanded ? "Ocultar detalhes" : "Detalhes"}
+                        onClick={() => setEditing(supName)}
+                        title="Editar quantidades e remover itens com comparativo de estoque">
+                  <I.Edit size={11} />Editar lista
                 </button>
                 <button className="btn" data-size="sm" title="Copiar para WhatsApp"
                         onClick={() => onCopy(supName, items)}>
@@ -1591,66 +1650,191 @@ function SupplierCardsGrid({ list, bySupplier, total, onCopy, onPrint }) {
         })}
       </div>
 
-      {/* Detalhe expandido (abaixo do grid) */}
-      {expanded && (() => {
-        const entry = bySupplier.find(([n]) => n === expanded);
-        if (!entry) return null;
-        const [supName, items] = entry;
-        const supTotal = items.reduce((s, it) => s + (it.est_cost || 0), 0);
-        return (
-          <div className="card" style={{ marginTop: 14 }}>
-            <div className="card-header">
-              <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                <I.Truck size={15} style={{ color: "var(--fg-2)" }} />
-                <div>
-                  <h3 className="card-title">{supName}</h3>
-                  <div className="card-sub" style={{ marginTop: 2 }}>
-                    {items.length} {items.length === 1 ? "item" : "itens"} · {_fmtBRLp(supTotal)}
-                  </div>
-                </div>
-              </div>
-              <button className="btn" data-size="sm" data-variant="ghost" onClick={() => setExpanded(null)}>×</button>
-            </div>
-            <table className="table" data-density="compact">
-              <thead>
-                <tr>
-                  <th>Insumo</th>
-                  <th className="num">Atual</th>
-                  <th className="num">Mín</th>
-                  <th className="num">Máx</th>
-                  <th className="num">Comprar</th>
-                  <th className="num">Custo unit.</th>
-                  <th className="num">Custo composto</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((s) => (
-                  <tr key={s.id}>
-                    <td className="row-strong">
-                      <div>{s.name}</div>
-                      <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.04em", textTransform: "uppercase", marginTop: 2 }}>
-                        {s.stock_item_id || "—"}
-                        {s.isCritical ? <span style={{ color: "var(--crit)", marginLeft: 6 }}>· ruptura</span> : null}
-                      </div>
-                    </td>
-                    <td className="num" style={{ color: s.currentQty == null ? "var(--fg-3)" : (s.currentQty <= 0 ? "var(--crit)" : "var(--fg-1)") }}>
-                      {s.currentQty == null ? "—" : `${s.currentQty} ${s.stockUnit || s.unit}`}
-                    </td>
-                    <td className="num" style={{ color: "var(--fg-2)" }}>{s.reorder ?? "—"}</td>
-                    <td className="num" style={{ color: "var(--fg-2)" }}>{s.max ?? "—"}</td>
-                    <td className="num" style={{ color: "var(--accent-bright)", fontWeight: 500 }}>
-                      {s.qty} {s.unit}
-                    </td>
-                    <td className="num">{_fmtBRLp(s.est_unit_cost)}</td>
-                    <td className="num">{_fmtBRLp(s.est_cost)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        );
-      })()}
+      {editingEntry && (
+        <EditListModal
+          supplierName={editingEntry[0]}
+          items={editingEntry[1]}
+          onClose={() => setEditing(null)}
+          onSave={async (changes) => {
+            if (!onUpdateItems) { setEditing(null); return; }
+            const res = await onUpdateItems(changes);
+            if (res?.ok !== false) setEditing(null);
+          }}
+        />
+      )}
     </>
+  );
+}
+
+// ===================== Modal "Editar lista" =====================
+// Mostra todos os itens de um fornecedor com estoque atual / mín / máx
+// ao lado da quantidade pedida (editável). Permite remover itens.
+// Persiste via callback onSave({ updates: [{id, qty}], deletes: [id] }).
+function EditListModal({ supplierName, items, onClose, onSave }) {
+  // Estado local: clones dos itens + ids marcados pra remover
+  const [drafts, setDrafts]   = useState(() => items.map((it) => ({
+    id: it.id,
+    qty: String(it.qty ?? ""),
+    name: it.name,
+    unit: it.unit,
+    stock_item_id: it.stock_item_id,
+    est_unit_cost: it.est_unit_cost,
+    currentQty: it.currentQty,
+    reorder: it.reorder,
+    max: it.max,
+    stockUnit: it.stockUnit,
+    isCritical: it.isCritical,
+  })));
+  const [removed, setRemoved] = useState(() => new Set());
+  const [saving, setSaving]   = useState(false);
+
+  const visibleDrafts = drafts.filter((d) => !removed.has(d.id));
+  const total = visibleDrafts.reduce((s, d) =>
+    s + ((Number(d.qty) || 0) * (Number(d.est_unit_cost) || 0)), 0);
+
+  // Diff vs estado original (items)
+  const originalById = useMemo(() => {
+    const m = new Map();
+    items.forEach((it) => m.set(it.id, it));
+    return m;
+  }, [items]);
+
+  const updates = drafts
+    .filter((d) => !removed.has(d.id))
+    .filter((d) => {
+      const orig = originalById.get(d.id);
+      if (!orig) return false;
+      const qNew = Number(d.qty) || 0;
+      const qOld = Number(orig.qty) || 0;
+      return qNew !== qOld;
+    })
+    .map((d) => ({ id: d.id, qty: Number(d.qty) || 0 }));
+  const deletes = Array.from(removed);
+  const dirty = updates.length > 0 || deletes.length > 0;
+
+  const setQty = (id, value) => {
+    setDrafts((prev) => prev.map((d) => (d.id === id ? { ...d, qty: value } : d)));
+  };
+
+  const toggleRemoved = (id) => {
+    setRemoved((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    if (!dirty || saving) return;
+    setSaving(true);
+    try { await onSave({ updates, deletes }); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <Modal
+      title={`Editar lista · ${supplierName}`}
+      subtitle={`${visibleDrafts.length} ${visibleDrafts.length === 1 ? "item" : "itens"} · ${_fmtBRLp(total)}`}
+      onClose={onClose}
+      width={820}
+      footer={<>
+        <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+        <button className="btn" data-size="sm" data-variant="primary"
+                onClick={submit} disabled={!dirty || saving}>
+          {saving ? "Salvando…" : (dirty ? `Salvar (${updates.length + deletes.length})` : "Sem alterações")}
+        </button>
+      </>}
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{
+          padding: "9px 12px", background: "var(--bg-2)",
+          border: "1px solid var(--line)", borderRadius: 4,
+          display: "flex", alignItems: "center", gap: 10,
+          fontSize: 11.5, color: "var(--fg-2)",
+        }}>
+          <I.AlertTriangle size={12} style={{ color: "var(--fg-3)", flexShrink: 0 }} />
+          <span>
+            Ajuste as quantidades a comprar comparando com o estoque{" "}
+            <strong style={{ color: "var(--fg-0)" }}>Atual / Mín / Máx</strong>. Itens removidos
+            só são gravados ao clicar em <strong style={{ color: "var(--fg-0)" }}>Salvar</strong>.
+          </span>
+        </div>
+
+        <table className="table" data-density="compact">
+          <thead>
+            <tr>
+              <th style={{ width: "36%" }}>Insumo</th>
+              <th className="num">Atual</th>
+              <th className="num">Mín</th>
+              <th className="num">Máx</th>
+              <th className="num" style={{ width: 140 }}>Comprar</th>
+              <th className="num">Custo unit.</th>
+              <th className="num">Custo composto</th>
+              <th style={{ width: 36 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {drafts.map((d) => {
+              const isRemoved = removed.has(d.id);
+              const qtyNum = Number(d.qty) || 0;
+              const lineCost = qtyNum * (Number(d.est_unit_cost) || 0);
+              const currentTone = d.currentQty == null
+                ? "var(--fg-3)"
+                : (d.currentQty <= 0 ? "var(--crit)" : "var(--fg-1)");
+              return (
+                <tr key={d.id} style={{
+                  opacity: isRemoved ? 0.45 : 1,
+                  textDecoration: isRemoved ? "line-through" : "none",
+                }}>
+                  <td className="row-strong">
+                    <div>{d.name}</div>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.04em", textTransform: "uppercase", marginTop: 2 }}>
+                      {d.stock_item_id || "—"}
+                      {d.isCritical ? <span style={{ color: "var(--crit)", marginLeft: 6 }}>· ruptura</span> : null}
+                    </div>
+                  </td>
+                  <td className="num" style={{ color: currentTone }}>
+                    {d.currentQty == null ? "—" : `${d.currentQty} ${d.stockUnit || d.unit}`}
+                  </td>
+                  <td className="num" style={{ color: "var(--fg-2)" }}>{d.reorder ?? "—"}</td>
+                  <td className="num" style={{ color: "var(--fg-2)" }}>{d.max ?? "—"}</td>
+                  <td className="num">
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end" }}>
+                      <input
+                        type="number" step="any" min="0"
+                        value={d.qty}
+                        disabled={isRemoved}
+                        onChange={(e) => setQty(d.id, e.target.value)}
+                        style={{
+                          width: 70, textAlign: "right",
+                          background: "var(--bg-2)", border: "1px solid var(--line)",
+                          borderRadius: 3, padding: "3px 6px",
+                          color: "var(--accent-bright)", fontFamily: "var(--mono)",
+                          fontSize: 11.5,
+                        }}
+                      />
+                      <span style={{ fontSize: 10.5, color: "var(--fg-3)", minWidth: 24, textAlign: "left" }}>{d.unit}</span>
+                    </div>
+                  </td>
+                  <td className="num">{_fmtBRLp(d.est_unit_cost)}</td>
+                  <td className="num">{_fmtBRLp(lineCost)}</td>
+                  <td className="num">
+                    <button
+                      className="btn" data-size="sm" data-variant="ghost"
+                      onClick={() => toggleRemoved(d.id)}
+                      title={isRemoved ? "Desfazer remoção" : "Remover item"}
+                      style={isRemoved ? { color: "var(--warn)" } : { color: "var(--crit)" }}
+                    >
+                      {isRemoved ? "↺" : <I.Trash size={11} />}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Modal>
   );
 }
 

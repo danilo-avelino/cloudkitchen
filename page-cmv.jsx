@@ -1,7 +1,10 @@
 // CMV & margem — real-only.
 // CMV = Σ(saídas de estoque kind=out × custo unitário, ignorando insumos com compose_cmv=false)
+//     + Σ(ajustes de inventário no período × custo unitário, sinal -delta) → custo compartilhado
 //     ÷ Σ(faturamento de revenue_entries no período)
 // Agrupado por (data, operação) para alimentar heatmap e tabela por operação.
+// Ajustes de inventário não têm operação, então entram só nos totais/byOp (rateio por
+// faturamento), nunca no heatmap diário — daily detail = consumo puro.
 //
 // Faixas de cor (absoluto):
 //   < 30%  → Azul céu (ótimo)
@@ -159,39 +162,62 @@ function CMV({ setPage }) {
     [revenueEntries, movements],
   );
 
-  // Totais consolidados do período
+  // Custo líquido dos ajustes de inventário no período (perdas − sobras).
+  // delta<0 (falta) aumenta CMV; delta>0 (sobra) reduz CMV. Respeita compose_cmv.
+  const adjustNetCost = useMemo(() => {
+    let net = 0;
+    for (const mv of movements) {
+      if (mv.kind !== "adjust") continue;
+      if (mv.composeCmv === false) continue;
+      net += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+    }
+    return net;
+  }, [movements]);
+
+  // Totais consolidados do período (consumo + ajustes como custo compartilhado)
   const totals = useMemo(() => {
-    const rev  = daily.reduce((s, r) => s + r.revenue, 0);
-    const cogs = daily.reduce((s, r) => s + r.cogs, 0);
+    const rev         = daily.reduce((s, r) => s + r.revenue, 0);
+    const cogsConsumo = daily.reduce((s, r) => s + r.cogs, 0);
+    const cogs        = cogsConsumo + adjustNetCost;
     return {
       revenue: rev,
       cogs,
+      cogsConsumo,
+      cogsAdjust: adjustNetCost,
       cmv:    rev > 0 ? (cogs / rev) * 100 : 0,
       margin: rev > 0 ? ((rev - cogs) / rev) * 100 : 0,
       days:   new Set(daily.map((r) => r.date)).size,
       opsCount: new Set(daily.map((r) => r.op)).size,
     };
-  }, [daily]);
+  }, [daily, adjustNetCost]);
 
   const excluded = useMemo(() => {
     const { fromDate, toDate } = getDateRange(period);
     return excludedImpact(movements, fromDate, toDate);
   }, [movements, period]);
 
-  // Por operação
+  // Por operação — ajustes rateados proporcionalmente ao faturamento (custo compartilhado)
   const byOp = useMemo(() => {
     const m = {};
     daily.forEach((r) => {
-      if (!m[r.op]) m[r.op] = { op: r.op, revenue: 0, cogs: 0 };
+      if (!m[r.op]) m[r.op] = { op: r.op, revenue: 0, cogs: 0, cogsAdjust: 0 };
       m[r.op].revenue += r.revenue;
       m[r.op].cogs    += r.cogs;
     });
+    const totalRev = Object.values(m).reduce((s, r) => s + r.revenue, 0);
+    if (totalRev > 0 && adjustNetCost !== 0) {
+      for (const r of Object.values(m)) {
+        const share = adjustNetCost * (r.revenue / totalRev);
+        r.cogs       += share;
+        r.cogsAdjust += share;
+      }
+    }
     return Object.values(m).map((o) => ({
       ...o,
       cmv:    o.revenue > 0 ? (o.cogs / o.revenue) * 100 : 0,
       margin: o.revenue > 0 ? ((o.revenue - o.cogs) / o.revenue) * 100 : 0,
     })).sort((a, b) => b.cmv - a.cmv);
-  }, [daily]);
+  }, [daily, adjustNetCost]);
 
   // Heatmap · sempre últimos 7 dias, operações derivadas dos dados
   const heat = useMemo(() => {

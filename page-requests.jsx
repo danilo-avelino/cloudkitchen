@@ -672,10 +672,12 @@ function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint }) {
 }
 
 // ===== Cupom térmico para impressão (visível apenas em @media print) =====
+// Renderizado via portal direto no <body> para escapar de containers posicionados
+// do AppShell (que estavam empurrando o cupom para fora da área imprimível na ELGIN).
 function PrintTicket({ request }) {
   const op = MOCK.opById(request.op);
 
-  return (
+  const content = (
     <div className="print-area">
       <div className="rule-double" />
       <div className="center bold">COZINHA CENTRAL SP</div>
@@ -739,6 +741,8 @@ function PrintTicket({ request }) {
       <div className="rule-double" />
     </div>
   );
+
+  return ReactDOM.createPortal(content, document.body);
 }
 
 // ===== Modal de edição da requisição (somente em status pendente) =====
@@ -813,11 +817,13 @@ function EditRequestModal({ request, onCancel, onSubmit, stockItems = MOCK.STOCK
 function buildSubmitLine(ln, stockItems = MOCK.STOCK_ITEMS) {
   const item = stockItems.find((s) => s.id === ln.stock_item_id);
   const qtyN = parseFloat(String(ln.qty).replace(",", ".")) || 0;
-  const cost = (item?.cost || 0) * qtyN;
+  const unitCost = item?.cost || 0;
+  const lineCost = unitCost * qtyN;
   return {
     name: item?.name || ln.legacyName || "",
     qty:  item ? `${qtyN} ${item.unit}` : String(qtyN),
-    estCost: cost.toFixed(2),
+    unitCost,                       // custo unitário · enviado pro DB
+    estCost: lineCost.toFixed(2),   // custo da linha · uso local/UI
     stock_item_id: item?.id || null,
   };
 }

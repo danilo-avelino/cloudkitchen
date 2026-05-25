@@ -794,15 +794,24 @@ async function dbInsertKitchenRequest(tenantId, draft) {
   if (error) return { data: null, error };
 
   // Insere items
-  const itemRows = items.map((it, i) => ({
-    kitchen_request_id: row.id,
-    stock_item_id:      it.stock_item_id || null,
-    display_name:       it.name || it[0],
-    qty:                Number(it.qty || it[1]?.match(/[\d.,]+/)?.[0]?.replace(",", ".")) || 1,
-    unit:               it.unit || (it[1]?.match(/\D+$/)?.[0]?.trim() || "un"),
-    unit_cost:          Number(it.unitCost || it.estCost) || 0,
-    sort_order:         i,
-  }));
+  // IMPORTANTE: unit_cost é o custo UNITÁRIO do insumo. line_cost é coluna gerada
+  // (qty * unit_cost) no schema, então passar o custo da linha aqui dobra o cálculo.
+  const itemRows = items.map((it, i) => {
+    const qtyN = Number(it.qty || it[1]?.match(/[\d.,]+/)?.[0]?.replace(",", ".")) || 1;
+    // Se vier só estCost (custo da linha), divide por qty pra obter o unitário.
+    const unitCost = Number(it.unitCost) > 0
+      ? Number(it.unitCost)
+      : (qtyN > 0 ? (Number(it.estCost) || 0) / qtyN : 0);
+    return {
+      kitchen_request_id: row.id,
+      stock_item_id:      it.stock_item_id || null,
+      display_name:       it.name || it[0],
+      qty:                qtyN,
+      unit:               it.unit || (it[1]?.match(/\D+$/)?.[0]?.trim() || "un"),
+      unit_cost:          unitCost,
+      sort_order:         i,
+    };
+  });
   if (itemRows.length > 0) {
     const { error: iErr } = await _client.from("kitchen_request_items").insert(itemRows);
     if (iErr) return { data: row, error: iErr };
@@ -948,6 +957,23 @@ async function dbInsertPurchaseOrder(tenantId, draft) {
 async function dbDeletePurchaseOrder(id) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
   const { error } = await _client.from("purchase_orders").delete().eq("id", id);
+  return { error };
+}
+
+async function dbUpdatePurchaseOrderItem(itemId, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const update = {};
+  if (patch.qty       !== undefined) update.qty = Number(patch.qty) || 0;
+  if (patch.unit      !== undefined) update.unit = patch.unit;
+  if (patch.unit_cost !== undefined) update.unit_cost = Number(patch.unit_cost) || 0;
+  if (patch.name      !== undefined) update.display_name = patch.name;
+  const { data, error } = await _client.from("purchase_order_items").update(update).eq("id", itemId).select().single();
+  return { data, error };
+}
+
+async function dbDeletePurchaseOrderItem(itemId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("purchase_order_items").delete().eq("id", itemId);
   return { error };
 }
 
@@ -2202,6 +2228,7 @@ Object.assign(window, {
   dbListRevenueEntries, dbInsertRevenueEntry, dbUpdateRevenueEntry, dbDeleteRevenueEntry,
   dbListKitchenRequests, dbInsertKitchenRequest, dbUpdateKitchenRequestStatus, dbDeleteKitchenRequest,
   dbListPurchaseOrders, dbInsertPurchaseOrder, dbDeletePurchaseOrder,
+  dbUpdatePurchaseOrderItem, dbDeletePurchaseOrderItem,
   dbListGoodsReceipts, dbInsertGoodsReceipt,
   dbListTechSheets, dbInsertTechSheet, dbUpdateTechSheet, dbDeleteTechSheet,
   dbListPreparations, dbInsertPreparation, dbUpdatePreparation, dbDeletePreparation, dbRecomputeAllCosts,

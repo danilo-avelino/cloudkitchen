@@ -150,7 +150,12 @@ function Dashboard({ scope, setPage }) {
     for (const mv of (dbData.cmvMovements || [])) {
       const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
       if (mv.kind === "in")  entradas += value;
-      if (mv.kind === "out") saidas   += value;
+      else if (mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration") saidas += value;
+      else if (mv.kind === "adjust") {
+        // adjust preserva sinal: sobra (delta>0) entra como entrada, falta (delta<0) como saída
+        if ((mv.delta || 0) > 0) entradas += value;
+        else if ((mv.delta || 0) < 0) saidas += value;
+      }
     }
     return { entradas, saidas };
   }, [dbData.cmvMovements]);
@@ -393,27 +398,48 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
   // CMV real por operação no MTD = COGS (saídas de estoque × custo) ÷ faturamento.
   // Faturamento vem de cmv_daily; COGS é recalculado aqui a partir de stock_movements
   // (kind=out) porque revenue_entries.cogs é hoje apenas um placeholder.
+  // Ajustes de inventário (kind=adjust) entram como CUSTO COMPARTILHADO, rateados
+  // proporcionalmente ao faturamento (eles não têm operação atribuída).
   const data = useMemo(() => {
     const m = {};
     for (const row of cmvDaily) {
       if (!row.op) continue;
-      if (!m[row.op]) m[row.op] = { op: row.op, revenue: 0, cogs: 0 };
+      if (!m[row.op]) m[row.op] = { op: row.op, revenue: 0, cogs: 0, sharedCogs: 0 };
       m[row.op].revenue += row.revenue || 0;
     }
     for (const mv of movements) {
       if (mv.kind !== "out") continue;
       const key = mv.op;
       if (!key || key === "—") continue;
-      if (!m[key]) m[key] = { op: key, revenue: 0, cogs: 0 };
+      if (!m[key]) m[key] = { op: key, revenue: 0, cogs: 0, sharedCogs: 0 };
       // delta vem positivo no mapping; custo da saída = |qty| × unit_cost
       m[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+    }
+    // Ajustes: custo líquido (perdas − sobras) rateado por faturamento
+    let adjustNetCost = 0;
+    for (const mv of movements) {
+      if (mv.kind !== "adjust") continue;
+      if (mv.composeCmv === false) continue;
+      adjustNetCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+    }
+    const totalRev = Object.values(m).reduce((s, r) => s + r.revenue, 0);
+    if (totalRev > 0 && adjustNetCost !== 0) {
+      for (const r of Object.values(m)) {
+        const share = adjustNetCost * (r.revenue / totalRev);
+        r.cogs       += share;
+        r.sharedCogs += share;
+      }
     }
     return Object.values(m)
       .filter((r) => r.revenue > 0)
       .map((r) => {
         const opMeta = MOCK.opById(r.op);
         const real = r.revenue > 0 ? (r.cogs / r.revenue) * 100 : 0;
-        return { op: r.op, real, goal: opMeta?.cmvGoal ?? 30, shared: 0 };
+        // shared em pp · clampa em [0, real] p/ não estourar a barra quando sobra > perda
+        const sharedPP = r.revenue > 0
+          ? Math.max(0, Math.min(real, (Math.max(0, r.sharedCogs) / r.revenue) * 100))
+          : 0;
+        return { op: r.op, real, goal: opMeta?.cmvGoal ?? 30, shared: sharedPP };
       })
       .sort((a, b) => a.real - b.real);
   }, [cmvDaily, movements]);
@@ -454,8 +480,8 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
                 <span style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>{op.name}</span>
               </div>
               <div style={{ position: "relative", height: 8, background: "var(--bg-3)", borderRadius: 4, overflow: "hidden" }}
-                   title={`CMV ${row.real.toFixed(1)}% · ${row.shared.toFixed(1)}pp de itens compartilhados`}>
-                {/* Itens compartilhados · slate suave com listras diagonais */}
+                   title={`CMV ${row.real.toFixed(1)}% · ${row.shared.toFixed(1)}pp compartilhado (ajustes de inventário)`}>
+                {/* Custo compartilhado (ajustes rateados) · slate suave com listras diagonais */}
                 <div style={{
                   position: "absolute", left: 0, top: 0, height: "100%",
                   width: `${(row.shared / max) * 100}%`,
@@ -497,6 +523,8 @@ function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
     // Margem de contribuição (R$) = faturamento − custo real das saídas de estoque.
     // revenue_entries.cogs é placeholder (zero); o COGS real vem de stock_movements
     // (kind=out) ponderado pelo unit_cost — mesmo cálculo do CmvByOpCard.
+    // Ajustes de inventário (kind=adjust) entram como custo compartilhado, rateados
+    // proporcionalmente ao faturamento (eles não têm operação atribuída).
     const byOp = {};
     for (const row of cmvDaily) {
       if (!row.op) continue;
@@ -509,6 +537,19 @@ function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
       if (!key || key === "—") continue;
       if (!byOp[key]) byOp[key] = { op: key, revenue: 0, cogs: 0 };
       byOp[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+    }
+    // Ajustes: custo líquido (perdas − sobras) rateado por faturamento
+    let adjustNetCost = 0;
+    for (const mv of movements) {
+      if (mv.kind !== "adjust") continue;
+      if (mv.composeCmv === false) continue;
+      adjustNetCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+    }
+    const totalRev = Object.values(byOp).reduce((s, r) => s + r.revenue, 0);
+    if (totalRev > 0 && adjustNetCost !== 0) {
+      for (const r of Object.values(byOp)) {
+        r.cogs += adjustNetCost * (r.revenue / totalRev);
+      }
     }
     return Object.values(byOp)
       .filter((r) => r.revenue > 0 || r.cogs > 0)

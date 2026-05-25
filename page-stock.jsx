@@ -451,7 +451,12 @@ function Stock({ scope }) {
     for (const mv of (movements || [])) {
       const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
       if (mv.kind === "in")  entradas += value;
-      if (mv.kind === "out") saidas   += value;
+      else if (mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration") saidas += value;
+      else if (mv.kind === "adjust") {
+        // adjust preserva sinal: sobra (delta>0) entra como entrada, falta (delta<0) como saída
+        if ((mv.delta || 0) > 0) entradas += value;
+        else if ((mv.delta || 0) < 0) saidas += value;
+      }
     }
     return { entradas, saidas };
   }, [movements]);
@@ -2247,11 +2252,25 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
     }
   }, [current?.id, tenantId]);
 
-  // Sugestão automática de mínimo baseada em consumo 7d
+  // Sugestão automática · mesma fórmula do trigger compute_auto_min_max no banco:
+  //   min = ceil(daily * 7)   — 7 dias de consumo
+  //   max = ceil(min * 1.3)   — min + 30% de margem
   const suggestedMin = consumption7d?.hasData
-    ? Math.ceil(consumption7d.daily * 3) // 3 dias de buffer
+    ? Math.ceil(consumption7d.daily * 7)
     : null;
-  const suggestedMax = suggestedMin != null ? suggestedMin * 2 : null;
+  const suggestedMax = suggestedMin != null ? Math.ceil(suggestedMin * 1.3) : null;
+
+  // Compara sugestão vs. valores atuais do draft · alerta quando algum dos dois ficou abaixo
+  const minMaxAlert = useMemo(() => {
+    if (suggestedMin == null) return null;
+    const currentMin = Number(draft.reorder) || 0;
+    const currentMax = Number(draft.max) || 0;
+    const minBelow = currentMin > 0 ? suggestedMin > currentMin : true;
+    const maxBelow = currentMax > 0 ? suggestedMax > currentMax : true;
+    if (!minBelow && !maxBelow) return null;
+    const scope = minBelow && maxBelow ? "both" : minBelow ? "min" : "max";
+    return { scope, minBelow, maxBelow, suggestedMin, suggestedMax };
+  }, [suggestedMin, suggestedMax, draft.reorder, draft.max]);
 
   const applySuggested = () => {
     setDraft((d) => ({
@@ -2408,6 +2427,35 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
                     </button>
                   </div>
                 )}
+                {minMaxAlert && (
+                  <div style={{
+                    marginTop: 8, padding: "10px 12px",
+                    background: "var(--ok-soft)", border: "1px solid var(--ok-line)",
+                    borderRadius: 4, color: "var(--fg-1)", fontSize: 11,
+                    display: "flex", flexDirection: "column", gap: 6,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span className="badge" data-tone="ok">AJUSTE SUGERIDO</span>
+                      <strong style={{ color: "var(--fg-0)" }}>
+                        {minMaxAlert.scope === "both" && "Mínimo e máximo abaixo do consumo"}
+                        {minMaxAlert.scope === "min"  && "Mínimo abaixo do consumo"}
+                        {minMaxAlert.scope === "max"  && "Máximo abaixo do consumo"}
+                      </strong>
+                    </div>
+                    <div>
+                      {minMaxAlert.scope === "both" && (
+                        <>O consumo calculado (<strong className="mono">{suggestedMin} {current.unit}</strong> / <strong className="mono">{suggestedMax} {current.unit}</strong>) é maior que o mínimo e o máximo configurados.</>
+                      )}
+                      {minMaxAlert.scope === "min" && (
+                        <>O mínimo sugerido (<strong className="mono">{suggestedMin} {current.unit}</strong>) é maior que o configurado.</>
+                      )}
+                      {minMaxAlert.scope === "max" && (
+                        <>O máximo sugerido (<strong className="mono">{suggestedMax} {current.unit}</strong>) é maior que o configurado.</>
+                      )}
+                      {" "}Ative o <strong>cálculo automático</strong> abaixo para o sistema reajustar sozinho a cada movimentação.
+                    </div>
+                  </div>
+                )}
               </div>
             ) : consumption7d ? (
               <div style={{ color: "var(--fg-3)" }}>
@@ -2416,11 +2464,13 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
             ) : null}
           </div>
 
-          {/* Toggle auto-min por item */}
+          {/* Toggle auto-min por item · realça com anel verde quando há alerta de min/max */}
           <label style={{
             display: "flex", alignItems: "center", gap: 10,
-            padding: "10px 12px", background: itemAutoMin ? "var(--ok-soft)" : "var(--bg-2)",
-            border: `1px solid ${itemAutoMin ? "var(--ok-line)" : "var(--line)"}`,
+            padding: "10px 12px",
+            background: itemAutoMin ? "var(--ok-soft)" : (minMaxAlert ? "var(--ok-soft)" : "var(--bg-2)"),
+            border: `1px solid ${itemAutoMin || minMaxAlert ? "var(--ok-line)" : "var(--line)"}`,
+            boxShadow: minMaxAlert && !itemAutoMin ? "0 0 0 2px var(--ok-line)" : null,
             borderRadius: 6, cursor: consumption7d?.hasData ? "pointer" : "not-allowed",
             opacity: consumption7d?.hasData ? 1 : 0.5,
           }}>
@@ -2461,11 +2511,13 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-            <FormRow label={`Mínimo (${draft.unit}) ${missing.reorder ? "·  faltando" : ""}`}>
-              <input className="input mono" inputMode="decimal" value={draft.reorder || ""} onChange={(e) => setDraft({ ...draft, reorder: e.target.value })} placeholder="0" />
+            <FormRow label={`Mínimo (${draft.unit}) ${missing.reorder ? "·  faltando" : minMaxAlert?.minBelow ? "·  abaixo do consumo" : ""}`}>
+              <input className="input mono" inputMode="decimal" value={draft.reorder || ""} onChange={(e) => setDraft({ ...draft, reorder: e.target.value })} placeholder="0"
+                     style={minMaxAlert?.minBelow ? { borderColor: "var(--ok)" } : null} />
             </FormRow>
-            <FormRow label={`Máximo (${draft.unit}) ${missing.max ? "·  faltando" : ""}`}>
-              <input className="input mono" inputMode="decimal" value={draft.max || ""} onChange={(e) => setDraft({ ...draft, max: e.target.value })} placeholder="0" />
+            <FormRow label={`Máximo (${draft.unit}) ${missing.max ? "·  faltando" : minMaxAlert?.maxBelow ? "·  abaixo do consumo" : ""}`}>
+              <input className="input mono" inputMode="decimal" value={draft.max || ""} onChange={(e) => setDraft({ ...draft, max: e.target.value })} placeholder="0"
+                     style={minMaxAlert?.maxBelow ? { borderColor: "var(--ok)" } : null} />
             </FormRow>
             <FormRow label="Custo unit. (R$)">
               <input className="input mono" inputMode="decimal" value={draft.cost || ""} onChange={(e) => setDraft({ ...draft, cost: e.target.value })} placeholder="0,00" />

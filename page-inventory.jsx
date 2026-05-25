@@ -1044,8 +1044,10 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
       if (v === "" || v == null) {
         delete next[id];
       } else {
-        const n = parseFloat(String(v).replace(",", "."));
-        next[id] = Number.isFinite(n) ? n : v;
+        // Mantém a string crua durante a digitação para permitir entradas
+        // progressivas como "0", "0,", "0,6", "0,684" sem perder a vírgula.
+        // A conversão para número acontece só no buildItemsForSubmit.
+        next[id] = String(v);
       }
       return next;
     });
@@ -1314,7 +1316,12 @@ function CountingStep({ scopedItems, counts, setCount, filledCount }) {
       const k = it.cat || "Sem categoria";
       if (!map[k]) map[k] = { name: k, total: 0, filled: 0 };
       map[k].total += 1;
-      if (counts[it.id] != null && counts[it.id] !== "") map[k].filled += 1;
+      // Bug-fix: o item no escopo expõe `stock_item_id` (não `id`).
+      const raw = counts[it.stock_item_id];
+      if (raw != null && raw !== "") {
+        const n = typeof raw === "number" ? raw : parseFloat(String(raw).replace(",", "."));
+        if (Number.isFinite(n)) map[k].filled += 1;
+      }
     });
     return Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
   }, [scopedItems, counts]);
@@ -1322,10 +1329,19 @@ function CountingStep({ scopedItems, counts, setCount, filledCount }) {
   const [focusedCat, setFocusedCat] = useState(null);
 
   if (focusedCat) {
-    const visibleItems = scopedItems.filter((it) => (it.cat || "Sem categoria") === focusedCat);
-    const catInfo = cats.find((c) => c.name === focusedCat);
+    const idx = cats.findIndex((c) => c.name === focusedCat);
+    const catInfo = cats[idx];
     const catFilled = catInfo?.filled || 0;
     const catTotal = catInfo?.total || 0;
+    const prevCat = idx > 0 ? cats[idx - 1] : null;
+    const nextCat = idx >= 0 && idx < cats.length - 1 ? cats[idx + 1] : null;
+    const visibleItems = scopedItems.filter((it) => (it.cat || "Sem categoria") === focusedCat);
+
+    // Troca de categoria. O state `counts` é compartilhado entre categorias,
+    // então o que já foi contado permanece (use "Salvar parcial" no rodapé
+    // para persistir no banco antes de fechar o modal).
+    const goTo = (catName) => setFocusedCat(catName);
+
     return (
       <div>
         <div style={{
@@ -1334,11 +1350,17 @@ function CountingStep({ scopedItems, counts, setCount, filledCount }) {
           border: "1px solid var(--line)", borderRadius: 4,
           marginBottom: 12,
         }}>
-          <button className="btn" data-size="sm" data-variant="ghost" onClick={() => setFocusedCat(null)}>
-            ← Voltar
+          <button className="btn" data-size="sm" data-variant="ghost"
+                  onClick={() => goTo(null)}>
+            ← Categorias
           </button>
-          <div style={{ fontSize: 13, color: "var(--fg-0)", flex: 1, fontWeight: 500 }}>
-            {focusedCat}
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500 }}>
+              {focusedCat}
+            </div>
+            <div className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em", marginTop: 2 }}>
+              CATEGORIA {idx + 1} DE {cats.length}
+            </div>
           </div>
           <span className="mono" style={{
             fontSize: 11.5,
@@ -1348,12 +1370,42 @@ function CountingStep({ scopedItems, counts, setCount, filledCount }) {
             {catFilled} / {catTotal} contados
           </span>
         </div>
+
         <CountingTable
           items={visibleItems}
           counts={counts}
           onSetCount={setCount}
           mode="blind"
         />
+
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          gap: 8, marginTop: 12, paddingTop: 12,
+          borderTop: "1px solid var(--line)",
+        }}>
+          <button className="btn" data-size="sm"
+                  onClick={() => goTo(prevCat?.name || null)}
+                  disabled={!prevCat}
+                  title={prevCat ? `Anterior: ${prevCat.name}` : "Esta é a primeira categoria"}>
+            <I.Chevron size={11} style={{ transform: "rotate(90deg)" }} />
+            {prevCat ? `Anterior · ${prevCat.name}` : "Anterior"}
+          </button>
+
+          {nextCat ? (
+            <button className="btn" data-variant="primary" data-size="sm"
+                    onClick={() => goTo(nextCat.name)}
+                    title={`Abre próxima categoria: ${nextCat.name}`}>
+              Próxima · {nextCat.name}
+              <I.ChevronR size={11} />
+            </button>
+          ) : (
+            <button className="btn" data-variant="primary" data-size="sm"
+                    onClick={() => goTo(null)}>
+              Concluir esta categoria
+              <I.Check size={11} />
+            </button>
+          )}
+        </div>
       </div>
     );
   }

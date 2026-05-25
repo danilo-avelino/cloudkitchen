@@ -435,8 +435,11 @@ input, select, textarea { font-family: inherit; }
 }
 
 @media print {
+  /* Sem `size`/margins forçados no @page: o navegador usa o papel e as margens
+     escolhidos pelo usuário no diálogo de impressão do Windows (Mais definições
+     → Tamanho do papel / Margens). Impressoras térmicas vêm com paper=80mm e
+     margem 0; impressoras a4 aplicam suas margens físicas mínimas. */
   @page {
-    size: 80mm auto;
     margin: 0;
   }
   html, body {
@@ -447,13 +450,21 @@ input, select, textarea { font-family: inherit; }
   }
   body * { visibility: hidden !important; }
   .print-area, .print-area * { visibility: visible !important; }
+  /* Largura fixa em 80mm (coluna térmica padrão), ancorada no canto superior
+     esquerdo da área útil da impressora. Isso garante que NÃO caia na faixa
+     não-imprimível à esquerda da bobina ELGIN/Bematech.
+     - Térmica 80mm: preenche toda a largura útil da bobina.
+     - A4 / Carta:   cupom no topo-esquerdo da folha (margens do diálogo do
+                     Windows respeitadas porque @page margin = 0). */
   .print-area {
     display: block !important;
     position: absolute !important;
-    left: 0 !important;
     top: 0 !important;
+    left: 0 !important;
     width: 80mm !important;
-    padding: 4mm !important;
+    margin: 0 !important;
+    padding: 3mm 4mm !important;
+    box-sizing: border-box !important;
     background: white !important;
     color: black !important;
     font-family: "Courier New", Courier, monospace !important;
