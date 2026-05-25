@@ -666,7 +666,6 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   const hasDuplicate = duplicates.length > 0;
 
   const submit = async () => {
-    console.log("[revenue] submit clicked · valid =", valid, { op, date, ordersNum, total, methodVals, shiftId });
     if (!valid) {
       const reasons = [];
       if (!op) reasons.push("operação");

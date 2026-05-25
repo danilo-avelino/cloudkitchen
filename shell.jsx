@@ -183,7 +183,7 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   );
 }
 
-function Topbar({ page, scope, theme, setTheme, onCmd, user, onLogout }) {
+function Topbar({ page, scope, theme, setTheme, user, onLogout }) {
   const op = MOCK.opById(scope);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
@@ -219,23 +219,9 @@ function Topbar({ page, scope, theme, setTheme, onCmd, user, onLogout }) {
         <span style={tb.crumb}>{titleMap[page]}</span>
       </div>
       <div style={tb.spacer} />
-      <button style={tb.search} onClick={onCmd}>
-        <I.Search size={13} style={{ color: "var(--fg-3)" }} />
-        <span style={{ color: "var(--fg-3)" }}>Buscar insumo, ficha, operação…</span>
-        <span style={tb.kbd}>⌘K</span>
-      </button>
       <button style={tb.iconBtn} onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Alternar tema">
         {theme === "dark" ? <I.Sun size={15} /> : <I.Moon size={15} />}
       </button>
-      <button
-        style={tb.iconBtn}
-        title="Notificações"
-        onClick={() => window.showToast("Você tem 3 alertas críticos · veja em Estoque", { tone: "warn", meta: "agora" })}
-      >
-        <I.Bell size={15} />
-        <span style={tb.notifDot} />
-      </button>
-
       {/* Indicador de status do DB · clique pra ver detalhes */}
       <DbStatusButton />
 
@@ -377,10 +363,7 @@ const tb = {
   crumb: { color: "var(--fg-0)", fontWeight: 500, letterSpacing: "-0.005em" },
   crumbDim: { color: "var(--fg-3)" },
   spacer: { flex: 1 },
-  search: { display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", width: 320, background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4, fontSize: 12, fontFamily: "var(--sans)", textAlign: "left" },
-  kbd: { marginLeft: "auto", fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", padding: "1px 5px", background: "var(--bg-3)", borderRadius: 2 },
   iconBtn: { width: 32, height: 32, borderRadius: 4, background: "transparent", border: "1px solid var(--line)", color: "var(--fg-1)", display: "grid", placeItems: "center", position: "relative" },
-  notifDot: { position: "absolute", top: 7, right: 7, width: 6, height: 6, borderRadius: 50, background: "var(--accent-bright)", border: "1.5px solid var(--bg-1)" },
 };
 
 const statusBar = {

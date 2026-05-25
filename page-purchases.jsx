@@ -127,13 +127,14 @@ function Purchases() {
         bySupplier[sup].push(it);
       });
       const code = `LCO-${Date.now().toString(36).slice(-6).toUpperCase()}`;
+      const defaultTitle = `Lista de compras · ${_isoDateBR(new Date().toISOString())}`;
       let firstCreated = null;
       for (const [supplierName, supplierItems] of Object.entries(bySupplier)) {
         const { data, error } = await dbInsertPurchaseOrder(tenantId, {
           code: `${code}-${supplierName.slice(0, 6).toUpperCase().replace(/[^A-Z]/g, "")}`,
           supplier: supplierName,
           status: "draft",
-          title: title || notes || "Lista gerada do estoque",
+          title: title || notes || defaultTitle,
           items: supplierItems,
         });
         if (error) {
@@ -168,7 +169,7 @@ function Purchases() {
     }));
     const newList = {
       id,
-      title:    title || `Auto · ${_isoDateBR(new Date().toISOString()).slice(0, 5)}`,
+      title:    title || `Lista de compras · ${_isoDateBR(new Date().toISOString())}`,
       created_at: new Date().toISOString(),
       created_by: "Rafa Medeiros",
       status:   "open",
@@ -204,16 +205,15 @@ function Purchases() {
     setSupplierPickerOpen(true);
   };
 
-  // Gera de fato a lista filtrando pelos fornecedores selecionados
-  // Itens sem fornecedor são SEMPRE incluídos (sob "Sem fornecedor cadastrado")
-  const handleGenerateForSuppliers = (selectedSuppliers) => {
-    const NO_SUPPLIER = "Sem fornecedor cadastrado";
-    const sels = new Set([...selectedSuppliers, NO_SUPPLIER]);
+  // Gera de fato a lista filtrando pelos stock_item_ids selecionados no modal
+  // Itens sem fornecedor são SEMPRE incluídos (forçados no modal)
+  const handleGenerateForItems = (selectedItemIds) => {
+    const ids = new Set(selectedItemIds);
     const candidates = stockItems
       .filter((it) => it.qty < it.reorder)
-      .filter((it) => sels.has(it.supplier || NO_SUPPLIER));
+      .filter((it) => ids.has(it.id));
     if (candidates.length === 0) {
-      window.showToast("Nenhum item dos fornecedores selecionados", { tone: "warn" });
+      window.showToast("Nenhum item selecionado", { tone: "warn" });
       return;
     }
     const items = candidates.map((it) => {
@@ -229,11 +229,12 @@ function Purchases() {
         est_cost: Number((qty * it.cost).toFixed(2)),
       };
     });
+    const supCount = new Set(candidates.map((it) => it.supplier || "Sem fornecedor cadastrado")).size;
     const newList = persistList({ items });
     if (newList) {
       setSelectedListId(newList.id);
       setSupplierPickerOpen(false);
-      window.showToast(`Lista ${newList.id} gerada · ${items.length} itens · ${selectedSuppliers.length} fornecedor(es)`, { tone: "ok" });
+      window.showToast(`Lista ${newList.id} gerada · ${items.length} itens · ${supCount} fornecedor(es)`, { tone: "ok" });
     }
   };
 
@@ -500,7 +501,7 @@ function Purchases() {
         <SupplierPickerModal
           stockItems={stockItems}
           onCancel={() => setSupplierPickerOpen(false)}
-          onConfirm={handleGenerateForSuppliers}
+          onConfirm={handleGenerateForItems}
         />
       )}
     </div>
@@ -1766,68 +1767,113 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
     return () => { cancelled = true; };
   }, [dbStatus.isOnline]);
 
-  // Agrupa candidatos (qty < reorder) por fornecedor; "Sem fornecedor cadastrado" fica em destaque
+  const NO_SUPPLIER = "Sem fornecedor cadastrado";
+
+  // Candidatos (qty < reorder) já com buyQty + estCost calculados
+  const candidates = useMemo(() => {
+    return (stockItems || []).filter((it) => it.qty < it.reorder).map((it) => {
+      const target = it.max && it.max > it.reorder ? it.max : it.reorder * 2;
+      const buyQty = Math.max(0, Number((target - it.qty).toFixed(2)));
+      const estCost = Number((buyQty * (it.cost || 0)).toFixed(2));
+      return { ...it, _buyQty: buyQty, _estCost: estCost };
+    });
+  }, [stockItems]);
+
+  // Agrupa por fornecedor; "Sem fornecedor cadastrado" fica em destaque
   const groups = useMemo(() => {
-    const candidates = (stockItems || []).filter((it) => it.qty < it.reorder);
     const map = {};
     for (const it of candidates) {
-      const s = it.supplier || "Sem fornecedor cadastrado";
+      const s = it.supplier || NO_SUPPLIER;
       if (!map[s]) map[s] = { supplier: s, items: [], totalEstCost: 0, noSupplier: !it.supplier };
-      const target = it.max && it.max > it.reorder ? it.max : it.reorder * 2;
-      const qty = Math.max(0, Number((target - it.qty).toFixed(2)));
       map[s].items.push(it);
-      map[s].totalEstCost += qty * (it.cost || 0);
+      map[s].totalEstCost += it._estCost;
     }
     return Object.values(map).sort((a, b) => {
-      // "Sem fornecedor cadastrado" sempre no topo para chamar atenção
       if (a.noSupplier && !b.noSupplier) return -1;
       if (b.noSupplier && !a.noSupplier) return 1;
       return b.items.length - a.items.length;
     });
-  }, [stockItems]);
+  }, [candidates]);
 
-  const allSuppliers = groups.map((g) => g.supplier);
-  // "Sem fornecedor cadastrado" sempre incluído (não desmarcável)
-  const NO_SUPPLIER = "Sem fornecedor cadastrado";
-  const [selected, setSelected] = useState(new Set(allSuppliers));
+  // Seleção por item (stock_item_id) — começa com todos marcados
+  const [selectedIds, setSelectedIds] = useState(
+    () => new Set((initialStockItems || []).filter((it) => it.qty < it.reorder).map((it) => it.id))
+  );
+
+  // Quando o conjunto de candidatos muda (refresh do DB), re-marca tudo por padrão
+  const candidateIdsKey = candidates.map((it) => it.id).join(",");
+  useEffect(() => {
+    setSelectedIds(new Set(candidates.map((it) => it.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidateIdsKey]);
+
+  // Fornecedores expandidos (set de nomes)
+  const [expanded, setExpanded] = useState(new Set());
+  const toggleExpand = (s) => setExpanded((prev) => {
+    const next = new Set(prev);
+    if (next.has(s)) next.delete(s); else next.add(s);
+    return next;
+  });
+
   const [search, setSearch] = useState("");
-
   const visible = groups.filter((g) => g.supplier.toLowerCase().includes(search.toLowerCase()));
-  const allVisibleSelected = visible.length > 0 && visible.every((g) => selected.has(g.supplier));
 
-  const toggle = (s) => {
-    if (s === NO_SUPPLIER) return; // bloqueado · sempre incluído
-    setSelected((prev) => {
+  // Estado tri-state do fornecedor: "all" | "some" | "none"
+  const supplierState = (g) => {
+    const sel = g.items.filter((it) => selectedIds.has(it.id)).length;
+    if (sel === 0) return "none";
+    if (sel === g.items.length) return "all";
+    return "some";
+  };
+
+  const toggleItem = (itemId, locked) => {
+    if (locked) return;
+    setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(s)) next.delete(s); else next.add(s);
+      if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
       return next;
     });
   };
 
-  const selectAll = () => setSelected(new Set(allSuppliers));
+  const toggleSupplier = (g) => {
+    if (g.noSupplier) return;
+    const state = supplierState(g);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (state === "all") g.items.forEach((it) => next.delete(it.id));
+      else g.items.forEach((it) => next.add(it.id));
+      return next;
+    });
+  };
+
+  const selectAll = () => setSelectedIds(new Set(candidates.map((it) => it.id)));
   const selectNone = () => {
-    // mantém o "Sem fornecedor cadastrado" marcado sempre
-    setSelected(new Set(allSuppliers.filter((s) => s === NO_SUPPLIER)));
+    // mantém os itens do "Sem fornecedor cadastrado" marcados sempre
+    setSelectedIds(new Set(candidates.filter((it) => !it.supplier).map((it) => it.id)));
   };
+
+  const allVisibleAllSelected = visible.length > 0 && visible.every((g) => supplierState(g) === "all");
   const toggleAllVisible = () => {
-    setSelected((prev) => {
+    setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (allVisibleSelected) visible.forEach((g) => next.delete(g.supplier));
-      else visible.forEach((g) => next.add(g.supplier));
+      visible.forEach((g) => {
+        if (g.noSupplier) return;
+        if (allVisibleAllSelected) g.items.forEach((it) => next.delete(it.id));
+        else g.items.forEach((it) => next.add(it.id));
+      });
       return next;
     });
   };
 
-  const totalItems = visible
-    .filter((g) => selected.has(g.supplier))
-    .reduce((s, g) => s + g.items.length, 0);
-  const totalCost = groups
-    .filter((g) => selected.has(g.supplier))
-    .reduce((s, g) => s + g.totalEstCost, 0);
+  // Totais a partir do que está realmente marcado
+  const selectedItems = candidates.filter((it) => selectedIds.has(it.id));
+  const selectedSuppliers = new Set(selectedItems.map((it) => it.supplier || NO_SUPPLIER));
+  const totalCost = selectedItems.reduce((s, it) => s + it._estCost, 0);
+  const totalItems = selectedItems.length;
 
   const submit = () => {
-    if (selected.size === 0) return;
-    onConfirm([...selected]);
+    if (totalItems === 0) return;
+    onConfirm([...selectedIds]);
   };
 
   return (
@@ -1836,13 +1882,13 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
       background: "rgba(0,0,0,0.55)", display: "grid", placeItems: "center",
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        width: 620, maxHeight: "85vh", display: "flex", flexDirection: "column",
+        width: 680, maxHeight: "85vh", display: "flex", flexDirection: "column",
         background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 8,
       }}>
         <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)" }}>
-          <h3 style={{ margin: 0, fontSize: 15 }}>Selecionar fornecedores</h3>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Nova lista de compras</h3>
           <p style={{ margin: "4px 0 0", fontSize: 11.5, color: "var(--fg-2)" }}>
-            Apenas itens abaixo do mínimo. Desmarque fornecedores que vão pedir depois.
+            Itens abaixo do mínimo agrupados por fornecedor. Clique em um fornecedor para escolher itens individualmente.
           </p>
         </div>
 
@@ -1856,7 +1902,7 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
         {visible.length > 0 && (
           <div style={{ padding: "8px 20px", borderBottom: "1px solid var(--line-soft)", fontSize: 11.5, color: "var(--fg-2)" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-              <input type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} />
+              <input type="checkbox" checked={allVisibleAllSelected} onChange={toggleAllVisible} />
               Marcar/desmarcar todos visíveis ({visible.length})
             </label>
           </div>
@@ -1868,34 +1914,87 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
               {groups.length === 0 ? "Sem itens abaixo do mínimo." : "Nenhum fornecedor com esse nome."}
             </div>
           ) : visible.map((g) => {
-            const isSel = selected.has(g.supplier);
+            const state = supplierState(g);
+            const isOpen = expanded.has(g.supplier);
+            const selectedInGroup = g.items.filter((it) => selectedIds.has(it.id)).length;
             return (
-              <label key={g.supplier} style={{
-                display: "grid", gridTemplateColumns: "auto 1fr auto auto",
-                gap: 12, alignItems: "center",
-                padding: "10px 20px", cursor: "pointer",
-                background: isSel ? "var(--bg-2)" : "transparent",
-                borderBottom: "1px solid var(--line-soft)",
-                borderLeft: g.noSupplier ? "3px solid var(--warn)" : "3px solid transparent",
-              }}>
-                <input type="checkbox" checked={isSel} disabled={g.noSupplier} onChange={() => toggle(g.supplier)} />
-                <div>
-                  <div style={{ fontSize: 13, color: "var(--fg-0)", display: "flex", alignItems: "center", gap: 6 }}>
-                    {g.supplier}
-                    {g.noSupplier && <span style={{ fontSize: 9.5, color: "var(--warn)", letterSpacing: "0.05em", textTransform: "uppercase" }}>· sempre incluído</span>}
+              <div key={g.supplier} style={{ borderBottom: "1px solid var(--line-soft)" }}>
+                <div style={{
+                  display: "grid", gridTemplateColumns: "auto auto 1fr auto auto",
+                  gap: 12, alignItems: "center",
+                  padding: "10px 20px",
+                  background: state !== "none" ? "var(--bg-2)" : "transparent",
+                  borderLeft: g.noSupplier ? "3px solid var(--warn)" : "3px solid transparent",
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={state === "all"}
+                    ref={(el) => { if (el) el.indeterminate = state === "some"; }}
+                    disabled={g.noSupplier}
+                    onChange={() => toggleSupplier(g)}
+                  />
+                  <button type="button" onClick={() => toggleExpand(g.supplier)} style={{
+                    background: "transparent", border: "none", padding: "2px 4px",
+                    cursor: "pointer", color: "var(--fg-3)", display: "inline-flex", alignItems: "center",
+                  }} title={isOpen ? "Recolher" : "Expandir itens"}>
+                    <I.Chevron size={11} style={{ transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform 100ms" }} />
+                  </button>
+                  <div style={{ cursor: "pointer", minWidth: 0 }} onClick={() => toggleExpand(g.supplier)}>
+                    <div style={{ fontSize: 13, color: "var(--fg-0)", display: "flex", alignItems: "center", gap: 6 }}>
+                      {g.supplier}
+                      {g.noSupplier && <span style={{ fontSize: 9.5, color: "var(--warn)", letterSpacing: "0.05em", textTransform: "uppercase" }}>· sempre incluído</span>}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: "var(--fg-3)", fontFamily: "var(--mono)", marginTop: 2 }}>
+                      {selectedInGroup}/{g.items.length} {g.items.length === 1 ? "item selecionado" : "itens selecionados"}
+                    </div>
                   </div>
-                  <div style={{ fontSize: 10.5, color: "var(--fg-3)", fontFamily: "var(--mono)", marginTop: 2 }}>
-                    {g.items.slice(0, 3).map((it) => it.name).join(" · ")}
-                    {g.items.length > 3 && ` +${g.items.length - 3}`}
-                  </div>
+                  <span style={{ fontSize: 11, color: "var(--fg-2)", fontFamily: "var(--mono)" }}>
+                    {g.items.length} {g.items.length === 1 ? "item" : "itens"}
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--fg-1)", fontFamily: "var(--mono)" }}>
+                    R$ {g.totalEstCost.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
                 </div>
-                <span style={{ fontSize: 11, color: "var(--fg-2)", fontFamily: "var(--mono)" }}>
-                  {g.items.length} {g.items.length === 1 ? "item" : "itens"}
-                </span>
-                <span style={{ fontSize: 11, color: "var(--fg-1)", fontFamily: "var(--mono)" }}>
-                  R$ {g.totalEstCost.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </label>
+
+                {isOpen && (
+                  <div style={{ padding: "4px 0 8px", background: "var(--bg-3)" }}>
+                    {g.items.map((it) => {
+                      const isSel = selectedIds.has(it.id);
+                      const isLocked = g.noSupplier;
+                      return (
+                        <label key={it.id} style={{
+                          display: "grid",
+                          gridTemplateColumns: "auto 1fr auto auto",
+                          gap: 10, alignItems: "center",
+                          padding: "6px 20px 6px 56px",
+                          cursor: isLocked ? "default" : "pointer",
+                          opacity: isLocked ? 0.85 : 1,
+                          fontSize: 12, color: "var(--fg-1)",
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={isSel}
+                            disabled={isLocked}
+                            onChange={() => toggleItem(it.id, isLocked)}
+                          />
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ color: "var(--fg-0)" }}>{it.name}</div>
+                            <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 1 }}>
+                              {it.id} · atual {it.qty} {it.unit} · mín {it.reorder}
+                            </div>
+                          </div>
+                          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--accent-bright)", fontWeight: 500 }}>
+                            {it._buyQty} {it.unit}
+                          </span>
+                          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-2)" }}>
+                            R$ {it._estCost.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
@@ -1905,11 +2004,11 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
           display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
         }}>
           <div style={{ fontSize: 12, color: "var(--fg-2)" }}>
-            <strong style={{ color: "var(--fg-0)" }}>{selected.size}</strong> fornecedor(es) · <strong style={{ color: "var(--fg-0)" }}>{totalItems}</strong> itens · <strong style={{ color: "var(--fg-0)" }}>R$ {totalCost.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+            <strong style={{ color: "var(--fg-0)" }}>{selectedSuppliers.size}</strong> fornecedor(es) · <strong style={{ color: "var(--fg-0)" }}>{totalItems}</strong> itens · <strong style={{ color: "var(--fg-0)" }}>R$ {totalCost.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" disabled={selected.size === 0} onClick={submit}>
+            <button className="btn" data-variant="primary" data-size="sm" disabled={totalItems === 0} onClick={submit}>
               Gerar lista
             </button>
           </div>

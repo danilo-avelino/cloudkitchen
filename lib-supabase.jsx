@@ -99,6 +99,23 @@ async function dbSignOut() {
   await _client.auth.signOut();
 }
 
+// Dispara o email com link mágico de recuperação. O usuário cai em `redirectTo`
+// já autenticado em modo "recovery" — daí basta chamar dbUpdatePassword.
+async function dbResetPassword(email) {
+  if (!_client) throw new Error("Supabase não inicializado");
+  const redirectTo = window.location.origin + window.location.pathname + "?reset=1";
+  const { error } = await _client.auth.resetPasswordForEmail(email, { redirectTo });
+  if (error) throw error;
+}
+
+// Atualiza a senha do usuário autenticado · usado após o usuário clicar
+// no link de recuperação e a sessão temporária estar ativa.
+async function dbUpdatePassword(newPassword) {
+  if (!_client) throw new Error("Supabase não inicializado");
+  const { error } = await _client.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+}
+
 async function dbGetSession() {
   if (!_client) return null;
   const { data } = await _client.auth.getSession();
@@ -2030,6 +2047,116 @@ function dbSubscribeTable(table, tenantId, callback, event = "*") {
 }
 
 // =====================================================================
+// SUPERADMIN · CRUD global de tenants (painel /admin)
+// =====================================================================
+// Depende das policies de phase-15-tenant-admin.sql:
+//   profiles.is_superadmin = true → SELECT/INSERT/UPDATE/DELETE em tenants
+//
+// Provisionamento completo (tenant + owner + seeds) continua via edge
+// function `provision-tenant` que cria auth.users e popula payment_methods
+// + stock_categories iniciais. Updates simples e exclusões usam DB direto.
+
+async function dbListTenantsAdmin() {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client
+    .from("tenants")
+    .select("id, slug, name, legal_name, cnpj, plan, status, trial_ends_at, created_at, updated_at")
+    .order("created_at", { ascending: false });
+  if (error) return { data: null, source: "mock", error };
+
+  // Anota cada tenant com contagem de members + email/nome do owner.
+  // Faz em um único select por relação pra evitar N+1.
+  const ids = (data || []).map((t) => t.id);
+  let membersByTenant = {};
+  if (ids.length) {
+    const { data: members } = await _client
+      .from("tenant_members")
+      .select("tenant_id, user_id, role")
+      .in("tenant_id", ids);
+    (members || []).forEach((m) => {
+      if (!membersByTenant[m.tenant_id]) membersByTenant[m.tenant_id] = [];
+      membersByTenant[m.tenant_id].push(m);
+    });
+  }
+  // Resolve nomes/emails dos owners
+  const ownerIds = Array.from(new Set(
+    Object.values(membersByTenant).flat().filter((m) => m.role === "owner").map((m) => m.user_id),
+  ));
+  let profilesById = {};
+  if (ownerIds.length) {
+    const { data: profs } = await _client
+      .from("profiles")
+      .select("id, full_name")
+      .in("id", ownerIds);
+    (profs || []).forEach((p) => { profilesById[p.id] = p; });
+  }
+  const enriched = (data || []).map((t) => {
+    const ms = membersByTenant[t.id] || [];
+    const owner = ms.find((m) => m.role === "owner");
+    return {
+      ...t,
+      usersCount: ms.length,
+      ownerName: owner ? (profilesById[owner.user_id]?.full_name || null) : null,
+      ownerUserId: owner?.user_id || null,
+    };
+  });
+  return { data: enriched, source: "db", error: null };
+}
+
+// Cria tenant + owner via edge function provision-tenant (usa SERVICE_ROLE).
+// Convida o owner por email e dispara seeds (payment_methods, stock_categories).
+async function dbProvisionTenant({ name, slug, plan, ownerEmail, ownerName }) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  try {
+    const { data: { session } } = await _client.auth.getSession();
+    if (!session) return { data: null, error: new Error("Não autenticado") };
+    const url = window.SK_CONFIG?.supabaseUrl + "/functions/v1/provision-tenant";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + session.access_token,
+      },
+      body: JSON.stringify({ name, slug, plan, ownerEmail, ownerName }),
+    });
+    const raw = await res.text();
+    let json = null; try { json = raw ? JSON.parse(raw) : null; } catch (_) { /* non-json */ }
+    if (!res.ok) {
+      const detail = json?.error || raw || res.statusText || "sem mensagem";
+      return { data: null, error: new Error(`[${res.status}] ${detail}`) };
+    }
+    return { data: json, error: null };
+  } catch (e) {
+    return { data: null, error: e };
+  }
+}
+
+// Atualiza campos editáveis de um tenant (RLS exige is_superadmin).
+async function dbUpdateTenantAdmin(id, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const update = {};
+  if (patch.name       !== undefined) update.name = patch.name;
+  if (patch.slug       !== undefined) update.slug = patch.slug;
+  if (patch.legal_name !== undefined) update.legal_name = patch.legal_name;
+  if (patch.cnpj       !== undefined) update.cnpj = patch.cnpj;
+  if (patch.plan       !== undefined) update.plan = patch.plan;
+  if (patch.status     !== undefined) update.status = patch.status;
+  if (patch.trial_ends_at !== undefined) update.trial_ends_at = patch.trial_ends_at;
+  const { data, error } = await _client
+    .from("tenants").update(update).eq("id", id)
+    .select().single();
+  return { data, error };
+}
+
+// Exclui o tenant. ON DELETE CASCADE remove members, operations, etc.
+// Auth users do owner NÃO são removidos (continuam no auth.users).
+async function dbDeleteTenantAdmin(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("tenants").delete().eq("id", id);
+  return { error };
+}
+
+// =====================================================================
 // SESSION · hook React + helpers de role
 // =====================================================================
 function getSession() {
@@ -2063,7 +2190,7 @@ function useSession() {
 // =====================================================================
 Object.assign(window, {
   initSupabase, getSupabaseClient, getDbState, getDbError, isDbOnline, useDbStatus,
-  dbOrMock, dbSignIn, dbSignOut, dbGetSession, dbGetCurrentContext,
+  dbOrMock, dbSignIn, dbSignOut, dbGetSession, dbGetCurrentContext, dbResetPassword, dbUpdatePassword,
   dbListOperations, dbInsertOperation, dbUpdateOperation, dbDeleteOperation,
   dbListOperationShifts, dbInsertOperationShift, dbUpdateOperationShift, dbDeleteOperationShift,
   dbListRecipeCategories, dbInsertRecipeCategory,
@@ -2082,6 +2209,7 @@ Object.assign(window, {
   dbInsertTechSheetItem, dbUpdateTechSheetItem, dbDeleteTechSheetItem,
   dbListInventories, dbInsertInventory, dbUpdateInventory,
   dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
+  dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin,
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
   dbGetStockValueSnapshots,
   dbListClosingChecklist, dbUpdateClosingChecklistItem, dbInsertClosingChecklistItem, dbDeleteClosingChecklistItem,

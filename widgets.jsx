@@ -187,13 +187,11 @@ function notImplemented(label, opts = {}) {
 }
 
 // =====================================================================
-// Helpers de movimentação de estoque (entrada/saída)
+// Helpers de movimentação de estoque (entrada/saída) — fallback MOCK
 // =====================================================================
-// Mutam MOCK.STOCK_ITEMS direto — quando o usuário voltar pra página de Estoque,
-// o useState reseed de MOCK e enxerga o novo saldo.
-// TODO backend: cada chamada vira INSERT em public.stock_movements (entrada com
-// kind='in', saída com kind='out'); o trigger já existente atualiza
-// stock_items.current_qty + cost médio.
+// Mutam MOCK.STOCK_ITEMS direto · usado só quando o DB está offline.
+// Online, as movimentações vão via dbApplyStockMovement → INSERT em
+// stock_movements; o trigger no Postgres recalcula qty/custo médio.
 
 function _normalizeName(s) {
   return String(s || "")

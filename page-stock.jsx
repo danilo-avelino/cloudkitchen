@@ -32,7 +32,6 @@ function Stock({ scope }) {
   const [deletingCategory, setDeletingCategory] = useState(false);
   // KPIs operacionais (mês atual) — para estoquistas que não acessam o dashboard
   const [movements, setMovements] = useState([]);     // stock_movements MTD
-  const [inventories, setInventories] = useState([]); // p/ precisão de estoque
 
   // Carrega tenant + items + categorias do DB quando online
   useEffect(() => {
@@ -76,8 +75,8 @@ function Stock({ scope }) {
     return () => { cancelled = true; };
   }, [dbStatus.state, dbStatus.isOnline]);
 
-  // Carrega movimentações (MTD) + inventários p/ os KPIs operacionais do topo.
-  // Realtime: qualquer entrada/saída ou inventário finalizado atualiza os cards.
+  // Carrega movimentações do mês p/ os KPIs de Entradas/Saídas.
+  // Realtime: qualquer entrada/saída ou recebimento atualiza os cards.
   useEffect(() => {
     if (dbStatus.state === "checking") return;
     if (!dbStatus.isOnline || !tenantId) return;
@@ -85,13 +84,9 @@ function Stock({ scope }) {
     let reloadTimer = null;
     const load = async () => {
       const mtdFirst = new Date(); mtdFirst.setDate(1); mtdFirst.setHours(0, 0, 0, 0);
-      const [movRes, invRes] = await Promise.all([
-        dbListStockMovements(tenantId, mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 }),
-        dbListInventories(tenantId),
-      ]);
+      const movRes = await dbListStockMovements(tenantId, mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 });
       if (cancelled) return;
       setMovements(movRes.data || []);
-      setInventories(invRes.data || []);
     };
     const scheduleReload = () => {
       if (reloadTimer) clearTimeout(reloadTimer);
@@ -101,7 +96,6 @@ function Stock({ scope }) {
     const unsubs = [
       dbSubscribeTable?.("stock_movements", tenantId, scheduleReload),
       dbSubscribeTable?.("goods_receipts",  tenantId, scheduleReload),
-      dbSubscribeTable?.("inventories",     tenantId, scheduleReload),
     ].filter(Boolean);
     return () => {
       cancelled = true;
@@ -168,22 +162,23 @@ function Stock({ scope }) {
   // ===== Categorias · CRUD =====
   const createCategory = async (name) => {
     const v = String(name || "").trim();
-    if (!v) return;
+    if (!v) return null;
     if (allCats.includes(v)) {
       window.showToast(`Categoria "${v}" já existe`, { tone: "warn" });
-      return;
+      return null;
     }
     // Persiste no DB se online
     if (source === "db" && tenantId && typeof dbInsertStockCategory === "function") {
       const { data, error } = await dbInsertStockCategory(tenantId, v);
       if (error) {
         window.showToast(`Erro ao criar: ${error.message}`, { tone: "crit", ttl: 4500 });
-        return;
+        return null;
       }
       if (data) setDbCategories((prev) => [...prev, data]);
     }
     setCategories((prev) => [...prev, v].sort());
     window.showToast(`Categoria "${v}" criada`, { tone: "ok" });
+    return v;
   };
 
   const renameCategory = (oldName, newName) => {
@@ -244,6 +239,14 @@ function Stock({ scope }) {
     [categories, items]
   );
 
+  // Itens pendentes de configuração — mesma regra do StockAssistantModal
+  const assistantPendingCount = useMemo(() => items.filter((it) =>
+    !it.cat || it.cat === "Sem categoria" || it.cat === "Outro" ||
+    !it.supplier ||
+    !it.reorder || it.reorder <= 0 ||
+    !it.max || it.max <= 0
+  ).length, [items]);
+
   // Ordem fixa por urgência: ruptura → baixo → ok. Empate: nome alfabético.
   const STATUS_ORDER = { crit: 0, warn: 1, ok: 2 };
   const filtered = useMemo(() => {
@@ -270,7 +273,7 @@ function Stock({ scope }) {
     crit: items.filter((i) => i.status === "crit").length,
   };
 
-  const totalValue = filtered.reduce((s, i) => s + i.qty * i.cost, 0);
+  const totalValue = items.reduce((s, i) => s + i.qty * i.cost, 0);
 
   // Recalcula status (ok / warn / crit) com base em qty x reorder
   const recomputeStatus = (it) => {
@@ -398,8 +401,6 @@ function Stock({ scope }) {
           }
         }
       }
-      console.log("[handleEditItem] supplierId final:", supId, "draft.supplier:", draft.supplier);
-      console.log("[handleEditItem] enviando dbUpdateStockItem · draft=", draft, "catId=", catId, "supId=", supId);
       const { data, error } = await dbUpdateStockItem(id, {
         name: draft.name, unit: draft.unit, cost: draft.cost,
         reorder: draft.min, max: draft.max,
@@ -413,7 +414,6 @@ function Stock({ scope }) {
         window.showToast(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 6000 });
         return;
       }
-      console.log("[handleEditItem] sucesso · data=", data);
       setItems((prev) => prev.map((it) => it.id === id ? data : it));
       setEditingItem(null);
       window.showToast(`Insumo atualizado no Supabase`, { tone: "ok" });
@@ -455,12 +455,18 @@ function Stock({ scope }) {
     }
     return { entradas, saidas };
   }, [movements]);
-  const moduleMetrics = useMemo(
-    () => (typeof computeDashboardMetrics === "function")
-      ? computeDashboardMetrics(scope, "mtd", { stock: items, inventories }, dbStatus.isOnline)
-      : { inv: { accuracy: null, lastDate: null }, alerts: { total: 0, ruptura: 0, baixo: 0, acimaMax: 0 } },
-    [scope, items, inventories, dbStatus.isOnline],
-  );
+  const stockAlerts = useMemo(() => {
+    let ruptura = 0, baixo = 0, acimaMax = 0;
+    for (const i of items) {
+      const qty = Number(i.qty) || 0;
+      const reorder = Number(i.reorder) || 0;
+      const max = Number(i.max) || 0;
+      if (qty <= 0) ruptura += 1;
+      else if (reorder > 0 && qty < reorder) baixo += 1;
+      if (max > 0 && qty > max) acimaMax += 1;
+    }
+    return { total: ruptura + baixo + acimaMax, ruptura, baixo, acimaMax };
+  }, [items]);
 
   if (pageLoading) return <PageLoading label="Carregando estoque…" variant="table" />;
 
@@ -470,19 +476,12 @@ function Stock({ scope }) {
       <div style={{ padding: "16px 28px 4px", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in" />
         <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" />
-        <ModuleKpi
-          label="Precisão de estoque"
-          value={moduleMetrics.inv.accuracy != null ? `${moduleMetrics.inv.accuracy.toFixed(0)}%` : "—"}
-          sub={moduleMetrics.inv.lastDate ? `último em ${moduleMetrics.inv.lastDate}` : "sem inventários"}
-          tone={moduleMetrics.inv.accuracy >= 95 ? "ok" : moduleMetrics.inv.accuracy >= 90 ? "info" : "warn"}
-          onClick={() => setView("inventory")}
-          icon={<I.Box size={11} />}
-        />
+        <FlowKpi label="Valor em estoque"    value={totalValue} />
         <ModuleKpi
           label="Alertas de estoque"
-          value={moduleMetrics.alerts.total}
-          sub={`${moduleMetrics.alerts.ruptura} ruptura · ${moduleMetrics.alerts.baixo} baixo · ${moduleMetrics.alerts.acimaMax} acima do máx`}
-          tone={moduleMetrics.alerts.ruptura > 0 ? "crit" : moduleMetrics.alerts.total > 0 ? "warn" : "ok"}
+          value={stockAlerts.total}
+          sub={`${stockAlerts.ruptura} ruptura · ${stockAlerts.baixo} baixo · ${stockAlerts.acimaMax} acima do máx`}
+          tone={stockAlerts.ruptura > 0 ? "crit" : stockAlerts.total > 0 ? "warn" : "ok"}
           onClick={() => { setView("items"); setFilter("crit"); }}
           icon={<I.AlertTriangle size={11} />}
         />
@@ -515,42 +514,9 @@ function Stock({ scope }) {
           />
         </div>
       ) : (<>
-      {/* Header */}
-      <div style={{ padding: "20px 28px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
-        <div>
-          <div className="h-eyebrow" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 10 }}>
-            Estoque físico compartilhado · {items.length} SKUs
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-              padding: "2px 7px", borderRadius: 99,
-              color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-              background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-              border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-            }} title={source === "db" ? "Carregado do Supabase" : "Modo MOCK · não persiste"}>
-              <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-              {loading ? "carregando…" : source === "db" ? "Supabase" : "Mock"}
-            </span>
-          </div>
-          <h1 className="h-title">Estoque</h1>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn" data-size="sm" onClick={() => setShowAssistant(true)}
-                  title="Revisar item a item os que estão sem configuração">
-            ✨ Assistente de estoque
-          </button>
-          <button className="btn" data-size="sm" onClick={() => setShowHistory(true)}>Histórico</button>
-          <button className="btn" data-size="sm" onClick={() => setShowEntry(true)}>
-            <I.Plus size={13} />Entrada manual
-          </button>
-          <button className="btn" data-variant="primary" data-size="sm" onClick={() => setShowCreate(true)}>
-            <I.Plus size={13} />Novo insumo
-          </button>
-        </div>
-      </div>
-
-      {/* Filter strip */}
-      <div style={{ padding: "0 28px 14px", display: "flex", alignItems: "center", gap: 10, borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
+      {/* Header + filtros · uma linha só */}
+      <div style={{ padding: "16px 28px 14px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
+        <h1 className="h-title" style={{ margin: 0 }}>Estoque</h1>
         <Tabs value={filter} onChange={setFilter} options={[
           { id: "all",  label: "Todos",     count: items.length },
           { id: "ok",   label: "Em estoque", count: totals.ok,    tone: "ok" },
@@ -560,9 +526,33 @@ function Stock({ scope }) {
         <span style={{ flex: 1 }} />
         <StockSearchInput value={search} onChange={setSearch} />
         <CategoryFilter allCats={allCats} selected={cats} onChange={setCats} />
-        <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-2)" }}>
-          Valor: <span style={{ color: "var(--fg-0)" }}>R$ {totalValue.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-        </span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn" data-size="sm" onClick={() => setShowAssistant(true)}
+                  title={assistantPendingCount > 0
+                    ? `${assistantPendingCount} ${assistantPendingCount === 1 ? "item pendente" : "itens pendentes"} de configuração`
+                    : "Todos os itens estão configurados"}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            ✨ Assistente de estoque
+            <span style={{
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              minWidth: 18, height: 16, padding: "0 5px",
+              borderRadius: 99, fontFamily: "var(--mono)", fontSize: 10, fontWeight: 500,
+              letterSpacing: "0.02em",
+              background: assistantPendingCount > 0 ? "var(--warn)" : "var(--bg-3)",
+              color: assistantPendingCount > 0 ? "var(--accent-fg)" : "var(--fg-3)",
+              border: `1px solid ${assistantPendingCount > 0 ? "var(--warn)" : "var(--line)"}`,
+            }}>
+              {assistantPendingCount}
+            </span>
+          </button>
+          <button className="btn" data-size="sm" onClick={() => setShowHistory(true)}>Histórico</button>
+          <button className="btn" data-size="sm" onClick={() => setShowEntry(true)}>
+            <I.Plus size={13} />Entrada manual
+          </button>
+          <button className="btn" data-variant="primary" data-size="sm" onClick={() => setShowCreate(true)}>
+            <I.Plus size={13} />Novo insumo
+          </button>
+        </div>
       </div>
 
       {/* Resumo do filtro ativo · só aparece quando há algo filtrado */}
@@ -654,7 +644,7 @@ function Stock({ scope }) {
 
       {showEntry  && <StockEntryModal items={items} onClose={() => setShowEntry(false)} onSave={handleEntry} />}
       {showHistory && <StockHistoryModal onClose={() => setShowHistory(false)} />}
-      {showCreate && <NewStockItemModal items={items} categories={allCats} suppliers={suppliers} onClose={() => setShowCreate(false)} onSave={handleCreateItem} />}
+      {showCreate && <NewStockItemModal items={items} categories={allCats} suppliers={suppliers} onCreateCategory={createCategory} onClose={() => setShowCreate(false)} onSave={handleCreateItem} />}
       {showAssistant && (
         <StockAssistantModal
           items={items}
@@ -671,6 +661,7 @@ function Stock({ scope }) {
           categories={allCats}
           suppliers={suppliers}
           initial={editingItem}
+          onCreateCategory={createCategory}
           onClose={() => setEditingItem(null)}
           onSave={(draft) => handleEditItem(editingItem.id, draft)}
           onDelete={() => handleDeleteItem(editingItem.id)}
@@ -699,8 +690,11 @@ function Stock({ scope }) {
 // Modal usado tanto para criar (sem `initial`) quanto editar (com `initial`).
 // Em modo edição, a quantidade atual NÃO é exibida nem editada — saldo só
 // muda via Entrada manual ou Inventário.
-function NewStockItemModal({ items, initial, categories, suppliers = [], onClose, onSave, onDelete }) {
+function NewStockItemModal({ items, initial, categories, suppliers = [], onClose, onSave, onDelete, onCreateCategory }) {
   const isEdit = !!initial;
+  const [creatingCat, setCreatingCat] = useState(false);
+  const [newCatName, setNewCatName] = useState("");
+  const [savingCat, setSavingCat] = useState(false);
   // Categorias gerenciadas (passadas pelo Stock); caso ausente, deriva dos items.
   const existingCats = categories && categories.length
     ? categories
@@ -740,7 +734,6 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
   ].filter(Boolean);
 
   const handleSubmit = async () => {
-    console.log("[NewStockItemModal] handleSubmit · valid=", valid, "saving=", saving, "errs=", errs);
     if (saving || !valid) return;
     setSaving(true);
     try {
@@ -816,23 +809,73 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
 
         <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.8fr 1fr", gap: 12 }}>
           <FormRow label="Categoria">
-            <select className="select" value={cat} onChange={async (e) => {
-              const v = e.target.value;
-              if (v === "__new__") {
-                const name = window.prompt("Nome da nova categoria:");
-                if (!name || !name.trim()) return;
-                setCat(name.trim());
-                if (typeof window.onCreateStockCategory === "function") {
-                  await window.onCreateStockCategory(name.trim());
-                }
-                return;
-              }
-              setCat(v);
-            }} required style={errs.cat ? { borderColor: "var(--crit)" } : null}>
-              <option value="" disabled>Selecione…</option>
-              {existingCats.map((c) => <option key={c} value={c}>{c}</option>)}
-              <option value="__new__">+ Criar categoria…</option>
-            </select>
+            {creatingCat ? (
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  className="input"
+                  autoFocus
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  placeholder="Nome da nova categoria"
+                  disabled={savingCat}
+                  onKeyDown={async (e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      const v = newCatName.trim();
+                      if (!v || savingCat) return;
+                      setSavingCat(true);
+                      try {
+                        const created = typeof onCreateCategory === "function" ? await onCreateCategory(v) : v;
+                        if (created) {
+                          setCat(created);
+                          setCreatingCat(false);
+                          setNewCatName("");
+                        }
+                      } finally {
+                        setSavingCat(false);
+                      }
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setCreatingCat(false);
+                      setNewCatName("");
+                    }
+                  }}
+                />
+                <button className="btn" data-variant="primary" data-size="sm" disabled={!newCatName.trim() || savingCat}
+                        onClick={async () => {
+                          const v = newCatName.trim();
+                          if (!v) return;
+                          setSavingCat(true);
+                          try {
+                            const created = typeof onCreateCategory === "function" ? await onCreateCategory(v) : v;
+                            if (created) {
+                              setCat(created);
+                              setCreatingCat(false);
+                              setNewCatName("");
+                            }
+                          } finally {
+                            setSavingCat(false);
+                          }
+                        }}>
+                  {savingCat ? "…" : "Criar"}
+                </button>
+                <button className="btn" data-size="sm" disabled={savingCat}
+                        onClick={() => { setCreatingCat(false); setNewCatName(""); }}>
+                  Cancelar
+                </button>
+              </div>
+            ) : (
+              <select className="select" value={cat} onChange={(e) => {
+                const v = e.target.value;
+                if (v === "__new__") { setCreatingCat(true); return; }
+                setCat(v);
+              }} required style={errs.cat ? { borderColor: "var(--crit)" } : null}>
+                <option value="" disabled>Selecione…</option>
+                {existingCats.map((c) => <option key={c} value={c}>{c}</option>)}
+                <option value="__new__">+ Criar categoria…</option>
+              </select>
+            )}
           </FormRow>
           <FormRow label="Unidade">
             <select className="select" value={unit} onChange={(e) => setUnit(e.target.value)}>

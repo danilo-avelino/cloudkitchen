@@ -1,5 +1,5 @@
 // Dashboard page — visão consolidada operacional · puxa de TODOS os módulos
-function Dashboard({ scope, setScope, setPage }) {
+function Dashboard({ scope, setPage }) {
   const op = MOCK.opById(scope);
   const isConsolidated = scope === "all";
   const [period, setPeriod] = useState("mtd");
@@ -208,8 +208,8 @@ function Dashboard({ scope, setScope, setPage }) {
 
       {/* CMV + Ranking */}
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12 }}>
-        <CmvByOpCard onDrill={(id) => setScope(id)} setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
-        <RankingCard onDrill={(id) => setScope(id)} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
+        <CmvByOpCard setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
+        <RankingCard cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
       </div>
 
       {/* Estoque por categoria */}
@@ -389,7 +389,7 @@ function Spark({ accent }) {
   );
 }
 
-function CmvByOpCard({ onDrill, setPage, cmvDaily = [], movements = [], dbOnline = false }) {
+function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false }) {
   // CMV real por operação no MTD = COGS (saídas de estoque × custo) ÷ faturamento.
   // Faturamento vem de cmv_daily; COGS é recalculado aqui a partir de stock_movements
   // (kind=out) porque revenue_entries.cogs é hoje apenas um placeholder.
@@ -432,7 +432,7 @@ function CmvByOpCard({ onDrill, setPage, cmvDaily = [], movements = [], dbOnline
       <div className="card-header">
         <div>
           <h3 className="card-title">CMV por operação · {new Date().toLocaleDateString("pt-BR", { month: "long" })} até hoje</h3>
-          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Saídas de estoque ÷ faturamento · clique para drill-down</span>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Saídas de estoque ÷ faturamento</span>
         </div>
         <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setPage && setPage("cmv")}>Ver detalhes <I.ChevronR size={12} /></button>
       </div>
@@ -448,8 +448,7 @@ function CmvByOpCard({ onDrill, setPage, cmvDaily = [], movements = [], dbOnline
           const goalPct = (row.goal / max) * 100;
           const tone = toneOf(row.real);
           return (
-            <div key={row.op} style={{ display: "grid", gridTemplateColumns: "120px 1fr 80px 80px", gap: 16, alignItems: "center", cursor: "pointer" }}
-                 onClick={() => onDrill(row.op)}>
+            <div key={row.op} style={{ display: "grid", gridTemplateColumns: "120px 1fr 80px 80px", gap: 16, alignItems: "center" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
                 <span style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>{op.name}</span>
@@ -493,7 +492,7 @@ function CmvByOpCard({ onDrill, setPage, cmvDaily = [], movements = [], dbOnline
   );
 }
 
-function RankingCard({ onDrill, cmvDaily = [], movements = [], dbOnline = false }) {
+function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
   const ranking = useMemo(() => {
     // Margem de contribuição (R$) = faturamento − custo real das saídas de estoque.
     // revenue_entries.cogs é placeholder (zero); o COGS real vem de stock_movements
@@ -535,8 +534,7 @@ function RankingCard({ onDrill, cmvDaily = [], movements = [], dbOnline = false 
         ) : ranking.map((r, i) => {
           const op = MOCK.opById(r.op);
           return (
-            <div key={r.op} style={{ display: "grid", gridTemplateColumns: "20px 1fr 140px", gap: 12, alignItems: "center", padding: "10px 0", borderBottom: i < ranking.length - 1 ? "1px solid var(--line-soft)" : "none", cursor: "pointer" }}
-                 onClick={() => onDrill(r.op)}>
+            <div key={r.op} style={{ display: "grid", gridTemplateColumns: "20px 1fr 140px", gap: 12, alignItems: "center", padding: "10px 0", borderBottom: i < ranking.length - 1 ? "1px solid var(--line-soft)" : "none" }}>
               <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-3)", letterSpacing: "0.04em" }}>0{i + 1}</span>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
@@ -546,41 +544,6 @@ function RankingCard({ onDrill, cmvDaily = [], movements = [], dbOnline = false 
             </div>
           );
         })}
-      </div>
-    </div>
-  );
-}
-
-function AlertsCard({ setPage }) {
-  const alerts = [
-    { kind: "crit", title: "Embalagem isopor 500ml em ruptura",  meta: "AÇAÍ · há 2h",     action: "Comprar agora" },
-    { kind: "crit", title: "Cheddar fatiado · 0,4 kg restantes", meta: "BURG · ruptura em 2d", action: "Adicionar à lista" },
-    { kind: "warn", title: "Muçarela bola abaixo do ponto de pedido", meta: "PIZZ · 3,2/6 kg", action: "Adicionar à lista" },
-    { kind: "warn", title: "Alface americana · vence 07/05",     meta: "VERDE · 6 pés",   action: "Promo sugerida" },
-    { kind: "warn", title: "Pão brioche · vence 08/05",          meta: "BURG · 84 un",     action: "Acelerar venda" },
-  ];
-  return (
-    <div className="card">
-      <div className="card-header">
-        <div>
-          <h3 className="card-title">Alertas operacionais</h3>
-          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Ruptura · vencimento · variações de CMV</span>
-        </div>
-        <span className="badge" data-tone="warn">12 ativos</span>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column" }}>
-        {alerts.map((a, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 16px", borderBottom: i < alerts.length - 1 ? "1px solid var(--line-soft)" : "none" }}>
-            <span style={{ width: 6, height: 6, borderRadius: 50, background: a.kind === "crit" ? "var(--crit)" : "var(--warn)", flexShrink: 0 }} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, color: "var(--fg-0)", letterSpacing: "-0.005em" }}>{a.title}</div>
-              <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", marginTop: 2 }}>{a.meta}</div>
-            </div>
-            <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setPage("shopping")}>
-              {a.action} <I.ChevronR size={11} />
-            </button>
-          </div>
-        ))}
       </div>
     </div>
   );

@@ -19,7 +19,7 @@ const fmt = (v) => "R$ " + (v || 0).toLocaleString("pt-BR", { minimumFractionDig
 const fmtShort = (v) => "R$ " + (v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const fmtDate = (iso) => {
   if (!iso) return "—";
-  const [y, m, d] = iso.split("-");
+  const [y, m, d] = String(iso).slice(0, 10).split("-");
   return `${d}/${m}/${y.slice(2)}`;
 };
 const monthOf = (iso) => iso ? iso.slice(0, 7) : "";
@@ -605,6 +605,9 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
 
 // ---------- Checklist de fechamento ----------
 function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, onDelete, period }) {
+  // DreStat mora em page-dre.jsx (carregado depois deste arquivo); pegamos via window
+  // no render porque no top-of-file ainda é undefined.
+  const DreStat = window.DreStat;
   const [filter, setFilter] = useState("pending");
 
   const filtered = checklist.filter((c) => {
@@ -862,11 +865,13 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
   const initialValueStr = initial?.value != null
     ? Number(initial.value).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : "";
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   const [cat, setCat] = useState(initial?.cat || defaultCat);
   const [desc, setDesc] = useState(initial?.desc || "");
   const [value, setValue] = useState(initialValueStr);
-  const [comp, setComp] = useState(initial?.comp || `${period}-15`);
-  const [paid, setPaid] = useState(initial?.paid || `${period}-20`);
+  const [comp, setComp] = useState(initial?.comp || todayStr);
+  const [paid, setPaid] = useState(initial?.paid || todayStr);
   const [status, setStatus] = useState(initial?.status || "paid");
   const [touched, setTouched] = useState(false);
   const isEditing = !!initial;
@@ -980,6 +985,7 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
 }
 
 function FillDraft({ item, categories, subcategories, period, onClose, onSave }) {
+  const DreStat = window.DreStat;
   const sub = findSubcategory(subcategories, item.cat);
   const parent = sub ? findCategory(categories, sub.category) : null;
   const expectedStr = (item.expected || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

@@ -3,11 +3,79 @@
 // =====================================================================
 
 function LoginPage({ onLogin }) {
+  const [view, setView] = useState(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("reset") === "1" ? "recover" : "login";
+    } catch { return "login"; }
+  });
   const [email, setEmail]       = useState("");
   const [password, setPassword] = useState("");
   const [error, setError]       = useState("");
   const [loading, setLoading]   = useState(false);
   const [showPwd, setShowPwd]   = useState(false);
+  // Estados do fluxo de recuperação
+  const [forgotSent, setForgotSent] = useState(false);
+  const [newPwd, setNewPwd]   = useState("");
+  const [newPwd2, setNewPwd2] = useState("");
+  const [recoveryDone, setRecoveryDone] = useState(false);
+
+  const goLogin = () => {
+    setView("login");
+    setError("");
+    setForgotSent(false);
+    setRecoveryDone(false);
+    setNewPwd(""); setNewPwd2("");
+    // Remove ?reset=1 da URL se voltarmos pro login
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("reset")) {
+        url.searchParams.delete("reset");
+        window.history.replaceState({}, "", url.toString());
+      }
+    } catch {}
+  };
+
+  const submitForgot = async (e) => {
+    e?.preventDefault();
+    setError("");
+    if (!email.trim()) { setError("Informe o email cadastrado"); return; }
+    if (!(typeof isDbOnline === "function" && isDbOnline())) {
+      setError("Recuperação de senha exige DB online (não disponível em modo MOCK)");
+      return;
+    }
+    setLoading(true);
+    try {
+      await dbResetPassword(email.trim().toLowerCase());
+      setForgotSent(true);
+    } catch (err) {
+      setError(err?.message || "Falha ao enviar email de recuperação");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitRecover = async (e) => {
+    e?.preventDefault();
+    setError("");
+    if (newPwd.length < 6) { setError("Senha precisa ter no mínimo 6 caracteres"); return; }
+    if (newPwd !== newPwd2) { setError("As senhas não conferem"); return; }
+    if (!(typeof isDbOnline === "function" && isDbOnline())) {
+      setError("Sem conexão com o banco · tente novamente");
+      return;
+    }
+    setLoading(true);
+    try {
+      await dbUpdatePassword(newPwd);
+      // Encerra a sessão temporária criada pelo link de recuperação
+      try { await dbSignOut(); } catch {}
+      setRecoveryDone(true);
+    } catch (err) {
+      setError(err?.message || "Falha ao redefinir senha");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const submit = async (e) => {
     e?.preventDefault();
@@ -25,10 +93,14 @@ function LoginPage({ onLogin }) {
         // Encontra o user equivalente no MOCK pra herdar role/avatar
         // (em produção, role vem de tenant_members.role)
         const mockUser = (MOCK.SYSTEM_USERS || []).find((u) => u.email.toLowerCase() === cleanEmail);
+        // Superadmin tem prioridade · profile.is_superadmin == true ignora role
+        // do tenant_members (que pode estar vazio para um superadmin "puro" sem tenant).
+        const isSuperadmin = ctx?.profile?.is_superadmin === true;
         const user = {
           email: cleanEmail,
           name:  ctx?.profile?.full_name || mockUser?.name || cleanEmail.split("@")[0],
-          role:  ctx?.member?.role || mockUser?.role || "viewer",
+          role:  isSuperadmin ? "superadmin" : (ctx?.member?.role || mockUser?.role || "viewer"),
+          isSuperadmin,
           tenantId: ctx?.tenant?.id || mockUser?.tenantId || null,
           tenantName: ctx?.tenant?.name || mockUser?.tenantName || null,
           ops: ctx?.member?.ops || [],
@@ -113,85 +185,240 @@ function LoginPage({ onLogin }) {
           </div>
         </div>
 
-        <h1 style={{
-          fontSize: 22, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em",
-          margin: "0 0 6px",
-        }}>Entrar na conta</h1>
-        <p style={{ fontSize: 12.5, color: "var(--fg-2)", marginBottom: 24 }}>
-          Use seu email corporativo para acessar o painel.
-        </p>
+        {view === "login" && (<>
+          <h1 style={{
+            fontSize: 22, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em",
+            margin: "0 0 6px",
+          }}>Entrar na conta</h1>
+          <p style={{ fontSize: 12.5, color: "var(--fg-2)", marginBottom: 24 }}>
+            Use seu email corporativo para acessar o painel.
+          </p>
 
-        <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <FormRow label="Email">
-            <input
-              className="input"
-              type="email"
-              autoFocus
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="seu@email.com"
-              disabled={loading}
-            />
-          </FormRow>
-          <FormRow label="Senha">
-            <div style={{ position: "relative" }}>
+          <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <FormRow label="Email">
               <input
                 className="input"
-                type={showPwd ? "text" : "password"}
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
+                type="email"
+                autoFocus
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="seu@email.com"
                 disabled={loading}
-                style={{ width: "100%", paddingRight: 36 }}
               />
-              <button
-                type="button"
-                onClick={() => setShowPwd(!showPwd)}
-                style={{
-                  position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
-                  background: "transparent", border: "none", cursor: "pointer",
-                  padding: 6, color: "var(--fg-3)",
-                }}
-                title={showPwd ? "Ocultar senha" : "Mostrar senha"}>
-                <I.Eye size={13} />
+            </FormRow>
+            <FormRow label="Senha">
+              <div style={{ position: "relative" }}>
+                <input
+                  className="input"
+                  type={showPwd ? "text" : "password"}
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  disabled={loading}
+                  style={{ width: "100%", paddingRight: 36 }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPwd(!showPwd)}
+                  style={{
+                    position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                    background: "transparent", border: "none", cursor: "pointer",
+                    padding: 6, color: "var(--fg-3)",
+                  }}
+                  title={showPwd ? "Ocultar senha" : "Mostrar senha"}>
+                  <I.Eye size={13} />
+                </button>
+              </div>
+            </FormRow>
+
+            {error && (
+              <div style={{
+                padding: "9px 12px",
+                background: "var(--crit-soft)", border: "1px solid var(--crit-line)",
+                borderRadius: 4, fontSize: 12, color: "var(--crit)",
+                display: "flex", alignItems: "center", gap: 8,
+              }}>
+                <I.AlertTriangle size={12} />
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="btn"
+              data-variant="primary"
+              disabled={loading || !email.trim() || !password}
+              style={{ marginTop: 4, padding: "10px 14px", fontSize: 13, justifyContent: "center" }}>
+              {loading ? "Entrando…" : "Entrar"}
+            </button>
+
+            <div style={{ marginTop: 6 }}>
+              <button type="button" onClick={() => { setError(""); setView("forgot"); }} style={{
+                background: "transparent", border: "none", cursor: "pointer",
+                fontSize: 11.5, color: "var(--accent-bright)", padding: 0,
+              }}>
+                Esqueci minha senha
               </button>
             </div>
-          </FormRow>
+          </form>
+        </>)}
 
-          {error && (
-            <div style={{
-              padding: "9px 12px",
-              background: "var(--crit-soft)", border: "1px solid var(--crit-line)",
-              borderRadius: 4, fontSize: 12, color: "var(--crit)",
-              display: "flex", alignItems: "center", gap: 8,
-            }}>
-              <I.AlertTriangle size={12} />
-              {error}
+        {view === "forgot" && (<>
+          <h1 style={{
+            fontSize: 22, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em",
+            margin: "0 0 6px",
+          }}>Recuperar senha</h1>
+          <p style={{ fontSize: 12.5, color: "var(--fg-2)", marginBottom: 24 }}>
+            Informe o email cadastrado · enviaremos um link para criar uma nova senha.
+          </p>
+
+          {forgotSent ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{
+                padding: "12px 14px",
+                background: "var(--ok-soft)", border: "1px solid var(--ok-line)",
+                borderRadius: 4, fontSize: 12.5, color: "var(--ok)",
+              }}>
+                Se este email estiver cadastrado, você receberá um link em alguns segundos.
+                Confira a caixa de entrada e o spam.
+              </div>
+              <button type="button" className="btn" onClick={goLogin}
+                      style={{ padding: "10px 14px", fontSize: 13, justifyContent: "center" }}>
+                Voltar para login
+              </button>
             </div>
+          ) : (
+            <form onSubmit={submitForgot} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <FormRow label="Email">
+                <input
+                  className="input"
+                  type="email"
+                  autoFocus
+                  autoComplete="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="seu@email.com"
+                  disabled={loading}
+                />
+              </FormRow>
+
+              {error && (
+                <div style={{
+                  padding: "9px 12px",
+                  background: "var(--crit-soft)", border: "1px solid var(--crit-line)",
+                  borderRadius: 4, fontSize: 12, color: "var(--crit)",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  <I.AlertTriangle size={12} />
+                  {error}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="btn"
+                data-variant="primary"
+                disabled={loading || !email.trim()}
+                style={{ marginTop: 4, padding: "10px 14px", fontSize: 13, justifyContent: "center" }}>
+                {loading ? "Enviando…" : "Enviar link"}
+              </button>
+
+              <button type="button" onClick={goLogin} style={{
+                background: "transparent", border: "none", cursor: "pointer",
+                fontSize: 11.5, color: "var(--accent-bright)", padding: 0, marginTop: 2,
+              }}>
+                ← Voltar para login
+              </button>
+            </form>
           )}
+        </>)}
 
-          <button
-            type="submit"
-            className="btn"
-            data-variant="primary"
-            disabled={loading || !email.trim() || !password}
-            style={{ marginTop: 4, padding: "10px 14px", fontSize: 13, justifyContent: "center" }}>
-            {loading ? "Entrando…" : "Entrar"}
-          </button>
+        {view === "recover" && (<>
+          <h1 style={{
+            fontSize: 22, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em",
+            margin: "0 0 6px",
+          }}>Definir nova senha</h1>
+          <p style={{ fontSize: 12.5, color: "var(--fg-2)", marginBottom: 24 }}>
+            Escolha uma nova senha · mínimo 6 caracteres.
+          </p>
 
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-            <button type="button" onClick={() => notImplemented("Recuperação de senha")} style={{
-              background: "transparent", border: "none", cursor: "pointer",
-              fontSize: 11.5, color: "var(--accent-bright)",
-            }}>
-              Esqueci minha senha
-            </button>
-            <PendingFeature variant="inline" label="auth real"
-              hint="Login mock — produção plugar Supabase Auth (signInWithPassword) + recuperação de senha + 2FA" />
-          </div>
-        </form>
+          {recoveryDone ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{
+                padding: "12px 14px",
+                background: "var(--ok-soft)", border: "1px solid var(--ok-line)",
+                borderRadius: 4, fontSize: 12.5, color: "var(--ok)",
+              }}>
+                Senha redefinida com sucesso. Faça login com a nova senha.
+              </div>
+              <button type="button" className="btn" data-variant="primary" onClick={goLogin}
+                      style={{ padding: "10px 14px", fontSize: 13, justifyContent: "center" }}>
+                Ir para login
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={submitRecover} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <FormRow label="Nova senha">
+                <input
+                  className="input"
+                  type={showPwd ? "text" : "password"}
+                  autoFocus
+                  autoComplete="new-password"
+                  value={newPwd}
+                  onChange={(e) => setNewPwd(e.target.value)}
+                  placeholder="••••••••"
+                  disabled={loading}
+                />
+              </FormRow>
+              <FormRow label="Confirmar nova senha">
+                <input
+                  className="input"
+                  type={showPwd ? "text" : "password"}
+                  autoComplete="new-password"
+                  value={newPwd2}
+                  onChange={(e) => setNewPwd2(e.target.value)}
+                  placeholder="••••••••"
+                  disabled={loading}
+                />
+              </FormRow>
+
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--fg-2)", cursor: "pointer" }}>
+                <input type="checkbox" checked={showPwd} onChange={(e) => setShowPwd(e.target.checked)} />
+                Mostrar senha
+              </label>
+
+              {error && (
+                <div style={{
+                  padding: "9px 12px",
+                  background: "var(--crit-soft)", border: "1px solid var(--crit-line)",
+                  borderRadius: 4, fontSize: 12, color: "var(--crit)",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  <I.AlertTriangle size={12} />
+                  {error}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="btn"
+                data-variant="primary"
+                disabled={loading || !newPwd || !newPwd2}
+                style={{ marginTop: 4, padding: "10px 14px", fontSize: 13, justifyContent: "center" }}>
+                {loading ? "Salvando…" : "Definir nova senha"}
+              </button>
+
+              <button type="button" onClick={goLogin} style={{
+                background: "transparent", border: "none", cursor: "pointer",
+                fontSize: 11.5, color: "var(--accent-bright)", padding: 0, marginTop: 2,
+              }}>
+                Cancelar
+              </button>
+            </form>
+          )}
+        </>)}
       </div>
 
       <div style={{

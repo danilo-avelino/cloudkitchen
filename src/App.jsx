@@ -10,13 +10,64 @@ const TWEAK_DEFAULS = /*EDITMODE-BEGIN*/{
   "density": "default"
 }/*EDITMODE-END*/;
 
+// Detecta se a URL atual pede o painel admin: /admin no path ou ?admin=1
+// (querystring funciona em hosts estáticos como GH Pages que não fazem
+// SPA fallback). Avalia uma vez por render — mudanças via history.pushState
+// disparam o evento "popstate" que escutamos abaixo.
+function isAdminUrl() {
+  try {
+    const path = window.location.pathname || "";
+    const search = window.location.search || "";
+    if (/(^|\/)admin\/?$/i.test(path)) return true;
+    if (new URLSearchParams(search).get("admin") === "1") return true;
+    return false;
+  } catch { return false; }
+}
+
 export function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULS);
   const [scope, setScope] = useState("all");
   const [pageRaw, setPageRaw] = useState("dashboard");
   const [opMenuOpen, setOpMenuOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
-  const [user, setUser] = useState(() => getStoredSession());
+  // Quando o link de recuperação de senha é aberto (?reset=1), forçamos a tela
+  // de login mesmo que haja sessão local — assim o usuário cai direto no
+  // formulário de "definir nova senha" da LoginPage.
+  const isRecoveryUrl = (() => {
+    try { return new URLSearchParams(window.location.search).get("reset") === "1"; }
+    catch { return false; }
+  })();
+  const [user, setUser] = useState(() => isRecoveryUrl ? null : getStoredSession());
+  const [adminRoute, setAdminRoute] = useState(isAdminUrl);
+
+  // Mantém adminRoute sincronizado com botão voltar/avançar do navegador
+  useEffect(() => {
+    const onPop = () => setAdminRoute(isAdminUrl());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // Sincroniza URL ↔ usuário: superadmin logado → push pra /admin se ainda
+  // não tiver; usuário comum visitando /admin → manda pra raiz.
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const base = (import.meta.env?.BASE_URL || "/").replace(/\/$/, "") || "";
+      if (user.role === "superadmin" && !adminRoute) {
+        window.history.replaceState({}, "", base + "/admin");
+        setAdminRoute(true);
+      } else if (user.role !== "superadmin" && adminRoute) {
+        // Limpa /admin tanto do path quanto do querystring
+        const cleanPath = window.location.pathname.replace(/\/admin\/?$/i, "/") || "/";
+        const params = new URLSearchParams(window.location.search);
+        params.delete("admin");
+        const qs = params.toString();
+        window.history.replaceState({}, "", cleanPath + (qs ? "?" + qs : ""));
+        setAdminRoute(false);
+        window.showToast?.("Acesso restrito · apenas superadmin", { tone: "warn", ttl: 3500 });
+      }
+    } catch {}
+  }, [user, adminRoute]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", t.theme);
@@ -56,6 +107,12 @@ export function App() {
     setUser(null);
     setPageRaw("dashboard");
     setScope("all");
+    // Sai do /admin pra raiz no logout
+    try {
+      const base = (import.meta.env?.BASE_URL || "/").replace(/\/$/, "") || "";
+      window.history.replaceState({}, "", base + "/");
+      setAdminRoute(false);
+    } catch {}
   };
 
   if (!user) {
@@ -93,19 +150,6 @@ function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, set
     return () => clearTimeout(x);
   }, [user?.name]);
 
-  useEffect(() => {
-    const onKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        const ids = MOCK.OPERATIONS.map((o) => o.id);
-        const cur = ids.indexOf(scope);
-        setScope(ids[(cur + 1) % ids.length]);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [scope]);
-
   const setTheme = (v) => setTweak("theme", v);
 
   return (
@@ -114,15 +158,10 @@ function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, set
 
       <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         <Topbar page={page} scope={scope} theme={t.theme} setTheme={setTheme}
-                user={user} onLogout={onLogout}
-                onCmd={() => {
-          const ids = MOCK.OPERATIONS.map((o) => o.id);
-          const cur = ids.indexOf(scope);
-          setScope(ids[(cur + 1) % ids.length]);
-        }} />
+                user={user} onLogout={onLogout} />
 
         <div key={`${page}-${scope}`} style={{ flex: 1, overflow: "auto", background: "var(--bg-0)", animation: "fadeUp 220ms ease both" }}>
-          {page === "dashboard" && <Dashboard scope={scope} setScope={setScope} setPage={setPage} />}
+          {page === "dashboard" && <Dashboard scope={scope} setPage={setPage} />}
           {page === "stock"     && <Stock scope={scope} />}
           {page === "recipes"   && <Recipes scope={scope} />}
           {page === "revenue"   && <Revenue scope={scope} />}

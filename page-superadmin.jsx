@@ -21,11 +21,65 @@ const SA_STATUS_META = {
 
 const _saFmtBRL = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 
+const SA_MRR_BY_PLAN = { trial: 0, starter: 189, pro: 489, enterprise: 989 };
+
+// Adapta a row do banco (snake_case + colunas que existem na tabela) pro
+// shape que os componentes legados esperam (camelCase + métricas derivadas).
+// Os campos não persistidos (mrr, revenue30d, cmvAvg, lastLogin, region…)
+// ficam vazios ou derivados — vão sumir do painel quando o usuário tiver
+// fontes reais (Stripe pra MRR, logs pra lastLogin, etc.).
+function _saMapTenantFromDb(row) {
+  return {
+    id:         row.id,
+    slug:       row.slug,
+    name:       row.name,
+    legalName:  row.legal_name || row.name,
+    cnpj:       row.cnpj || "",
+    region:     row.region || "—",
+    plan:       row.plan,
+    status:     row.status,
+    users:      row.usersCount ?? 0,
+    ops:        0,
+    mrr:        SA_MRR_BY_PLAN[row.plan] ?? 0,
+    revenue30d: 0,
+    createdAt:  row.created_at ? String(row.created_at).slice(0, 10) : "",
+    lastLogin:  row.updated_at || row.created_at || null,
+    health:     "ok",
+    cmvAvg:     0,
+    ownerName:  row.ownerName || null,
+    ownerUserId: row.ownerUserId || null,
+    trialEndsAt: row.trial_ends_at || null,
+  };
+}
+
 function SuperAdmin({ user, onLogout }) {
   const [tab, setTab] = useState("overview");
-  const [tenants, setTenants] = useState(MOCK.SYSTEM_TENANTS);
+  const dbStatus = useDbStatus ? useDbStatus() : { state: "checking", isOnline: false };
+  const [tenants, setTenants] = useState(() => dbStatus.isOnline ? [] : MOCK.SYSTEM_TENANTS);
+  const [loadingTenants, setLoadingTenants] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+
+  // Carrega tenants reais quando o DB sobe (e em todo refresh manual).
+  const reloadTenants = React.useCallback(async () => {
+    if (!isDbOnline || !isDbOnline()) return;
+    setLoadingTenants(true);
+    try {
+      const { data, error } = await dbListTenantsAdmin();
+      if (error) {
+        window.showToast?.("Falha ao listar tenants: " + error.message, { tone: "crit", ttl: 5000 });
+        return;
+      }
+      const mapped = (data || []).map(_saMapTenantFromDb);
+      setTenants(mapped);
+    } finally {
+      setLoadingTenants(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (dbStatus.isOnline) reloadTenants();
+  }, [dbStatus.isOnline, reloadTenants]);
 
   const totalMRR    = tenants.reduce((s, t) => s + (t.mrr || 0), 0);
   const activeCount = tenants.filter((t) => t.status === "active").length;
@@ -43,45 +97,113 @@ function SuperAdmin({ user, onLogout }) {
     return true;
   });
 
-  const setTenantStatus = (id, status) => {
+  const setTenantStatus = async (id, status) => {
+    if (dbStatus.isOnline) {
+      const { error } = await dbUpdateTenantAdmin(id, { status });
+      if (error) {
+        window.showToast?.("Falha ao atualizar status: " + error.message, { tone: "crit", ttl: 5000 });
+        return;
+      }
+    }
     setTenants((prev) => prev.map((t) => t.id === id ? { ...t, status } : t));
     window.showToast(`Tenant atualizado para "${SA_STATUS_META[status]?.label}"`, { tone: "ok" });
   };
 
-  const createTenant = (draft) => {
+  // Update inline de qualquer campo editável (usado pelo modal de edição).
+  const updateTenant = async (id, patch) => {
+    if (dbStatus.isOnline) {
+      const { data, error } = await dbUpdateTenantAdmin(id, patch);
+      if (error) {
+        window.showToast?.("Falha ao salvar: " + error.message, { tone: "crit", ttl: 5000 });
+        return { ok: false };
+      }
+      // Re-aplica via reload pra pegar updated_at fresco e campos derivados
+      setTenants((prev) => prev.map((t) => t.id === id ? {
+        ...t,
+        name: data.name, slug: data.slug,
+        legalName: data.legal_name || data.name,
+        cnpj: data.cnpj || "",
+        plan: data.plan, status: data.status,
+        mrr: SA_MRR_BY_PLAN[data.plan] ?? t.mrr,
+        trialEndsAt: data.trial_ends_at || null,
+      } : t));
+    } else {
+      setTenants((prev) => prev.map((t) => t.id === id ? { ...t, ...patch, legalName: patch.legal_name ?? t.legalName } : t));
+    }
+    window.showToast(`Tenant atualizado`, { tone: "ok" });
+    return { ok: true };
+  };
+
+  const deleteTenant = async (id) => {
+    if (dbStatus.isOnline) {
+      const { error } = await dbDeleteTenantAdmin(id);
+      if (error) {
+        window.showToast?.("Falha ao excluir: " + error.message, { tone: "crit", ttl: 5000 });
+        return { ok: false };
+      }
+    }
+    setTenants((prev) => prev.filter((t) => t.id !== id));
+    window.showToast(`Tenant excluído`, { tone: "ok" });
+    return { ok: true };
+  };
+
+  const createTenant = async (draft) => {
+    // Modo DB: chama edge function provision-tenant (cria tenant + owner + seeds)
+    if (dbStatus.isOnline) {
+      const { data, error } = await dbProvisionTenant({
+        name: draft.name,
+        slug: draft.slug,
+        plan: draft.plan,
+        ownerEmail: draft.ownerEmail,
+        ownerName: draft.ownerName,
+      });
+      if (error) {
+        window.showToast?.("Falha ao provisionar: " + error.message, { tone: "crit", ttl: 6000 });
+        return { ok: false };
+      }
+      // Aplica status/cnpj/legal_name extras se foram preenchidos
+      const extras = {};
+      if (draft.status && draft.status !== "trial") extras.status = draft.status;
+      if (draft.legalName) extras.legal_name = draft.legalName;
+      if (draft.cnpj) extras.cnpj = draft.cnpj;
+      if (Object.keys(extras).length > 0) {
+        await dbUpdateTenantAdmin(data.tenantId, extras);
+      }
+      await reloadTenants();
+      window.showToast(
+        `Tenant "${draft.name}" provisionado · convite enviado para ${draft.ownerEmail}`,
+        { tone: "ok", ttl: 5000 },
+      );
+      return { ok: true };
+    }
+
+    // Modo MOCK: comportamento legado in-memory
     const id = `ten-${Date.now().toString(36).slice(-6)}`;
-    const mrrByPlan = { trial: 0, starter: 189, pro: 489, enterprise: 989 };
     const newTenant = {
       id,
-      slug: draft.slug,
-      name: draft.name,
+      slug: draft.slug, name: draft.name,
       legalName: draft.legalName || draft.name,
       cnpj: draft.cnpj || "",
       region: draft.region || "—",
-      plan: draft.plan,
-      status: draft.status,
-      users: 1, // owner sempre cadastrado junto
-      ops: 0,
-      mrr: mrrByPlan[draft.plan] || 0,
+      plan: draft.plan, status: draft.status,
+      users: 1, ops: 0,
+      mrr: SA_MRR_BY_PLAN[draft.plan] || 0,
       revenue30d: 0,
       createdAt: new Date().toISOString().slice(0, 10),
       lastLogin: new Date().toISOString(),
-      health: "ok",
-      cmvAvg: 0,
+      health: "ok", cmvAvg: 0,
     };
     setTenants((prev) => {
       const next = [newTenant, ...prev];
-      MOCK.SYSTEM_TENANTS = next; // visível pro SaOverview e outros
+      MOCK.SYSTEM_TENANTS = next;
       return next;
     });
-    // Cadastra owner do tenant em SYSTEM_USERS se foi informado
     if (draft.ownerEmail && draft.ownerName) {
       const newUser = {
         email: draft.ownerEmail.trim().toLowerCase(),
         password: draft.ownerPassword || "trocar123",
         name: draft.ownerName.trim(),
-        role: "owner",
-        tenantId: id,
+        role: "owner", tenantId: id,
         avatar: draft.ownerName.trim().split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase(),
       };
       MOCK.SYSTEM_USERS = [...(MOCK.SYSTEM_USERS || []), newUser];
@@ -90,6 +212,7 @@ function SuperAdmin({ user, onLogout }) {
       `Tenant "${draft.name}" provisionado · plano ${SA_PLAN_META[draft.plan]?.label}${draft.ownerEmail ? ` · owner ${draft.ownerEmail}` : ""}`,
       { tone: "ok", ttl: 5000 },
     );
+    return { ok: true };
   };
 
   return (
@@ -157,6 +280,11 @@ function SuperAdmin({ user, onLogout }) {
             statusFilter={statusFilter} setStatusFilter={setStatusFilter}
             onSetStatus={setTenantStatus}
             onCreate={createTenant}
+            onUpdate={updateTenant}
+            onDelete={deleteTenant}
+            onReload={reloadTenants}
+            loading={loadingTenants}
+            dbOnline={dbStatus.isOnline}
           />
         )}
         {tab === "users" && <SaUsers />}
@@ -406,8 +534,39 @@ function SaMrrChart({ data }) {
 }
 
 // ===================== Tenants =====================
-function SaTenants({ tenants, allTenants, totalCount, search, setSearch, statusFilter, setStatusFilter, onSetStatus, onCreate }) {
+function SaTenants({
+  tenants, allTenants, totalCount, search, setSearch, statusFilter, setStatusFilter,
+  onSetStatus, onCreate, onUpdate, onDelete, onReload, loading, dbOnline,
+}) {
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing]   = useState(null); // tenant em edição
+  const [deleting, setDeleting] = useState(null); // tenant a confirmar exclusão
+  const [busy, setBusy]         = useState(false);
+
+  const submitCreate = async (draft) => {
+    setBusy(true);
+    try {
+      const res = await onCreate(draft);
+      if (res?.ok) setCreating(false);
+    } finally { setBusy(false); }
+  };
+  const submitEdit = async (patch) => {
+    if (!editing) return;
+    setBusy(true);
+    try {
+      const res = await onUpdate(editing.id, patch);
+      if (res?.ok) setEditing(null);
+    } finally { setBusy(false); }
+  };
+  const submitDelete = async () => {
+    if (!deleting) return;
+    setBusy(true);
+    try {
+      const res = await onDelete(deleting.id);
+      if (res?.ok) setDeleting(null);
+    } finally { setBusy(false); }
+  };
+
   return (
     <div style={{ padding: "16px 28px 32px", display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -422,8 +581,14 @@ function SaTenants({ tenants, allTenants, totalCount, search, setSearch, statusF
         </select>
         <span style={{ flex: 1 }} />
         <span className="mono" style={{ fontSize: 11, color: "var(--fg-2)" }}>
-          {tenants.length} de {totalCount}
+          {loading ? "carregando…" : `${tenants.length} de ${totalCount}`}
+          {!dbOnline && <span style={{ color: "var(--warn)", marginLeft: 6 }}>· DB offline (modo MOCK)</span>}
         </span>
+        {dbOnline && (
+          <button className="btn" data-size="sm" onClick={onReload} title="Recarregar lista do banco" disabled={loading}>
+            Atualizar
+          </button>
+        )}
         <button className="btn" data-variant="primary" data-size="sm" onClick={() => setCreating(true)}>
           <I.Plus size={11} />Novo tenant
         </button>
@@ -432,29 +597,52 @@ function SaTenants({ tenants, allTenants, totalCount, search, setSearch, statusF
       {creating && (
         <NewTenantModal
           existingSlugs={allTenants.map((t) => t.slug)}
+          dbOnline={dbOnline} busy={busy}
           onCancel={() => setCreating(false)}
-          onSave={(draft) => { onCreate(draft); setCreating(false); }}
+          onSave={submitCreate}
         />
       )}
+
+      {editing && (
+        <EditTenantModal
+          tenant={editing} existingSlugs={allTenants.map((t) => t.slug)}
+          busy={busy}
+          onCancel={() => setEditing(null)}
+          onSave={submitEdit}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!deleting}
+        title={deleting ? `Excluir tenant "${deleting.name}"?` : ""}
+        message={deleting ? (
+          <>Essa ação é <strong>irreversível</strong>. Todos os dados associados (operações, estoque, faturamento, fichas, etc.) serão excluídos em cascata. Usuários no <code>auth.users</code> não são removidos.</>
+        ) : ""}
+        confirmLabel="Excluir tenant"
+        tone="danger"
+        busy={busy}
+        onConfirm={submitDelete}
+        onCancel={() => setDeleting(null)}
+      />
 
       <div className="card" style={{ overflow: "hidden" }}>
         <table className="table">
           <thead>
             <tr>
               <th>Cliente</th>
-              <th>Região</th>
+              <th>Owner</th>
               <th>Plano</th>
               <th className="num">Usuários</th>
-              <th className="num">Operações</th>
-              <th className="num">MRR</th>
-              <th className="num">GMV 30d</th>
+              <th>Criado</th>
               <th>Status</th>
-              <th>Ações</th>
+              <th style={{ width: 1, whiteSpace: "nowrap" }}>Ações</th>
             </tr>
           </thead>
           <tbody>
             {tenants.length === 0 ? (
-              <tr><td colSpan={9} className="dim" style={{ textAlign: "center", padding: 32 }}>Nenhum tenant nesse filtro</td></tr>
+              <tr><td colSpan={7} className="dim" style={{ textAlign: "center", padding: 32 }}>
+                {loading ? "Carregando tenants…" : "Nenhum tenant nesse filtro"}
+              </td></tr>
             ) : tenants.map((t) => {
               const plan = SA_PLAN_META[t.plan];
               const status = SA_STATUS_META[t.status];
@@ -463,10 +651,12 @@ function SaTenants({ tenants, allTenants, totalCount, search, setSearch, statusF
                   <td>
                     <div className="row-strong">{t.name}</div>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", marginTop: 2 }}>
-                      {t.id} · {t.slug} · CNPJ {t.cnpj}
+                      {t.slug} · CNPJ {t.cnpj || "—"}
                     </div>
                   </td>
-                  <td className="dim" style={{ fontSize: 11.5 }}>{t.region}</td>
+                  <td className="dim" style={{ fontSize: 11.5 }}>
+                    {t.ownerName || <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)" }}>sem owner</span>}
+                  </td>
                   <td>
                     <span style={{
                       fontFamily: "var(--mono)", fontSize: 10, fontWeight: 500,
@@ -475,16 +665,14 @@ function SaTenants({ tenants, allTenants, totalCount, search, setSearch, statusF
                     }}>{plan?.label}</span>
                   </td>
                   <td className="num">{t.users}</td>
-                  <td className="num">{t.ops}</td>
-                  <td className="num"><span className="mono" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{_saFmtBRL(t.mrr)}</span></td>
-                  <td className="num">{_saFmtBRL(t.revenue30d)}</td>
+                  <td className="dim mono" style={{ fontSize: 10.5 }}>{t.createdAt || "—"}</td>
                   <td><span className="badge" data-tone={status?.tone}>{status?.label}</span></td>
                   <td>
                     <div style={{ display: "flex", gap: 4 }}>
                       <button className="btn" data-variant="ghost" data-size="sm"
-                              onClick={() => notImplemented(`Acessar painel de ${t.name}`)}
-                              title="Acessar como cliente (impersonate)">
-                        <I.Eye size={11} />
+                              onClick={() => setEditing(t)}
+                              title="Editar tenant">
+                        <I.Edit size={11} />
                       </button>
                       {t.status === "active" || t.status === "trial" ? (
                         <button className="btn" data-variant="ghost" data-size="sm"
@@ -499,6 +687,11 @@ function SaTenants({ tenants, allTenants, totalCount, search, setSearch, statusF
                           <I.Check size={11} />
                         </button>
                       )}
+                      <button className="btn" data-variant="ghost" data-size="sm"
+                              onClick={() => setDeleting(t)}
+                              style={{ color: "var(--crit)" }} title="Excluir tenant">
+                        <I.Trash size={11} />
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -609,7 +802,7 @@ function SaSystem() {
 //   3. Insere em public.tenant_members com role='owner'
 //   4. Provisiona métodos de pagamento padrão (já tem create_tenant_with_owner)
 //   5. Dispara email de boas-vindas (Resend) com link de acesso
-function NewTenantModal({ existingSlugs, onCancel, onSave }) {
+function NewTenantModal({ existingSlugs, onCancel, onSave, busy = false, dbOnline = false }) {
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [legalName, setLegalName] = useState("");
@@ -617,7 +810,7 @@ function NewTenantModal({ existingSlugs, onCancel, onSave }) {
   const [region, setRegion] = useState("");
   const [plan, setPlan] = useState("trial");
   const [status, setStatus] = useState("trial");
-  const [withOwner, setWithOwner] = useState(true);
+  const [withOwner, setWithOwner] = useState(true); // sempre true em DB mode (edge function exige owner)
   const [ownerName, setOwnerName] = useState("");
   const [ownerEmail, setOwnerEmail] = useState("");
   const [ownerPwd, setOwnerPwd] = useState("");
@@ -671,9 +864,9 @@ function NewTenantModal({ existingSlugs, onCancel, onSave }) {
       onClose={onCancel}
       width={680}
       footer={<>
-        <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid} onClick={submit}>
-          <I.Plus size={11} />Provisionar tenant
+        <button className="btn" data-size="sm" onClick={onCancel} disabled={busy}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || busy} onClick={submit}>
+          <I.Plus size={11} />{busy ? "Provisionando…" : "Provisionar tenant"}
         </button>
       </>}
     >
@@ -767,38 +960,158 @@ function NewTenantModal({ existingSlugs, onCancel, onSave }) {
         padding: "12px 14px", background: "var(--bg-2)",
         border: "1px solid var(--line)", borderRadius: 4, marginBottom: 14,
       }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--fg-1)", cursor: "pointer", marginBottom: withOwner ? 12 : 0 }}>
-          <input type="checkbox" checked={withOwner} onChange={(e) => setWithOwner(e.target.checked)} />
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--fg-1)", cursor: dbOnline ? "default" : "pointer", marginBottom: withOwner ? 12 : 0 }}>
+          <input type="checkbox" checked={withOwner} disabled={dbOnline}
+                 onChange={(e) => setWithOwner(e.target.checked)} />
           <strong style={{ color: "var(--fg-0)" }}>Cadastrar usuário owner junto</strong>
-          <span style={{ color: "var(--fg-3)", fontSize: 11.5 }}>· cria login pra esse tenant</span>
+          <span style={{ color: "var(--fg-3)", fontSize: 11.5 }}>· {dbOnline ? "obrigatório em modo DB" : "cria login pra esse tenant"}</span>
         </label>
         {withOwner && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 140px", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: dbOnline ? "1fr 1fr" : "1fr 1fr 140px", gap: 12 }}>
             <FormRow label="Nome do owner">
               <input className="input" value={ownerName} onChange={(e) => setOwnerName(e.target.value)}
                      placeholder="Ex.: João Silva" />
             </FormRow>
-            <FormRow label="Email do owner">
+            <FormRow label="Email do owner" hint={dbOnline ? "Convite Supabase será enviado nesse email" : null}>
               <input className="input" type="email" value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)}
                      placeholder="joao@cliente.com.br"
                      style={{
                        borderColor: ownerEmail && !ownerEmailValid ? "var(--crit)" : null,
                      }} />
             </FormRow>
-            <FormRow label="Senha inicial" hint="default: trocar123">
-              <input className="input mono" type="text" value={ownerPwd} onChange={(e) => setOwnerPwd(e.target.value)}
-                     placeholder="trocar123" />
-            </FormRow>
+            {!dbOnline && (
+              <FormRow label="Senha inicial" hint="default: trocar123">
+                <input className="input mono" type="text" value={ownerPwd} onChange={(e) => setOwnerPwd(e.target.value)}
+                       placeholder="trocar123" />
+              </FormRow>
+            )}
           </div>
         )}
-        <div style={{ marginTop: 10 }}>
-          <PendingFeature variant="inline" label="email de boas-vindas"
-            hint="Disparar email pro owner com link mágico de primeiro acesso. Pendente — depende de Edge Function + Resend." />
+      </div>
+
+      {!dbOnline && (
+        <PendingFeature variant="block" label="DB offline · modo MOCK"
+          hint="O tenant será criado só na memória local. Conecte o Supabase pra provisionar de verdade via Edge Function `provision-tenant`." />
+      )}
+    </Modal>
+  );
+}
+
+// ===================== Modal · Editar tenant existente =====================
+// Edita campos persistidos em public.tenants (name, slug, legal_name, cnpj, plan,
+// status, trial_ends_at). Owner/usuários têm gestão separada — aqui só os dados
+// do próprio tenant.
+function EditTenantModal({ tenant, existingSlugs, onCancel, onSave, busy = false }) {
+  const [name, setName]           = useState(tenant.name || "");
+  const [slug, setSlug]           = useState(tenant.slug || "");
+  const [legalName, setLegalName] = useState(tenant.legalName || "");
+  const [cnpj, setCnpj]           = useState(tenant.cnpj || "");
+  const [plan, setPlan]           = useState(tenant.plan || "trial");
+  const [status, setStatus]       = useState(tenant.status || "active");
+  const [trialEndsAt, setTrialEndsAt] = useState(
+    tenant.trialEndsAt ? String(tenant.trialEndsAt).slice(0, 10) : ""
+  );
+
+  const otherSlugs = (existingSlugs || []).filter((s) => s !== tenant.slug);
+  const slugTaken   = slug && otherSlugs.includes(slug);
+  const slugInvalid = slug && !/^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])?$/.test(slug);
+  const valid = name.trim() && slug && !slugTaken && !slugInvalid;
+
+  const submit = () => {
+    onSave({
+      name: name.trim(),
+      slug: slug.trim(),
+      legal_name: legalName.trim() || null,
+      cnpj: cnpj.trim() || null,
+      plan, status,
+      trial_ends_at: trialEndsAt || null,
+    });
+  };
+
+  return (
+    <Modal
+      title={`Editar tenant · ${tenant.name}`}
+      subtitle="Altera dados do cadastro. Owner e membros têm gestão separada."
+      onClose={onCancel}
+      width={620}
+      footer={<>
+        <button className="btn" data-size="sm" onClick={onCancel} disabled={busy}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || busy} onClick={submit}>
+          {busy ? "Salvando…" : "Salvar alterações"}
+        </button>
+      </>}
+    >
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+        <FormRow label="Nome do cliente">
+          <input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+        </FormRow>
+        <FormRow label="Slug · URL única"
+                 hint={slugTaken ? "Já existe outro tenant com esse slug" : slugInvalid ? "Use só letras minúsculas, números e hífen" : null}>
+          <input className="input mono" value={slug} onChange={(e) => setSlug(e.target.value)}
+                 style={{
+                   borderColor: slugTaken || slugInvalid ? "var(--crit)" : null,
+                   color:       slugTaken || slugInvalid ? "var(--crit)" : null,
+                 }} />
+        </FormRow>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12, marginBottom: 14 }}>
+        <FormRow label="Razão social" hint="opcional">
+          <input className="input" value={legalName} onChange={(e) => setLegalName(e.target.value)} />
+        </FormRow>
+        <FormRow label="CNPJ" hint="opcional">
+          <input className="input mono" value={cnpj} onChange={(e) => setCnpj(e.target.value)} />
+        </FormRow>
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <div className="h-eyebrow" style={{ marginBottom: 8 }}>Plano de assinatura</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+          {[
+            { id: "trial",      label: "Trial",      desc: "14 dias grátis",   price: "R$ 0" },
+            { id: "starter",    label: "Starter",    desc: "1-2 operações",    price: "R$ 189/mês" },
+            { id: "pro",        label: "Pro",        desc: "Até 6 operações",  price: "R$ 489/mês" },
+            { id: "enterprise", label: "Enterprise", desc: "Customizado",      price: "R$ 989/mês" },
+          ].map((p) => {
+            const active = plan === p.id;
+            const c = SA_PLAN_META[p.id];
+            return (
+              <button key={p.id} type="button" onClick={() => setPlan(p.id)} style={{
+                padding: "10px 12px", textAlign: "left", borderRadius: 4, cursor: "pointer",
+                background: active ? "var(--bg-3)" : "var(--bg-2)",
+                border: `1px solid ${active ? c.color : "var(--line)"}`,
+                color: "var(--fg-0)",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: 50, background: c.color }} />
+                  <span style={{ fontSize: 12, fontWeight: 500 }}>{p.label}</span>
+                </div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.04em", marginBottom: 4 }}>
+                  {p.desc}
+                </div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: c.color, fontWeight: 500 }}>
+                  {p.price}
+                </div>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      <PendingFeature variant="block" label="Provisionamento real (Edge Function)"
-        hint="Em produção, criar Edge Function que: insere em public.tenants, cria auth.users do owner, vincula como member com role='owner', dispara email de boas-vindas e popula seeds (categorias DRE, alertas padrão, métodos de pagamento)." />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 4 }}>
+        <FormRow label="Status">
+          <select className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="active">Ativo</option>
+            <option value="trial">Trial</option>
+            <option value="suspended">Suspenso</option>
+            <option value="canceled">Cancelado</option>
+          </select>
+        </FormRow>
+        <FormRow label="Fim do trial" hint="opcional · só se aplicar">
+          <input className="input mono" type="date" value={trialEndsAt}
+                 onChange={(e) => setTrialEndsAt(e.target.value)} />
+        </FormRow>
+      </div>
     </Modal>
   );
 }

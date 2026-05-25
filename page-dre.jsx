@@ -1107,8 +1107,20 @@ function YearComparisonCard({ year, yearsAvailable, onYearChange, yearData, load
   const aboveLB = sortedCats.filter((c) => ["revenue", "deduction", "cogs"].includes(c.kind));
   const belowLB = sortedCats.filter((c) => ["expense", "financial"].includes(c.kind));
 
+  // Só meses oficialmente fechados exibem valores no comparativo —
+  // dados parciais (checklist incompleto) ficam ocultos.
+  const dataByPeriod = useMemo(() => {
+    const out = {};
+    months.forEach((period) => {
+      if (isPeriodClosed(closedPeriods, period) && yearData[period]) {
+        out[period] = yearData[period];
+      }
+    });
+    return out;
+  }, [months, yearData, closedPeriods]);
+
   const sumMonth = (period, fn) => {
-    const s = yearData[period];
+    const s = dataByPeriod[period];
     if (!s) return 0;
     return fn(s);
   };
@@ -1119,7 +1131,7 @@ function YearComparisonCard({ year, yearsAvailable, onYearChange, yearData, load
     const isCollapsed = !!collapsed[cat.id];
     const isRevenue = cat.kind === "revenue";
     const sign = isRevenue ? "+" : "−";
-    const getCatTotal = (period) => yearData[period]?.byCat?.[cat.id]?.total || 0;
+    const getCatTotal = (period) => dataByPeriod[period]?.byCat?.[cat.id]?.total || 0;
     const catYearTotal = months.reduce((acc, p) => acc + getCatTotal(p), 0);
 
     return (
@@ -1152,7 +1164,7 @@ function YearComparisonCard({ year, yearsAvailable, onYearChange, yearData, load
         </tr>
 
         {!isCollapsed && subs.map((sub) => {
-          const getSubTotal = (period) => yearData[period]?.byCat?.[cat.id]?.bySub?.[sub.id] || 0;
+          const getSubTotal = (period) => dataByPeriod[period]?.byCat?.[cat.id]?.bySub?.[sub.id] || 0;
           const subYearTotal = months.reduce((acc, p) => acc + getSubTotal(p), 0);
           const hasAnyValue = months.some((p) => Math.abs(getSubTotal(p)) > 0.001) || Math.abs(subYearTotal) > 0.001 || sub.autofeed;
           if (!hasAnyValue) return null;
@@ -1224,7 +1236,7 @@ function YearComparisonCard({ year, yearsAvailable, onYearChange, yearData, load
         <div>
           <h3 className="card-title">Comparativo anual da DRE · {year}</h3>
           <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
-            Todos os meses lado a lado · clique numa categoria para recolher/expandir suas subcategorias · meses fechados destacados em verde
+            Apenas meses formalmente fechados exibem valores · meses em aberto aparecem como "—" para evitar comparação com dados parciais · clique numa categoria para recolher/expandir
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1671,3 +1683,5 @@ function NewSubcategoryRow({ categoryId, onCancel, onSave }) {
 }
 
 window.Dre = Dre;
+// DreStat é usado também pelo Checklist de fechamento do Financeiro (page-finance.jsx).
+window.DreStat = DreStat;
