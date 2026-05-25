@@ -1,18 +1,19 @@
-// Finance — Lançamentos, DRE editável (2 níveis), Checklist de fechamento.
+// Financeiro — fluxo de caixa: Lançamentos (CRUD de despesas) + Checklist de
+// fechamento (obrigações recorrentes que precisam virar lançamento p/ o mês fechar).
 //
-// Hierarquia da DRE:
-//   Categoria (CMV, Pessoal, Marketing…)
-//     └── Subcategoria (Compras hortifruti, Compras carnes, Ajuste de estoque, …)
-//          └── Lançamento (entries)
+// A visão contábil (DRE estruturada, validação de fechamento, comparativo anual)
+// vive no módulo separado **DRE & Fechamento** em page-dre.jsx, que reaproveita
+// vários helpers daqui via globais (window.fmt, window.findCategory, window.EntryDraft, …).
 //
-// Auto-feeds:
-//   * Receita bruta  ← REVENUE_ENTRIES (módulo Faturamento)
-//   * Ajuste estoque ← INVENTORIES finalizados no período (financialImpact com sinal invertido:
-//     perda no inventário aumenta o CMV; sobra reduz)
+// Hierarquia usada nos lançamentos:
+//   Categoria DRE (CMV, Pessoal, Marketing…)
+//     └── Subcategoria (Compras hortifruti, Folha cozinha, Aluguel, …)
+//          └── Lançamento (entries) ← CRUD aqui no Financeiro
 //
 // Categorias e subcategorias com `locked: true` não podem ser excluídas (essenciais).
 // Subcategorias com `autofeed` recebem dados automaticamente — o usuário não cria
-// lançamentos manuais nelas.
+// lançamentos manuais nelas. Receita bruta vem de REVENUE_ENTRIES (Faturamento) e
+// é renderizada na DRE.
 
 const fmt = (v) => "R$ " + (v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtShort = (v) => "R$ " + (v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -44,43 +45,11 @@ function getChecklistUrgency(item, period) {
   return { level: "none", daysLeft };
 }
 
-// Paleta default p/ cores de subcategorias novas
+// Paleta default p/ cores de subcategorias novas — exposta via window p/ o módulo DRE
 const DRE_SUB_COLORS = [
   "#2d8c66", "#b04545", "#c2843a", "#3d6cb0",
   "#6b5fb0", "#8a9098", "#0e7c97", "#a36c2a",
 ];
-
-// Calcula ajustes automáticos de estoque a partir dos inventários finalizados.
-// Retorna entries sintéticos (não persistidos) p/ entrar no cálculo da DRE.
-//
-// Convenção: financialImpact negativo = perda → aumenta CMV → entra POSITIVO.
-//            financialImpact positivo = sobra → reduz CMV → entra NEGATIVO.
-// Em ambos os casos a magnitude é a mesma; o sinal é invertido pra exibir como despesa.
-function buildStockAdjustEntries(period) {
-  // Não gera ajustes automáticos quando DB online (usa apenas inventários reais)
-  if (typeof isDbOnline === "function" && isDbOnline()) return [];
-  const list = MOCK.INVENTORIES || [];
-  const out = [];
-  list.forEach((inv) => {
-    if (inv.status !== "finalized") return;
-    if (monthOf(inv.finished_at) !== period) return;
-    const counted = (inv.items || []).filter((it) => it.counted != null);
-    if (counted.length === 0) return;
-    const impact = counted.reduce((s, it) => s + ((it.counted - it.expected) * (it.cost || 0)), 0);
-    if (Math.abs(impact) < 0.01) return;
-    out.push({
-      id:    `AUTO-INV-${inv.id}`,
-      cat:   "cat-29", // subcategoria "Ajuste de estoque"
-      desc:  `Inventário ${inv.id} · ${inv.responsible || "—"}`,
-      value: -impact, // perda (negativo) vira despesa positiva no CMV
-      comp:  inv.finished_at ? inv.finished_at.slice(0, 10) : null,
-      paid:  inv.finished_at ? inv.finished_at.slice(0, 10) : null,
-      status: "auto",
-      auto:  "stock-adjust",
-    });
-  });
-  return out;
-}
 
 function Finance() {
   const [tab, setTab] = useState("entries");
@@ -89,16 +58,13 @@ function Finance() {
   const [categories,    setCategories]    = useState(MOCK.DRE_CATEGORIES);
   const [subcategories, setSubcategories] = useState(MOCK.DRE_SUBCATEGORIES);
   const [checklist, setChecklist] = useState(MOCK.CLOSING_CHECKLIST);
-  const [stockSnapshot, setStockSnapshot] = useState({ initial: 0, final: 0, initialAt: null, finalAt: null });
   const [draftOpen, setDraftOpen] = useState(false);
   const [editingEntry, setEditingEntry] = useState(null);
   const [confirmDeleteEntry, setConfirmDeleteEntry] = useState(null);
-  const [viewingSub, setViewingSub] = useState(null); // { sub } — abre modal com lançamentos da subcategoria
   const [fillItem, setFillItem] = useState(null);
   const [addingChecklist, setAddingChecklist] = useState(false);
   const [editingChecklistItem, setEditingChecklistItem] = useState(null);
   const [confirmDeleteChecklist, setConfirmDeleteChecklist] = useState(null);
-  const [showStructure, setShowStructure] = useState(false);
 
   // DB state
   const dbStatus = useDbStatus?.() || { isOnline: false, state: "offline" };
@@ -106,7 +72,8 @@ function Finance() {
   const [source, setSource] = useState("mock");
   const [pageLoading, setPageLoading] = useState(true);
 
-  // Load from DB when period changes
+  // Load from DB when period changes — só o necessário pra Lançamentos + Checklist.
+  // DRE/Fechamento moram em page-dre.jsx e fazem fetch próprio (revenue, snapshots, closedPeriods).
   useEffect(() => {
     if (dbStatus.state === "checking") return;
     if (!dbStatus.isOnline) { setPageLoading(false); return; }
@@ -117,19 +84,18 @@ function Finance() {
         const tid = ctx?.tenant?.id;
         if (cancelled || !tid) return;
         setTenantId(tid);
-        const [catsRes, subsRes, entriesRes, checkRes, snapRes] = await Promise.all([
+
+        const [catsRes, subsRes, entriesRes, checkRes] = await Promise.all([
           dbListDreCategories?.(tid) || { data: null },
           dbListDreSubcategories?.(tid) || { data: null },
           dbListFinanceEntries?.(tid, period) || { data: null },
           dbListClosingChecklist?.(tid, period) || { data: null },
-          dbGetStockValueSnapshots?.(tid, period) || { data: null },
         ]);
         if (cancelled) return;
         if (catsRes.data) { setCategories(catsRes.data); setSource("db"); }
         if (subsRes.data) setSubcategories(subsRes.data);
         if (entriesRes.data) setEntries(entriesRes.data);
         if (checkRes.data) setChecklist(checkRes.data);
-        if (snapRes.data) setStockSnapshot(snapRes.data);
       } finally {
         if (!cancelled) setPageLoading(false);
       }
@@ -137,12 +103,9 @@ function Finance() {
     return () => { cancelled = true; };
   }, [dbStatus.state, dbStatus.isOnline, period]);
 
-  // Auto-feed do Ajuste de estoque · entries sintéticos vindos de inventários
-  const autoEntries = useMemo(() => buildStockAdjustEntries(period), [period]);
-  const allEntries  = useMemo(() => [...entries, ...autoEntries], [entries, autoEntries]);
-  const inPeriod    = useMemo(() =>
-    allEntries.filter((e) => monthOf(e.comp) === period),
-  [allEntries, period]);
+  const inPeriod = useMemo(() =>
+    entries.filter((e) => monthOf(e.comp) === period),
+  [entries, period]);
 
   // Status do checklist é DERIVADO por competência: cada item-template é
   // re-avaliado com base nos lançamentos do período (linkados via checklistItemId).
@@ -250,68 +213,6 @@ function Finance() {
     setFillItem(null);
   };
 
-  // ===== CRUD da estrutura =====
-  const createCategory = (data) => {
-    const slug = String(data.name || "")
-      .toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
-      .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-    const id = `usr-${slug}-${Date.now().toString(36).slice(-4)}`;
-    const order = categories.length > 0 ? Math.max(...categories.map((c) => c.order)) + 1 : 1;
-    setCategories([...categories, { id, name: data.name.trim(), kind: data.kind, order, locked: false }]);
-    window.showToast(`Categoria "${data.name}" criada`, { tone: "ok" });
-  };
-  const renameCategory = (id, newName) => {
-    setCategories(categories.map((c) => c.id === id ? { ...c, name: newName.trim() } : c));
-  };
-  const deleteCategory = (id) => {
-    const cat = categories.find((c) => c.id === id);
-    if (!cat || cat.locked) return;
-    const subsCount = subcategories.filter((s) => s.category === id).length;
-    if (subsCount > 0) {
-      window.showToast(`Mova as ${subsCount} subcategoria(s) antes de excluir`, { tone: "warn", ttl: 4500 });
-      return;
-    }
-    setCategories(categories.filter((c) => c.id !== id));
-    window.showToast(`Categoria "${cat.name}" excluída`, { tone: "warn" });
-  };
-  const moveCategory = (id, dir) => {
-    const idx = categories.findIndex((c) => c.id === id);
-    if (idx < 0) return;
-    const target = dir === "up" ? idx - 1 : idx + 1;
-    if (target < 0 || target >= categories.length) return;
-    const next = [...categories];
-    [next[idx], next[target]] = [next[target], next[idx]];
-    next.forEach((c, i) => c.order = i + 1);
-    setCategories(next);
-  };
-
-  const createSubcategory = (data) => {
-    const slug = String(data.name || "")
-      .toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
-      .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-    const id = `usr-sub-${slug}-${Date.now().toString(36).slice(-4)}`;
-    const color = data.color || DRE_SUB_COLORS[(subcategories.length) % DRE_SUB_COLORS.length];
-    setSubcategories([...subcategories, { id, name: data.name.trim(), category: data.category, color, locked: false }]);
-    window.showToast(`Subcategoria "${data.name}" criada`, { tone: "ok" });
-  };
-  const renameSubcategory = (id, newName) => {
-    setSubcategories(subcategories.map((s) => s.id === id ? { ...s, name: newName.trim() } : s));
-  };
-  const recolorSubcategory = (id, color) => {
-    setSubcategories(subcategories.map((s) => s.id === id ? { ...s, color } : s));
-  };
-  const deleteSubcategory = (id) => {
-    const sub = subcategories.find((s) => s.id === id);
-    if (!sub || sub.locked) return;
-    const usage = entries.filter((e) => e.cat === id).length;
-    if (usage > 0) {
-      window.showToast(`Há ${usage} lançamento(s) nessa subcategoria · migre antes`, { tone: "warn", ttl: 4500 });
-      return;
-    }
-    setSubcategories(subcategories.filter((s) => s.id !== id));
-    window.showToast(`Subcategoria "${sub.name}" excluída`, { tone: "warn" });
-  };
-
   if (pageLoading) return <PageLoading label="Carregando financeiro…" variant="table" />;
 
   return (
@@ -319,7 +220,7 @@ function Finance() {
       <div style={{ padding: "20px 28px 0" }}>
         <div className="h-eyebrow" style={{ marginBottom: 6 }}>Competência · {MOCK.STOCK_BALANCE.monthLabel}</div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 16 }}>
-          <h1 className="h-title">Financeiro &amp; DRE</h1>
+          <h1 className="h-title">Financeiro</h1>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <select className="select" value={period} onChange={(e) => setPeriod(e.target.value)}>
               <option value="2026-04">Abril / 2026</option>
@@ -338,14 +239,6 @@ function Finance() {
               {source === "db" ? "Supabase" : "Mock"}
             </span>
             {tab === "entries"   && <button className="btn" data-variant="primary" data-size="sm" onClick={() => setDraftOpen(true)}><I.Plus size={13} />Novo lançamento</button>}
-            {tab === "dre"       && (
-              <>
-                <button className="btn" data-size="sm" onClick={() => setShowStructure(true)}>
-                  <I.Edit size={13} />Editar estrutura
-                </button>
-                <button className="btn" data-size="sm" onClick={() => notImplemented("Exportar DRE em PDF")}>Exportar DRE</button>
-              </>
-            )}
             {tab === "checklist" && <button className="btn" data-variant="primary" data-size="sm" onClick={() => setAddingChecklist(true)}><I.Plus size={13} />Adicionar item</button>}
           </div>
         </div>
@@ -354,7 +247,6 @@ function Finance() {
 
       <div style={{ flex: 1, overflow: "auto" }}>
         {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} onEdit={setEditingEntry} onDelete={setConfirmDeleteEntry} />}
-        {tab === "dre"       && <DREView entries={inPeriod} categories={categories} subcategories={subcategories} period={period} stockSnapshot={stockSnapshot} onViewSub={setViewingSub} />}
         {tab === "checklist" && <ChecklistView checklist={checklistForPeriod} categories={categories} subcategories={subcategories} onFill={setFillItem} onEdit={setEditingChecklistItem} onDelete={setConfirmDeleteChecklist} period={period} />}
       </div>
 
@@ -368,18 +260,6 @@ function Finance() {
           onClose={() => setEditingEntry(null)}
           onSave={(draft) => updateEntry(editingEntry.id, draft)}
           onDelete={() => setConfirmDeleteEntry(editingEntry)}
-        />
-      )}
-      {viewingSub && (
-        <SubEntriesModal
-          sub={viewingSub}
-          categories={categories}
-          subcategories={subcategories}
-          entries={inPeriod}
-          period={period}
-          onClose={() => setViewingSub(null)}
-          onEdit={(entry) => { setViewingSub(null); setEditingEntry(entry); }}
-          onDelete={(entry) => setConfirmDeleteEntry(entry)}
         />
       )}
       {confirmDeleteEntry && (
@@ -486,18 +366,6 @@ function Finance() {
             setConfirmDeleteChecklist(null);
             setEditingChecklistItem(null);
             window.showToast("Item excluído", { tone: "warn" });
-          }}
-        />
-      )}
-      {showStructure && (
-        <CategoryStructureModal
-          categories={categories}
-          subcategories={subcategories}
-          entries={entries}
-          onClose={() => setShowStructure(false)}
-          handlers={{
-            createCategory, renameCategory, deleteCategory, moveCategory,
-            createSubcategory, renameSubcategory, recolorSubcategory, deleteSubcategory,
           }}
         />
       )}
@@ -621,7 +489,6 @@ function FinanceTabs({ tab, setTab, checklist, period }) {
     : { background: "rgba(194,132,58,0.14)", color: "var(--warn)", border: "1px solid rgba(194,132,58,0.3)" };
   const tabs = [
     { id: "entries",   label: "Lançamentos" },
-    { id: "dre",       label: "DRE" },
     { id: "checklist", label: "Checklist de fechamento", count },
   ];
   return (
@@ -736,275 +603,6 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
   );
 }
 
-// ---------- DRE ----------
-function DREView({ entries, categories, subcategories, period, stockSnapshot = { initial: 0, final: 0 }, onViewSub }) {
-  // Agrega valores por categoria/subcategoria
-  const byCat = {};
-  categories.forEach((c) => { byCat[c.id] = { total: 0, bySub: {} }; });
-  entries.forEach((e) => {
-    const sub = findSubcategory(subcategories, e.cat);
-    if (!sub) return;
-    if (!byCat[sub.category]) return;
-    // Receita auto-feed via REVENUE_ENTRIES — pulamos aqui pra evitar duplicação
-    const cat = findCategory(categories, sub.category);
-    if (cat?.kind === "revenue") return;
-    byCat[sub.category].total += e.value;
-    byCat[sub.category].bySub[sub.id] = (byCat[sub.category].bySub[sub.id] || 0) + e.value;
-  });
-
-  // Garante que subcategorias autofeed sempre apareçam, mesmo sem dados no período.
-  // Sinaliza ao usuário que a integração existe e está zerada agora.
-  subcategories.forEach((sub) => {
-    if (!sub.autofeed) return;
-    if (!byCat[sub.category]) return;
-    if (!(sub.id in byCat[sub.category].bySub)) {
-      byCat[sub.category].bySub[sub.id] = 0;
-    }
-  });
-
-  // Receita bruta vem automaticamente de REVENUE_ENTRIES
-  const revBySub = {};
-  MOCK.REVENUE_ENTRIES.forEach((e) => {
-    if (monthOf(e.date) !== period) return;
-    const subId = e.source === "ifood" ? "cat-01" : e.source === "rappi" ? "cat-02" : "cat-03";
-    revBySub[subId] = (revBySub[subId] || 0) + e.revenue;
-  });
-  const revenueTotal = Object.values(revBySub).reduce((s, v) => s + v, 0);
-  byCat.receita = { total: revenueTotal, bySub: revBySub };
-
-  // Cálculo da DRE
-  const sumByKind = (kinds) => categories
-    .filter((c) => kinds.includes(c.kind))
-    .reduce((s, c) => s + (byCat[c.id]?.total || 0), 0);
-
-  const receita    = byCat.receita?.total || 0;
-  const deducoes   = sumByKind(["deduction"]);
-  const receitaLiq = receita - deducoes;
-  const cogs       = sumByKind(["cogs"]);
-  const lucroBruto = receitaLiq - cogs;
-  const opex       = sumByKind(["expense", "financial"]);
-  const lucroLiq   = lucroBruto - opex;
-
-  const pct = (v) => receita > 0 ? ((v / receita) * 100).toFixed(1) + "%" : "—";
-
-  // CMV real (método contábil) — usa snapshots do cron diário (EI = início do mês, EF = saldo atual/fim)
-  // Fallback: MOCK (modo offline)
-  const dbOn = typeof isDbOnline === "function" && isDbOnline();
-  const ei = dbOn ? (stockSnapshot.initial || 0) : (MOCK.STOCK_BALANCE?.initial?.value || 0);
-  // EF só entra na equação se houver EI registrado (evita distorcer mês sem snapshot inicial)
-  const ef = ei > 0
-    ? (dbOn ? (stockSnapshot.final || 0) : (MOCK.STOCK_BALANCE?.final?.value || 0))
-    : 0;
-  // Compras = soma das subcategorias do grupo CMV (lançamentos manuais)
-  // CMV real (contábil) = Estoque Inicial + Compras − Estoque Final
-  const cmvCatIds = categories
-    .filter((c) => c.kind === "cogs" || c.groupSlug === "cmv" || c.id === "cmv")
-    .map((c) => c.id);
-  const comprasTotal = subcategories
-    .filter((s) => cmvCatIds.includes(s.category) && !s.autofeed)
-    .reduce((acc, sub) => {
-      const catBucket = cmvCatIds.map((cid) => byCat[cid]).find(Boolean);
-      return acc + ((catBucket?.bySub?.[sub.id]) || 0);
-    }, 0);
-  const cmvReal = ei + comprasTotal - ef;
-
-  // Ordena categorias por order (e separa por "side" da DRE)
-  const sorted = [...categories].sort((a, b) => a.order - b.order);
-  const aboveLucroBruto  = sorted.filter((c) => ["revenue", "deduction", "cogs"].includes(c.kind));
-  const belowLucroBruto  = sorted.filter((c) => ["expense", "financial"].includes(c.kind));
-
-  return (
-    <div style={{ padding: "20px 28px 32px", display: "flex", flexDirection: "column", gap: 16 }} className="stagger">
-      <div className="card" style={{ borderColor: "var(--accent-line)", background: "linear-gradient(180deg, rgba(45,140,102,0.05), transparent 70%)" }}>
-        <div className="card-body" style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 1fr 1fr", gap: 20, alignItems: "center" }}>
-          <div>
-            <div className="h-eyebrow" style={{ marginBottom: 6 }}>CMV Real · método contábil</div>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 13, color: "var(--fg-1)", letterSpacing: "-0.005em" }}>
-              {ei > 0
-                ? <>Estoque inicial <span style={{ color: "var(--fg-3)" }}>+</span> Compras <span style={{ color: "var(--fg-3)" }}>−</span> Estoque final</>
-                : <>Compras <span style={{ color: "var(--fg-3)" }}>(sem inventário inicial)</span></>}
-            </div>
-          </div>
-          <DreStat label={`EI${stockSnapshot.initialAt ? ` · ${fmtDate(stockSnapshot.initialAt)}` : ""}`} value={fmt(ei)} />
-          <DreStat label="(+) Compras" value={fmt(comprasTotal)} />
-          {ei > 0 && (
-            <DreStat label={`EF${stockSnapshot.finalAt ? ` · ${fmtDate(stockSnapshot.finalAt)}` : ""}`} value={fmt(ef)} />
-          )}
-          <DreStat label="= CMV real" value={fmt(cmvReal)} accent sub={receita ? `${((cmvReal / receita) * 100).toFixed(1)}% da receita` : ""} />
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="card-header">
-          <div>
-            <h3 className="card-title">DRE · {period.replace("-", "/")}</h3>
-            <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Por data de competência · {entries.length} lançamentos · estrutura editável</span>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <span className="badge" data-tone="ok">Receita {fmt(receita)}</span>
-            <span className="badge" data-tone={lucroLiq > 0 ? "ok" : "crit"}>Lucro líq. {fmt(lucroLiq)}</span>
-          </div>
-        </div>
-        <table className="table">
-          <thead>
-            <tr>
-              <th style={{ width: "44%" }}>Conta</th>
-              <th className="num">Valor</th>
-              <th className="num">% receita</th>
-              <th>Composição</th>
-            </tr>
-          </thead>
-          <tbody>
-            {/* Linhas acima do lucro bruto */}
-            {aboveLucroBruto.map((c) => {
-              const sign = c.kind === "revenue" ? "+" : "−";
-              const note = c.kind === "revenue"
-                ? "vem de Faturamento"
-                : c.id === "cmv"
-                  ? "compras + ajuste de estoque automático"
-                  : null;
-              return (
-                <DreRow key={c.id}
-                  label={`${sign === "−" ? "(−) " : ""}${c.name}`}
-                  value={byCat[c.id]?.total || 0}
-                  pct={pct(byCat[c.id]?.total || 0)}
-                  sign={sign}
-                  strong={c.kind === "revenue"}
-                  byCat={byCat[c.id]?.bySub || {}}
-                  subcategories={subcategories}
-                  note={note}
-                  onViewSub={c.kind === "revenue" ? null : onViewSub}
-                />
-              );
-            })}
-            <DreSub label="= Receita líquida" value={receitaLiq} pct={pct(receitaLiq)} />
-            <DreSub label="= Lucro bruto" value={lucroBruto} pct={pct(lucroBruto)} tone={lucroBruto > 0 ? "ok" : "crit"} />
-
-            {/* Linhas abaixo do lucro bruto */}
-            {belowLucroBruto.map((c) => (
-              <DreRow key={c.id}
-                label={`(−) ${c.name}`}
-                value={byCat[c.id]?.total || 0}
-                pct={pct(byCat[c.id]?.total || 0)}
-                sign="−"
-                byCat={byCat[c.id]?.bySub || {}}
-                subcategories={subcategories}
-                onViewSub={onViewSub}
-              />
-            ))}
-
-            <DreSub label="= Lucro líquido" value={lucroLiq} pct={pct(lucroLiq)} tone={lucroLiq > 0 ? "ok" : "crit"} bold />
-          </tbody>
-        </table>
-        <div style={{ padding: "12px 16px", borderTop: "1px solid var(--line-soft)", fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
-          * EF projetado · finalize o inventário do mês em <a href="#" style={{ color: "var(--accent-bright)", textDecoration: "none" }}>Estoque → Inventário</a>.
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DreStat({ label, value, accent, sub }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</span>
-      <span className="mono" style={{ fontSize: 18, fontWeight: 500, color: accent ? "var(--accent-bright)" : "var(--fg-0)", letterSpacing: "-0.018em" }}>{value}</span>
-      {sub && <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>{sub}</span>}
-    </div>
-  );
-}
-
-function DreRow({ label, value, pct, sign, byCat, subcategories, strong, faded, note, onViewSub }) {
-  const [open, setOpen] = useState(false);
-  // Mostra subs com valor; mantém também as autofeed zeradas pra indicar integração.
-  const subs = byCat ? Object.entries(byCat).filter(([id, v]) => {
-    if (Math.abs(v) > 0.001) return true;
-    const sub = subcategories?.find((s) => s.id === id);
-    return !!sub?.autofeed;
-  }) : [];
-  const hasDetail = subs.length > 0;
-  const display = sign === "−" && value > 0 ? `−${fmt(value)}` : value < 0 ? `+${fmt(-value)}` : fmt(value);
-  return (
-    <>
-      <tr style={{ cursor: hasDetail ? "pointer" : "default", opacity: faded ? 0.65 : 1 }} onClick={() => hasDetail && setOpen(!open)}>
-        <td>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 8, color: strong ? "var(--fg-0)" : "var(--fg-1)", fontWeight: strong ? 500 : 400 }}>
-            {hasDetail && <I.Chevron size={11} style={{ transform: open ? "none" : "rotate(-90deg)", transition: "transform 120ms", color: "var(--fg-3)" }} />}
-            {!hasDetail && <span style={{ width: 11 }} />}
-            {label}
-            {note && <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", marginLeft: 6 }}>{note}</span>}
-          </span>
-        </td>
-        <td className="num">{display}</td>
-        <td className="num" style={{ color: "var(--fg-3)" }}>{pct}</td>
-        <td className="dim" style={{ fontSize: 11.5 }}>{subs.length} {subs.length === 1 ? "subcategoria" : "subcategorias"}</td>
-      </tr>
-      {open && subs.map(([subId, val]) => {
-        const sub = subcategories.find((s) => s.id === subId);
-        if (!sub) return null;
-        const total = value || 1;
-        const sharePct = total !== 0 ? (val / total) * 100 : 0;
-        const canView = !!onViewSub && !sub.autofeed;
-        return (
-          <tr key={subId} style={{ background: "var(--bg-2)", cursor: canView ? "pointer" : "default" }}
-              onClick={() => canView && onViewSub(sub)}
-              title={canView ? "Ver e editar lançamentos desta subcategoria" : undefined}>
-            <td style={{ paddingLeft: 36 }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--fg-1)" }}>
-                <span style={{ width: 4, height: 4, borderRadius: 50, background: sub.color }} />
-                {sub.name}
-                {sub.autofeed && (
-                  <span style={{
-                    fontFamily: "var(--mono)", fontSize: 9, color: "var(--accent-bright)",
-                    letterSpacing: "0.06em", textTransform: "uppercase", padding: "1px 6px",
-                    background: "var(--accent-soft)", border: "1px solid var(--accent-line)", borderRadius: 99,
-                    display: "inline-flex", alignItems: "center", gap: 3,
-                  }} title="Calculado automaticamente">
-                    <I.Bell size={9} />auto
-                  </span>
-                )}
-              </span>
-            </td>
-            <td className="num" style={{ color: "var(--fg-1)" }}>
-              {val < 0 ? "+" : ""}{fmt(Math.abs(val))}
-            </td>
-            <td className="num" style={{ color: "var(--fg-3)" }}>{Math.abs(sharePct).toFixed(1)}%</td>
-            <td className="dim" style={{ fontSize: 11 }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                <span style={{ display: "inline-block", width: 100, height: 3, background: "var(--bg-3)", borderRadius: 1, overflow: "hidden" }}>
-                  <span style={{ display: "block", width: `${Math.min(100, Math.abs(sharePct))}%`, height: "100%", background: sub.color }} />
-                </span>
-                {canView && (
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--accent-bright)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                    editar →
-                  </span>
-                )}
-              </span>
-            </td>
-          </tr>
-        );
-      })}
-    </>
-  );
-}
-
-function DreSub({ label, value, pct, tone, bold }) {
-  const color = tone === "ok" ? "var(--ok)" : tone === "crit" ? "var(--crit)" : "var(--fg-0)";
-  return (
-    <tr style={{ background: "var(--bg-2)" }}>
-      <td style={{ borderTop: "1px solid var(--line-strong)", borderBottom: "1px solid var(--line-strong)" }}>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: bold ? 14 : 13, color: "var(--fg-0)", fontWeight: 500, letterSpacing: "-0.005em" }}>
-          <span style={{ width: 11 }} />
-          {label}
-        </span>
-      </td>
-      <td className="num" style={{ borderTop: "1px solid var(--line-strong)", borderBottom: "1px solid var(--line-strong)", fontSize: bold ? 15 : 13, color, fontWeight: 500 }}>{fmt(value)}</td>
-      <td className="num" style={{ borderTop: "1px solid var(--line-strong)", borderBottom: "1px solid var(--line-strong)", color: "var(--fg-2)" }}>{pct}</td>
-      <td style={{ borderTop: "1px solid var(--line-strong)", borderBottom: "1px solid var(--line-strong)" }} />
-    </tr>
-  );
-}
-
 // ---------- Checklist de fechamento ----------
 function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, onDelete, period }) {
   const [filter, setFilter] = useState("pending");
@@ -1020,13 +618,15 @@ function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, o
   const pendingValue  = checklist.filter((c) => c.status !== "filled").reduce((s, c) => s + (c.expected || 0), 0);
   const progress      = totalRequired > 0 ? (totalFilled / totalRequired) * 100 : 0;
 
-  // Agrupa por categoria DRE (categoria pai da subcategoria)
+  // Agrupa por categoria DRE. Preferência: categoria pai da subcategoria; fallback
+  // pra categoryId direto (itens sem subcategoria). Nunca silenciar item — se nada
+  // mapear, joga no bucket da primeira categoria pra ficar visível.
   const grouped = {};
   categories.forEach((g) => grouped[g.id] = []);
   filtered.forEach((c) => {
     const sub = findSubcategory(subcategories, c.cat);
-    if (!sub) return;
-    if (grouped[sub.category]) grouped[sub.category].push(c);
+    const catId = sub?.category || c.categoryId || categories[0]?.id;
+    if (grouped[catId]) grouped[catId].push(c);
   });
 
   return (
@@ -1432,396 +1032,21 @@ function FillDraft({ item, categories, subcategories, period, onClose, onSave })
   );
 }
 
-// ---------- Modal · Estrutura da DRE (CRUD) ----------
-function CategoryStructureModal({ categories, subcategories, entries, onClose, handlers }) {
-  const [creatingCat, setCreatingCat] = useState(false);
-  const [creatingSubFor, setCreatingSubFor] = useState(null); // categoryId
-  const [editing, setEditing] = useState(null); // { type: "cat"|"sub", id, value }
-
-  const subCount = (catId) => subcategories.filter((s) => s.category === catId).length;
-  const entryCount = (subId) => entries.filter((e) => e.cat === subId).length;
-  const sortedCats = [...categories].sort((a, b) => a.order - b.order);
-
-  const startEdit = (type, id, value) => setEditing({ type, id, value });
-  const cancelEdit = () => setEditing(null);
-  const saveEdit = () => {
-    if (!editing) return;
-    const v = String(editing.value || "").trim();
-    if (!v) { cancelEdit(); return; }
-    if (editing.type === "cat") handlers.renameCategory(editing.id, v);
-    else                        handlers.renameSubcategory(editing.id, v);
-    cancelEdit();
-  };
-
-  return (
-    <ModalShell
-      title="Estrutura da DRE"
-      subtitle="Categorias, subcategorias e auto-feeds. Itens travados são essenciais para o fechamento."
-      onClose={onClose}
-      width={760}
-      footer={
-        <button className="btn" data-variant="primary" data-size="sm" onClick={onClose}>Concluir</button>
-      }
-    >
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        {/* Adicionar categoria */}
-        {creatingCat ? (
-          <NewCategoryRow
-            onCancel={() => setCreatingCat(false)}
-            onSave={(data) => { handlers.createCategory(data); setCreatingCat(false); }}
-          />
-        ) : (
-          <button className="btn" data-variant="ghost" data-size="sm"
-                  onClick={() => setCreatingCat(true)}
-                  style={{ alignSelf: "flex-start" }}>
-            <I.Plus size={11} />Nova categoria
-          </button>
-        )}
-
-        {/* Lista de categorias */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {sortedCats.map((cat, idx) => {
-            const subs = subsByCategory(subcategories, cat.id);
-            const isEditing = editing?.type === "cat" && editing.id === cat.id;
-            const kindLabel = {
-              revenue: "Receita", deduction: "Dedução", cogs: "CMV (custos)",
-              expense: "Despesa", financial: "Financeiro",
-            }[cat.kind] || cat.kind;
-            return (
-              <div key={cat.id} className="card" style={{ overflow: "hidden" }}>
-                <div className="card-header" style={{ alignItems: "center" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
-                    {/* Ordem · setas */}
-                    <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                      <button type="button" className="btn" data-variant="ghost" data-size="sm"
-                              onClick={() => handlers.moveCategory(cat.id, "up")}
-                              disabled={idx === 0}
-                              style={{ padding: "1px 4px" }} title="Mover para cima">
-                        <I.ArrowUp size={9} />
-                      </button>
-                      <button type="button" className="btn" data-variant="ghost" data-size="sm"
-                              onClick={() => handlers.moveCategory(cat.id, "down")}
-                              disabled={idx === sortedCats.length - 1}
-                              style={{ padding: "1px 4px" }} title="Mover para baixo">
-                        <I.ArrowDown size={9} />
-                      </button>
-                    </div>
-                    {/* Ordem badge */}
-                    <span style={{
-                      fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)",
-                      letterSpacing: "0.04em", padding: "2px 6px",
-                      background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 3,
-                    }}>{idx + 1}</span>
-                    {/* Nome (editável ou estático) */}
-                    {isEditing ? (
-                      <input className="input" autoFocus value={editing.value}
-                             onChange={(e) => setEditing({ ...editing, value: e.target.value })}
-                             onKeyDown={(e) => {
-                               if (e.key === "Enter") saveEdit();
-                               if (e.key === "Escape") cancelEdit();
-                             }}
-                             style={{ flex: 1, minWidth: 0 }} />
-                    ) : (
-                      <h3 className="card-title" style={{ display: "inline-flex", alignItems: "center", gap: 8, flex: 1 }}>
-                        {cat.name}
-                        {cat.locked && <I.Lock size={10} style={{ color: "var(--fg-3)" }} />}
-                      </h3>
-                    )}
-                    <span style={{
-                      fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)",
-                      letterSpacing: "0.04em", textTransform: "uppercase",
-                      padding: "2px 6px", border: "1px solid var(--line)", borderRadius: 3,
-                    }}>
-                      {kindLabel}
-                    </span>
-                    <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)" }}>
-                      {subs.length} {subs.length === 1 ? "subcategoria" : "subcategorias"}
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 4 }}>
-                    {isEditing ? (
-                      <>
-                        <button className="btn" data-size="sm" onClick={cancelEdit}>Cancelar</button>
-                        <button className="btn" data-variant="primary" data-size="sm" onClick={saveEdit}>Salvar</button>
-                      </>
-                    ) : (
-                      <>
-                        <button className="btn" data-variant="ghost" data-size="sm"
-                                onClick={() => startEdit("cat", cat.id, cat.name)}
-                                disabled={cat.locked}>
-                          <I.Edit size={11} />Renomear
-                        </button>
-                        <button className="btn" data-variant="ghost" data-size="sm"
-                                onClick={() => handlers.deleteCategory(cat.id)}
-                                disabled={cat.locked || subs.length > 0}
-                                title={cat.locked ? "Categoria essencial · não pode ser excluída"
-                                                  : subs.length > 0 ? "Mova as subcategorias antes" : "Excluir categoria"}
-                                style={{ color: cat.locked || subs.length > 0 ? "var(--fg-3)" : "var(--crit)" }}>
-                          <I.Trash size={11} />
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                {/* Subs */}
-                <div style={{ padding: "8px 16px 12px" }}>
-                  {subs.length === 0 ? (
-                    <div style={{
-                      padding: "10px 12px", fontSize: 11.5, color: "var(--fg-3)",
-                      background: "var(--bg-2)", border: "1px dashed var(--line)", borderRadius: 4, textAlign: "center",
-                    }}>
-                      Sem subcategorias
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {subs.map((sub) => {
-                        const isSubEditing = editing?.type === "sub" && editing.id === sub.id;
-                        const usage = entryCount(sub.id);
-                        return (
-                          <div key={sub.id} style={{
-                            display: "grid",
-                            gridTemplateColumns: "20px 1fr 70px 100px",
-                            gap: 8, alignItems: "center",
-                            padding: "6px 10px",
-                            background: "var(--bg-2)", borderRadius: 3,
-                            border: "1px solid var(--line)",
-                          }}>
-                            <input type="color" value={sub.color}
-                                   onChange={(e) => handlers.recolorSubcategory(sub.id, e.target.value)}
-                                   disabled={sub.locked}
-                                   style={{ width: 16, height: 16, padding: 0, border: "none", background: "transparent", cursor: sub.locked ? "not-allowed" : "pointer" }} />
-                            {isSubEditing ? (
-                              <input className="input" autoFocus value={editing.value}
-                                     onChange={(e) => setEditing({ ...editing, value: e.target.value })}
-                                     onKeyDown={(e) => {
-                                       if (e.key === "Enter") saveEdit();
-                                       if (e.key === "Escape") cancelEdit();
-                                     }} />
-                            ) : (
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--fg-0)", minWidth: 0 }}>
-                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {sub.name}
-                                </span>
-                                {sub.locked && <I.Lock size={9} style={{ color: "var(--fg-3)", flexShrink: 0 }} />}
-                                {sub.autofeed && (
-                                  <span style={{
-                                    fontFamily: "var(--mono)", fontSize: 9, color: "var(--accent-bright)",
-                                    letterSpacing: "0.06em", textTransform: "uppercase", padding: "1px 5px",
-                                    background: "var(--accent-soft)", border: "1px solid var(--accent-line)", borderRadius: 99,
-                                    display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0,
-                                  }} title={
-                                    sub.autofeed === "stock-adjust"
-                                      ? "Auto-feed: vem do impacto financeiro dos inventários"
-                                      : "Auto-feed: alimentado automaticamente"
-                                  }>
-                                    <I.Bell size={9} />auto
-                                  </span>
-                                )}
-                              </span>
-                            )}
-                            <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.04em", textAlign: "right" }}>
-                              {usage} {usage === 1 ? "lanç." : "lançs."}
-                            </span>
-                            <div style={{ display: "flex", gap: 3, justifyContent: "flex-end" }}>
-                              {isSubEditing ? (
-                                <>
-                                  <button className="btn" data-size="sm" onClick={cancelEdit}>×</button>
-                                  <button className="btn" data-variant="primary" data-size="sm" onClick={saveEdit}>Salvar</button>
-                                </>
-                              ) : (
-                                <>
-                                  <button className="btn" data-variant="ghost" data-size="sm"
-                                          onClick={() => startEdit("sub", sub.id, sub.name)}
-                                          disabled={sub.locked}
-                                          style={{ padding: "3px 6px" }}>
-                                    <I.Edit size={10} />
-                                  </button>
-                                  <button className="btn" data-variant="ghost" data-size="sm"
-                                          onClick={() => handlers.deleteSubcategory(sub.id)}
-                                          disabled={sub.locked || usage > 0}
-                                          title={sub.locked ? "Subcategoria essencial · não pode ser excluída"
-                                                            : usage > 0 ? `Há ${usage} lançamento(s) · migre antes` : "Excluir"}
-                                          style={{ padding: "3px 6px", color: sub.locked || usage > 0 ? "var(--fg-3)" : "var(--crit)" }}>
-                                    <I.Trash size={10} />
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Adicionar sub */}
-                  {creatingSubFor === cat.id ? (
-                    <NewSubcategoryRow
-                      categoryId={cat.id}
-                      onCancel={() => setCreatingSubFor(null)}
-                      onSave={(data) => { handlers.createSubcategory(data); setCreatingSubFor(null); }}
-                    />
-                  ) : (
-                    <button className="btn" data-variant="ghost" data-size="sm"
-                            onClick={() => setCreatingSubFor(cat.id)}
-                            style={{ alignSelf: "flex-start", marginTop: 8 }}>
-                      <I.Plus size={10} />Nova subcategoria
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Aviso */}
-        <div style={{
-          padding: "10px 12px",
-          background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4,
-          display: "flex", alignItems: "flex-start", gap: 10,
-          fontSize: 11.5, color: "var(--fg-2)",
-        }}>
-          <I.AlertTriangle size={12} style={{ color: "var(--fg-3)", marginTop: 2, flexShrink: 0 }} />
-          <span>
-            <strong style={{ color: "var(--fg-0)" }}>Receita</strong>, <strong style={{ color: "var(--fg-0)" }}>Deduções</strong> e <strong style={{ color: "var(--fg-0)" }}>CMV</strong> são travadas porque alimentam fórmulas do fechamento contábil.{" "}
-            <strong style={{ color: "var(--fg-0)" }}>Ajuste de estoque</strong> recebe automaticamente o resultado dos inventários finalizados (perda → despesa positiva, sobra → redução).
-          </span>
-        </div>
-      </div>
-    </ModalShell>
-  );
-}
-
-function NewCategoryRow({ onCancel, onSave }) {
-  const [name, setName] = useState("");
-  const [kind, setKind] = useState("expense");
-  return (
-    <div className="card" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, background: "var(--bg-2)" }}>
-      <input className="input" autoFocus value={name}
-             placeholder="Nome da categoria"
-             onChange={(e) => setName(e.target.value)}
-             onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onSave({ name, kind }); if (e.key === "Escape") onCancel(); }}
-             style={{ flex: 1 }} />
-      <select className="select" value={kind} onChange={(e) => setKind(e.target.value)} style={{ width: 160 }}>
-        <option value="expense">Despesa</option>
-        <option value="financial">Financeira</option>
-        <option value="deduction">Dedução</option>
-      </select>
-      <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-      <button className="btn" data-variant="primary" data-size="sm"
-              disabled={!name.trim()}
-              onClick={() => onSave({ name, kind })}>
-        <I.Check size={11} />Criar
-      </button>
-    </div>
-  );
-}
-
-function NewSubcategoryRow({ categoryId, onCancel, onSave }) {
-  const [name, setName] = useState("");
-  const [color, setColor] = useState(DRE_SUB_COLORS[0]);
-  return (
-    <div style={{
-      marginTop: 8, padding: "8px 10px",
-      background: "var(--bg-3)", border: "1px solid var(--line-strong)", borderRadius: 4,
-      display: "flex", alignItems: "center", gap: 8,
-    }}>
-      <input type="color" value={color} onChange={(e) => setColor(e.target.value)}
-             style={{ width: 20, height: 20, padding: 0, border: "none", background: "transparent", cursor: "pointer" }} />
-      <input className="input" autoFocus value={name}
-             placeholder="Nome da subcategoria"
-             onChange={(e) => setName(e.target.value)}
-             onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onSave({ name, category: categoryId, color }); if (e.key === "Escape") onCancel(); }}
-             style={{ flex: 1 }} />
-      <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-      <button className="btn" data-variant="primary" data-size="sm"
-              disabled={!name.trim()}
-              onClick={() => onSave({ name, category: categoryId, color })}>
-        <I.Check size={11} />Criar
-      </button>
-    </div>
-  );
-}
-
-// ---------- Modal · Lançamentos de uma subcategoria (DRE drill-down) ----------
-function SubEntriesModal({ sub, categories, subcategories, entries, period, onClose, onEdit, onDelete }) {
-  const cat = sub ? findCategory(categories, sub.category) : null;
-  // Lista entries da subcategoria no período (já recebemos `entries` filtrado por período)
-  const subEntries = entries
-    .filter((e) => e.cat === sub.id && !e.auto)
-    .sort((a, b) => (b.comp || "").localeCompare(a.comp || ""));
-  const total = subEntries.reduce((s, e) => s + (Number(e.value) || 0), 0);
-
-  return (
-    <ModalShell
-      title={`${sub.name}`}
-      subtitle={`${cat?.name || "—"} · ${period.replace("-", "/")} · ${subEntries.length} lançamento(s)`}
-      onClose={onClose}
-      width={780}
-      footer={<button className="btn" data-variant="primary" data-size="sm" onClick={onClose}>Fechar</button>}
-    >
-      <div style={{
-        padding: "10px 14px", marginBottom: 14,
-        background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4,
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-      }}>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-          Σ Total da subcategoria
-        </span>
-        <span className="mono" style={{ fontSize: 16, fontWeight: 500, color: "var(--fg-0)" }}>
-          {fmt(total)}
-        </span>
-      </div>
-
-      {subEntries.length === 0 ? (
-        <div style={{ padding: 32, textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
-          Sem lançamentos nesta subcategoria neste período.
-        </div>
-      ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Descrição</th>
-              <th>Competência</th>
-              <th>Pagamento</th>
-              <th>Status</th>
-              <th className="num">Valor</th>
-              <th style={{ width: 90 }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {subEntries.map((e) => {
-              const tone = e.status === "paid" ? "ok" : e.status === "scheduled" ? "info" : "warn";
-              const lbl  = e.status === "paid" ? "Pago" : e.status === "scheduled" ? "Agendado" : "Pendente";
-              return (
-                <tr key={e.id} style={{ cursor: "pointer" }} onClick={() => onEdit?.(e)}>
-                  <td className="row-strong">{e.desc}</td>
-                  <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-1)" }}>{fmtDate(e.comp)}</td>
-                  <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>{fmtDate(e.paid)}</td>
-                  <td><span className="badge" data-tone={tone}>{lbl}</span></td>
-                  <td className="num" style={{ color: "var(--fg-0)" }}>−{fmt(e.value)}</td>
-                  <td onClick={(ev) => ev.stopPropagation()}>
-                    <div style={{ display: "inline-flex", gap: 4 }}>
-                      <button className="btn" data-variant="ghost" data-size="sm" title="Editar"
-                              onClick={() => onEdit?.(e)} style={{ padding: "3px 6px" }}>
-                        <I.Edit size={11} />
-                      </button>
-                      <button className="btn" data-variant="ghost" data-size="sm" title="Excluir"
-                              onClick={() => onDelete?.(e)} style={{ padding: "3px 6px", color: "var(--crit)" }}>
-                        <I.Trash size={11} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </ModalShell>
-  );
-}
-
 window.Finance = Finance;
 // Exposto pro Sidebar calcular o badge de urgência do checklist sem duplicar lógica.
 window.getChecklistUrgency = getChecklistUrgency;
+
+// Helpers compartilhados com o módulo DRE & Fechamento (page-dre.jsx).
+// page-finance.jsx é importado antes do page-dre.jsx em src/main.jsx, então
+// quando o Dre() roda, esses globais já estão disponíveis.
+window.fmt              = fmt;
+window.fmtShort         = fmtShort;
+window.fmtDate          = fmtDate;
+window.monthOf          = monthOf;
+window.findCategory     = findCategory;
+window.findSubcategory  = findSubcategory;
+window.subsByCategory   = subsByCategory;
+window.DRE_SUB_COLORS   = DRE_SUB_COLORS;
+window.ModalShell       = ModalShell;
+window.FormField        = FormField;
+window.EntryDraft       = EntryDraft;

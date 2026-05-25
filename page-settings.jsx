@@ -207,6 +207,8 @@ function OperationsTab() {
       {editing && (
         <OperationModal
           initial={editing.initial}
+          tenantId={tenantId}
+          dbOnline={source === "db" && dbStatus.isOnline}
           onClose={() => setEditing(null)}
           onSave={save}
           onDelete={editing.initial ? () => remove(editing.initial) : null}
@@ -216,12 +218,62 @@ function OperationsTab() {
   );
 }
 
-function OperationModal({ initial, onClose, onSave, onDelete }) {
+function OperationModal({ initial, tenantId, dbOnline, onClose, onSave, onDelete }) {
   const [name, setName]   = useState(initial?.name || "");
   const [short, setShort] = useState(initial?.short || "");
   const [color, setColor] = useState(initial?.color || "#2d8c66");
   const [iFood, setIFood] = useState(initial?.iFood || "");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Turnos (apenas ao editar uma operação existente — precisa do id pra linkar)
+  const [shifts, setShifts] = useState([]);
+  const [shiftsLoading, setShiftsLoading] = useState(false);
+  const [newShiftName, setNewShiftName] = useState("");
+  const canManageShifts = !!initial?.id && dbOnline && tenantId;
+
+  useEffect(() => {
+    if (!canManageShifts) { setShifts([]); return; }
+    let cancelled = false;
+    setShiftsLoading(true);
+    (async () => {
+      const { data } = await dbListOperationShifts(tenantId, initial.id);
+      if (cancelled) return;
+      setShifts(data || []);
+      setShiftsLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [canManageShifts, tenantId, initial?.id]);
+
+  const addShift = async () => {
+    const trimmed = newShiftName.trim();
+    if (!trimmed || !canManageShifts) return;
+    const { data, error } = await dbInsertOperationShift(tenantId, {
+      operationId: initial.id,
+      name:        trimmed,
+      sortOrder:   shifts.length,
+    });
+    if (error) {
+      window.showToast(`Erro ao criar turno: ${error.message}`, { tone: "crit", ttl: 4500 });
+      return;
+    }
+    setShifts([...shifts, data]);
+    setNewShiftName("");
+    window.showToast(`Turno "${trimmed}" criado`, { tone: "ok" });
+  };
+
+  const removeShift = async (shift) => {
+    if (!canManageShifts) return;
+    const { error, softDeleted } = await dbDeleteOperationShift(shift.id);
+    if (error) {
+      window.showToast(`Erro ao excluir turno: ${error.message}`, { tone: "crit", ttl: 4500 });
+      return;
+    }
+    setShifts(shifts.filter((s) => s.id !== shift.id));
+    window.showToast(
+      softDeleted ? `Turno "${shift.name}" desativado (tem faturamentos linkados)` : `Turno "${shift.name}" excluído`,
+      { tone: "warn" },
+    );
+  };
+
   const valid = name.trim() && short.trim();
   return (
     <Modal title={initial ? "Editar operação" : "Nova operação"} onClose={onClose}
@@ -258,6 +310,71 @@ function OperationModal({ initial, onClose, onSave, onDelete }) {
           <input className="input mono" value={iFood} onChange={(e) => setIFood(e.target.value)} placeholder="@minhamarca" />
         </FormRow>
       </div>
+
+      {/* Turnos — apenas pra operações já salvas */}
+      {initial?.id && (
+        <div style={{ marginTop: 20, borderTop: "1px solid var(--line-soft)", paddingTop: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500, letterSpacing: "-0.005em" }}>Turnos</div>
+              <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 2 }}>
+                Permite múltiplos faturamentos no mesmo dia (ex.: Almoço, Jantar, Madrugada).
+              </div>
+            </div>
+          </div>
+
+          {!dbOnline && (
+            <div style={{ fontSize: 12, color: "var(--warn)", padding: "8px 12px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 4 }}>
+              Turnos só podem ser gerenciados com Supabase online.
+            </div>
+          )}
+
+          {dbOnline && (
+            <>
+              {shiftsLoading ? (
+                <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Carregando turnos…</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                  {shifts.length === 0 && (
+                    <div style={{ fontSize: 12, color: "var(--fg-3)", padding: "6px 0" }}>
+                      Nenhum turno cadastrado ainda. Adicione abaixo.
+                    </div>
+                  )}
+                  {shifts.map((s) => (
+                    <div key={s.id} style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "6px 10px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4,
+                    }}>
+                      <span style={{ flex: 1, fontSize: 12.5, color: "var(--fg-1)" }}>{s.name}</span>
+                      <button className="btn" data-variant="ghost" data-size="sm"
+                              onClick={() => removeShift(s)}
+                              title="Excluir turno"
+                              style={{ padding: "3px 6px", color: "var(--crit)" }}>
+                        <I.Trash size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  className="input"
+                  placeholder="Ex.: Almoço, Jantar, Madrugada…"
+                  value={newShiftName}
+                  onChange={(e) => setNewShiftName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addShift(); } }}
+                  style={{ flex: 1 }}
+                />
+                <button className="btn" data-variant="primary" data-size="sm"
+                        onClick={addShift} disabled={!newShiftName.trim()}>
+                  <I.Plus size={11} />Criar turno
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {confirmingDelete && (
         <OperationDeleteConfirm
@@ -500,7 +617,8 @@ const USER_MODULES = [
   { id: "requests",  label: "Requisições"      },
   { id: "purchases", label: "Compras"          },
   { id: "cmv",       label: "CMV & margem"     },
-  { id: "finance",   label: "Financeiro & DRE" },
+  { id: "finance",   label: "Financeiro"       },
+  { id: "dre",       label: "DRE & Fechamento" },
   { id: "settings",  label: "Configurações"    },
 ];
 const ALL_MODULE_IDS = USER_MODULES.map((m) => m.id);
@@ -511,7 +629,7 @@ const ROLE_MODULE_PRESETS = {
   "Gestor de marca":  ALL_MODULE_IDS.filter((m) => m !== "settings"),
   "Operador cozinha": ["dashboard", "stock", "requests", "recipes"],
   "Estoquista":       ["dashboard", "stock", "requests", "purchases"],
-  "Contador":         ["dashboard", "revenue", "cmv", "finance"],
+  "Contador":         ["dashboard", "revenue", "cmv", "finance", "dre"],
   "Visualização":     ["dashboard"],
 };
 

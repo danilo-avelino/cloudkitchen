@@ -2,7 +2,7 @@
 // (React + hooks vêm como globais via plugin injectLegacyGlobals do Vite)
 
 // Catálogo único de módulos do app — espelha src/App.jsx e page-settings.jsx
-const APP_MODULES = ["dashboard","stock","recipes","revenue","requests","purchases","cmv","finance","settings"];
+const APP_MODULES = ["dashboard","stock","recipes","revenue","requests","purchases","cmv","finance","dre","settings"];
 
 // Preset padrão por role do banco quando o membro não tem `modules` customizado
 const ROLE_DEFAULT_MODULES = {
@@ -11,7 +11,7 @@ const ROLE_DEFAULT_MODULES = {
   manager:    APP_MODULES.filter((m) => m !== "settings"),
   kitchen:    ["dashboard", "stock", "requests", "recipes"],
   stock:      ["dashboard", "stock", "requests", "purchases"],
-  accountant: ["dashboard", "revenue", "cmv", "finance"],
+  accountant: ["dashboard", "revenue", "cmv", "finance", "dre"],
   viewer:     ["dashboard"],
 };
 // Compat: roles vindos do MOCK em português
@@ -106,7 +106,8 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     { id: "requests",   label: "Requisições",     icon: I.Request,     pulse: pendingReq || null },
     { id: "purchases",  label: "Compras",         icon: I.ShoppingList },
     { id: "cmv",        label: "CMV & margem",    icon: I.CMV },
-    { id: "finance",    label: "Financeiro & DRE",icon: I.Finance, badge: (financeOverdue + financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
+    { id: "finance",    label: "Financeiro",      icon: I.Finance, badge: (financeOverdue + financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
+    { id: "dre",        label: "DRE & Fechamento", icon: I.Lock },
     { id: "settings",   label: "Configurações",   icon: I.Settings },
   ].filter((item) => has(item.id));
 
@@ -204,7 +205,8 @@ function Topbar({ page, scope, theme, setTheme, onCmd, user, onLogout }) {
     requests: "Requisições",
     purchases: "Compras",
     cmv: "CMV & margem",
-    finance: "Financeiro & DRE",
+    finance: "Financeiro",
+    dre: "DRE & Fechamento",
     settings: "Configurações",
   };
   const initials = user?.avatar || user?.name?.split(" ").map((n) => n[0]).slice(0, 2).join("") || "?";
@@ -310,7 +312,7 @@ function StatusBar({ scope }) {
       )}
       <span style={statusBar.spacer} />
       <span style={statusBar.item}>{time}</span>
-      <span style={statusBar.item}>v1.1</span>
+      <span style={statusBar.item}>v1.1.2</span>
     </div>
   );
 }

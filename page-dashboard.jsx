@@ -917,5 +917,8 @@ function FlowKpi({ label, value, tone }) {
   );
 }
 
-window.Dashboard = Dashboard;
-window.KpiCard   = KpiCard;
+window.Dashboard               = Dashboard;
+window.KpiCard                 = KpiCard;
+window.FlowKpi                 = FlowKpi;
+window.ModuleKpi               = ModuleKpi;
+window.computeDashboardMetrics = computeDashboardMetrics;

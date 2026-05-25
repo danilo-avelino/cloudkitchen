@@ -233,6 +233,52 @@ async function dbDeleteOperation(id) {
   return { error };
 }
 
+// ---------- Turnos por operação ----------
+async function dbListOperationShifts(tenantId, operationId) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  let q = _client.from("operation_shifts")
+    .select("id, operation_id, name, sort_order, is_active")
+    .eq("tenant_id", tenantId)
+    .eq("is_active", true)
+    .order("sort_order", { ascending: true });
+  if (operationId) q = q.eq("operation_id", operationId);
+  const { data, error } = await q;
+  if (error) return { data: null, source: "mock", error };
+  return { data, source: "db", error: null };
+}
+
+async function dbInsertOperationShift(tenantId, { operationId, name, sortOrder }) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("operation_shifts").insert({
+    tenant_id:    tenantId,
+    operation_id: operationId,
+    name:         String(name || "").trim(),
+    sort_order:   sortOrder ?? 0,
+  }).select().single();
+  return { data, error };
+}
+
+async function dbUpdateOperationShift(id, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const update = {};
+  if (patch.name !== undefined)       update.name = String(patch.name).trim();
+  if (patch.sortOrder !== undefined)  update.sort_order = patch.sortOrder;
+  if (patch.isActive !== undefined)   update.is_active = !!patch.isActive;
+  const { data, error } = await _client.from("operation_shifts").update(update).eq("id", id).select().single();
+  return { data, error };
+}
+
+async function dbDeleteOperationShift(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  // Tenta delete hard; se houver revenue_entries linkados, cai pra soft delete.
+  const hard = await _client.from("operation_shifts").delete().eq("id", id);
+  if (hard.error && /foreign key|violates/i.test(hard.error.message || "")) {
+    const soft = await _client.from("operation_shifts").update({ is_active: false }).eq("id", id);
+    return { error: soft.error, softDeleted: !soft.error };
+  }
+  return { error: hard.error };
+}
+
 // =====================================================================
 // STOCK CATEGORIES · CRUD
 // =====================================================================
@@ -541,6 +587,8 @@ function mapRevenueFromDb(row) {
     ordersCount:  row.orders_count,
     cogs:         Number(row.cogs) || 0,
     notes:        row.notes,
+    shiftId:      row.shift_id || null,
+    shiftName:    row.shift?.name || null,
     revenue,
     breakdown,
   };
@@ -550,8 +598,9 @@ async function dbListRevenueEntries(tenantId, fromDate, toDate) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   let q = _client.from("revenue_entries")
     .select(`
-      id, business_date, source, status, orders_count, cogs, notes,
+      id, business_date, source, status, orders_count, cogs, notes, shift_id,
       operation_id, operation:operations(id, slug, name),
+      shift:operation_shifts(id, name),
       payment_breakdown:revenue_payment_breakdown(amount, method:payment_methods(id, slug))
     `)
     .eq("tenant_id", tenantId)
@@ -589,6 +638,7 @@ async function dbInsertRevenueEntry(tenantId, draft) {
     cogs:         entry.cogs || 0,
     status:       entry.status || "pending",
     notes:        entry.notes || null,
+    shift_id:     entry.shiftId || null,
   }).select().single();
   if (error) return { data: null, error };
 
@@ -620,6 +670,7 @@ async function dbUpdateRevenueEntry(id, patch) {
   if (patch.notes !== undefined)       update.notes = patch.notes;
   if (patch.date !== undefined)        update.business_date = patch.date;
   if (patch.source !== undefined)      update.source = patch.source;
+  if (patch.shiftId !== undefined)     update.shift_id = patch.shiftId || null;
   const { data, error } = await _client.from("revenue_entries").update(update).eq("id", id).select().single();
   if (error) return { data, error };
 
@@ -1596,6 +1647,7 @@ function mapClosingChecklistFromDb(row) {
     // Front usa `cat` como id da SUBCATEGORIA DRE (cor/nome na linha).
     // Cai pro category_id se a subcategoria não estiver associada.
     cat:        row.subcategory_id || row.category_id || null,
+    categoryId: row.category_id || null,
     label:      row.label,
     recurrence: row.recurrence || "monthly",
     due:        row.due_day ?? null,
@@ -1813,6 +1865,45 @@ async function dbDeleteClosingChecklistItem(id) {
   return { error };
 }
 
+// =====================================================================
+// CLOSING PERIODS · meses formalmente fechados
+// =====================================================================
+
+async function dbListClosedPeriods(tenantId, { fromPeriod, toPeriod } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  let q = _client.from("closing_periods")
+    .select("id, period, closed_at, closed_by, notes")
+    .eq("tenant_id", tenantId)
+    .order("period", { ascending: false });
+  if (fromPeriod) q = q.gte("period", fromPeriod);
+  if (toPeriod)   q = q.lte("period", toPeriod);
+  const { data, error } = await q;
+  if (error) return { data: null, source: "mock", error };
+  return { data: data || [], source: "db", error: null };
+}
+
+async function dbClosePeriod(tenantId, period, { notes } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data: session } = await _client.auth.getUser();
+  const userId = session?.user?.id || null;
+  const { data, error } = await _client.from("closing_periods").insert({
+    tenant_id: tenantId,
+    period,
+    closed_by: userId,
+    notes: notes || null,
+  }).select().single();
+  return { data, error };
+}
+
+async function dbReopenPeriod(tenantId, period) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("closing_periods")
+    .delete()
+    .eq("tenant_id", tenantId)
+    .eq("period", period);
+  return { error };
+}
+
 async function dbInsertDreCategory(tenantId, { name, color }) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   const { data, error } = await _client
@@ -1974,6 +2065,7 @@ Object.assign(window, {
   initSupabase, getSupabaseClient, getDbState, getDbError, isDbOnline, useDbStatus,
   dbOrMock, dbSignIn, dbSignOut, dbGetSession, dbGetCurrentContext,
   dbListOperations, dbInsertOperation, dbUpdateOperation, dbDeleteOperation,
+  dbListOperationShifts, dbInsertOperationShift, dbUpdateOperationShift, dbDeleteOperationShift,
   dbListRecipeCategories, dbInsertRecipeCategory,
   dbListStockCategories, dbInsertStockCategory, dbRenameStockCategory, dbDeleteStockCategory,
   dbListSuppliers, dbInsertSupplier, dbUpdateSupplier, dbDeleteSupplier,
@@ -1993,6 +2085,7 @@ Object.assign(window, {
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
   dbGetStockValueSnapshots,
   dbListClosingChecklist, dbUpdateClosingChecklistItem, dbInsertClosingChecklistItem, dbDeleteClosingChecklistItem,
+  dbListClosedPeriods, dbClosePeriod, dbReopenPeriod,
   dbInsertDreCategory, dbInsertDreSubcategory, dbDeleteDreCategory, dbDeleteDreSubcategory,
   dbListCmvDaily, dbTopConsumedItems,
   dbUploadEvidence, dbGetSignedUrl,

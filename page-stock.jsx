@@ -30,6 +30,9 @@ function Stock({ scope }) {
   const [editingItem, setEditingItem] = useState(null); // insumo sendo editado
   const [categoryPendingDelete, setCategoryPendingDelete] = useState(null);
   const [deletingCategory, setDeletingCategory] = useState(false);
+  // KPIs operacionais (mês atual) — para estoquistas que não acessam o dashboard
+  const [movements, setMovements] = useState([]);     // stock_movements MTD
+  const [inventories, setInventories] = useState([]); // p/ precisão de estoque
 
   // Carrega tenant + items + categorias do DB quando online
   useEffect(() => {
@@ -72,6 +75,40 @@ function Stock({ scope }) {
     })();
     return () => { cancelled = true; };
   }, [dbStatus.state, dbStatus.isOnline]);
+
+  // Carrega movimentações (MTD) + inventários p/ os KPIs operacionais do topo.
+  // Realtime: qualquer entrada/saída ou inventário finalizado atualiza os cards.
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline || !tenantId) return;
+    let cancelled = false;
+    let reloadTimer = null;
+    const load = async () => {
+      const mtdFirst = new Date(); mtdFirst.setDate(1); mtdFirst.setHours(0, 0, 0, 0);
+      const [movRes, invRes] = await Promise.all([
+        dbListStockMovements(tenantId, mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 }),
+        dbListInventories(tenantId),
+      ]);
+      if (cancelled) return;
+      setMovements(movRes.data || []);
+      setInventories(invRes.data || []);
+    };
+    const scheduleReload = () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => { if (!cancelled) load(); }, 400);
+    };
+    load();
+    const unsubs = [
+      dbSubscribeTable?.("stock_movements", tenantId, scheduleReload),
+      dbSubscribeTable?.("goods_receipts",  tenantId, scheduleReload),
+      dbSubscribeTable?.("inventories",     tenantId, scheduleReload),
+    ].filter(Boolean);
+    return () => {
+      cancelled = true;
+      if (reloadTimer) clearTimeout(reloadTimer);
+      unsubs.forEach((u) => { try { u(); } catch {} });
+    };
+  }, [dbStatus.state, dbStatus.isOnline, tenantId]);
 
   const handleCreateItem = async (draft) => {
     if (source === "db" && tenantId) {
@@ -407,10 +444,50 @@ function Stock({ scope }) {
     window.showToast(`Insumo ${id} atualizado`, { tone: "ok" });
   };
 
+  // KPIs operacionais do topo · espelham as 4 caixas do dashboard
+  // (estoquistas não acessam o dashboard principal, então mostramos aqui).
+  const stockFlows = useMemo(() => {
+    let entradas = 0, saidas = 0;
+    for (const mv of (movements || [])) {
+      const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+      if (mv.kind === "in")  entradas += value;
+      if (mv.kind === "out") saidas   += value;
+    }
+    return { entradas, saidas };
+  }, [movements]);
+  const moduleMetrics = useMemo(
+    () => (typeof computeDashboardMetrics === "function")
+      ? computeDashboardMetrics(scope, "mtd", { stock: items, inventories }, dbStatus.isOnline)
+      : { inv: { accuracy: null, lastDate: null }, alerts: { total: 0, ruptura: 0, baixo: 0, acimaMax: 0 } },
+    [scope, items, inventories, dbStatus.isOnline],
+  );
+
   if (pageLoading) return <PageLoading label="Carregando estoque…" variant="table" />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {/* KPIs operacionais · espelham o dashboard p/ estoquistas */}
+      <div style={{ padding: "16px 28px 4px", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in" />
+        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" />
+        <ModuleKpi
+          label="Precisão de estoque"
+          value={moduleMetrics.inv.accuracy != null ? `${moduleMetrics.inv.accuracy.toFixed(0)}%` : "—"}
+          sub={moduleMetrics.inv.lastDate ? `último em ${moduleMetrics.inv.lastDate}` : "sem inventários"}
+          tone={moduleMetrics.inv.accuracy >= 95 ? "ok" : moduleMetrics.inv.accuracy >= 90 ? "info" : "warn"}
+          onClick={() => setView("inventory")}
+          icon={<I.Box size={11} />}
+        />
+        <ModuleKpi
+          label="Alertas de estoque"
+          value={moduleMetrics.alerts.total}
+          sub={`${moduleMetrics.alerts.ruptura} ruptura · ${moduleMetrics.alerts.baixo} baixo · ${moduleMetrics.alerts.acimaMax} acima do máx`}
+          tone={moduleMetrics.alerts.ruptura > 0 ? "crit" : moduleMetrics.alerts.total > 0 ? "warn" : "ok"}
+          onClick={() => { setView("items"); setFilter("crit"); }}
+          icon={<I.AlertTriangle size={11} />}
+        />
+      </div>
+
       {/* Sub-tabs Insumos | Inventário */}
       <div style={{ display: "flex", padding: "14px 28px 0", gap: 0, borderBottom: "1px solid var(--line)" }}>
         <StockSubTab active={view === "items"}     onClick={() => setView("items")}    >Insumos</StockSubTab>

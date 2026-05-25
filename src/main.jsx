@@ -69,6 +69,7 @@ async function bootstrap() {
   await import("../page-shopping.jsx");
   await import("../page-cmv.jsx");
   await import("../page-finance.jsx");
+  await import("../page-dre.jsx");
   await import("../page-settings.jsx");
 
   const { App } = await import("./App.jsx");

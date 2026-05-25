@@ -60,6 +60,7 @@ function Revenue({ scope }) {
   const [filterMonth, setFilterMonth] = useState(String(_now.getMonth() + 1).padStart(2, "0")); // "01".."12" | "all"
   const [editing,   setEditing]   = useState(null);    // entry sendo editada
   const [creating,  setCreating]  = useState(false);
+  const [shifts,    setShifts]    = useState([]);      // turnos de todas as operações do tenant
 
   // Carrega faturamento + métodos de pagamento do DB
   useEffect(() => {
@@ -73,15 +74,17 @@ function Revenue({ scope }) {
         const tid = ctx?.tenant?.id;
         setTenantId(tid || null);
         if (!tid) return;
-        const [entriesRes, methodsRes] = await Promise.all([
+        const [entriesRes, methodsRes, shiftsRes] = await Promise.all([
           dbListRevenueEntries(tid),
           dbListPaymentMethods(tid),
+          typeof dbListOperationShifts === "function" ? dbListOperationShifts(tid) : Promise.resolve({ data: [] }),
         ]);
         if (cancelled) return;
         if (entriesRes.source === "db") {
           setEntries(entriesRes.data || []);
           setSource("db");
         }
+        if (shiftsRes?.data) setShifts(shiftsRes.data);
         if (methodsRes.data && methodsRes.data.length > 0) {
           setMethodsState(methodsRes.data.map((m) => ({ id: m.slug, label: m.label, short: m.short_label, color: m.color })));
         } else if (methodsRes.source === "db") {
@@ -151,6 +154,7 @@ function Revenue({ scope }) {
           source:      draft.source,
           notes:       draft.notes,
           breakdown:   draft.methods,
+          shiftId:     draft.shiftId,
         });
         if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
         // Recarrega do banco para garantir consistência (breakdown, totais, etc.)
@@ -167,6 +171,7 @@ function Revenue({ scope }) {
           status:       draft.status || "pending",
           notes:        draft.notes,
           breakdown:    draft.methods,
+          shiftId:      draft.shiftId,
         });
         if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
         // Recarrega a lista
@@ -294,6 +299,7 @@ function Revenue({ scope }) {
           initial={editing}
           methods={methods}
           ops={ops}
+          shifts={shifts}
           entries={entries}
           defaultOp={!editing && scope !== "all" ? scope : null}
           onClose={() => { setCreating(false); setEditing(null); }}
@@ -446,6 +452,12 @@ function EntryRow({ e, methods, onEdit }) {
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
           <span style={{ color: "var(--fg-0)", fontWeight: 500 }}>{op.name}</span>
+          {e.shiftName && (
+            <span className="mono" style={{
+              fontSize: 9.5, padding: "1px 6px", borderRadius: 99, letterSpacing: "0.06em", textTransform: "uppercase",
+              color: "var(--fg-2)", background: "var(--bg-3)", border: "1px solid var(--line)",
+            }}>{e.shiftName}</span>
+          )}
         </span>
       </td>
       {methods.map((m) => (
@@ -609,7 +621,7 @@ function FlatView({ entries, methods, onEdit }) {
 }
 
 // ===== Modal de criação/edição =====
-function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose, onSave, onDelete }) {
+function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaultOp, onClose, onSave, onDelete }) {
   // Aceita tanto MOCK (orders, methods) quanto DB-mapped (ordersCount, breakdown)
   const initialOrders = initial?.orders ?? initial?.ordersCount ?? "";
   const initialMethods = initial?.methods ?? initial?.breakdown ?? null;
@@ -617,11 +629,14 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
   const [date,    setDate]    = useState(initial?.date   || _todayISO());
   const [orders,  setOrders]  = useState(initialOrders);
   const [status,  setStatus]  = useState(initial?.status || "confirmed");
+  const [shiftId, setShiftId] = useState(initial?.shiftId || "");
   const [confirmDup, setConfirmDup] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Se o usuário mudar op/data depois de confirmar, exigir nova confirmação
   useEffect(() => { setConfirmDup(false); }, [op, date]);
+  // Ao trocar de operação, limpa o turno (turno é por operação)
+  useEffect(() => { if (!initial) setShiftId(""); }, [op]);
   const [methodVals, setMethodVals] = useState(() => {
     const init = {};
     methods.forEach((m) => { init[m.id] = initialMethods?.[m.id] ?? ""; });
@@ -630,27 +645,35 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
 
   const setMethodValue = (id, raw) => setMethodVals((cur) => ({ ...cur, [id]: raw }));
 
+  // Turnos disponíveis para a operação selecionada
+  const opShifts = shifts.filter((s) => s.operation_id === op);
+  const requiresShift = opShifts.length > 0;
+  const shiftError = requiresShift && !shiftId;
+
   const total = methods.reduce((s, m) => s + _parseNum(methodVals[m.id]), 0);
   // Total de pedidos é obrigatório para lançar o faturamento.
   const ordersNum = orders === "" ? NaN : Number(orders);
   const validOrders = Number.isFinite(ordersNum) && ordersNum > 0;
-  const valid = op && date && validOrders && total > 0;
+  const valid = op && date && validOrders && total > 0 && !shiftError;
   const ordersError = !validOrders;
 
-  // Detecta lançamento já existente para mesma operação × data (ignora o próprio em edição)
+  // Detecta lançamento já existente para mesma operação × data × turno
+  // (com turnos, almoço e jantar são lançamentos distintos)
   const duplicates = entries.filter((e) =>
-    e.op === op && e.date === date && (!initial || e.id !== initial.id)
+    e.op === op && e.date === date && (e.shiftId || null) === (shiftId || null)
+    && (!initial || e.id !== initial.id)
   );
   const hasDuplicate = duplicates.length > 0;
 
   const submit = async () => {
-    console.log("[revenue] submit clicked · valid =", valid, { op, date, ordersNum, total, methodVals });
+    console.log("[revenue] submit clicked · valid =", valid, { op, date, ordersNum, total, methodVals, shiftId });
     if (!valid) {
       const reasons = [];
       if (!op) reasons.push("operação");
       if (!date) reasons.push("data");
       if (!validOrders) reasons.push("total de pedidos");
       if (!(total > 0)) reasons.push("ao menos 1 método > 0");
+      if (shiftError) reasons.push("turno");
       window.showToast?.(`Faltam campos: ${reasons.join(", ")}`, { tone: "warn", ttl: 4000 });
       return;
     }
@@ -668,6 +691,7 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
         status,
         methods: cleanMethods,
         source: initial?.source || "manual",
+        shiftId: shiftId || null,
       });
     } catch (e) {
       console.error("[revenue] onSave threw:", e);
@@ -717,8 +741,8 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
         </div>
       }
     >
-      {/* Cabeçalho do formulário: operação · data · pedidos */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.9fr 0.7fr", gap: 12, marginBottom: 16 }}>
+      {/* Cabeçalho do formulário: operação · data · turno · pedidos */}
+      <div style={{ display: "grid", gridTemplateColumns: requiresShift ? "1.3fr 0.9fr 1fr 0.7fr" : "1.4fr 0.9fr 0.7fr", gap: 12, marginBottom: 16 }}>
         <FormRow label="Operação">
           <select className="select" value={op} onChange={(e) => setOp(e.target.value)}>
             {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
@@ -747,6 +771,25 @@ function RevenueModal({ initial, methods, ops, entries = [], defaultOp, onClose,
             }}
           />
         </FormRow>
+        {requiresShift && (
+          <FormRow label="Turno" hint={shiftError ? "Selecione o turno" : null}>
+            <select
+              className="select"
+              value={shiftId}
+              onChange={(e) => setShiftId(e.target.value)}
+              style={shiftError ? {
+                borderColor: "var(--crit)",
+                boxShadow: "0 0 0 1px var(--crit-line) inset",
+                color: "var(--crit)",
+              } : null}
+            >
+              <option value="">— Selecione —</option>
+              {opShifts.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </FormRow>
+        )}
         <FormRow label="Total de pedidos" hint={ordersError ? "Obrigatório · informe ao menos 1 pedido" : null}>
           <input
             className="input mono"
