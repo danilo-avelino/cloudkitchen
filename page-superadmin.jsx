@@ -378,10 +378,18 @@ function SaOverview({ totalMRR, activeCount, trialCount, suspended, totalUsers, 
               <h3 className="card-title">Crescimento de MRR · 12 meses</h3>
               <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Receita recorrente mensal consolidada</span>
             </div>
-            <span className="badge" data-tone="ok">+ {((totalMRR / (MOCK.SYSTEM_MRR_HISTORY[0].mrr || 1) - 1) * 100).toFixed(0)}% YoY</span>
+            {(() => {
+              const hist = MOCK.SYSTEM_MRR_HISTORY || [];
+              const base = hist[0]?.mrr;
+              if (!base || !totalMRR) return <PendingFeature variant="inline" label="histórico MRR" hint="Integração Stripe pendente" />;
+              const yoy = ((totalMRR / base - 1) * 100).toFixed(0);
+              return <span className="badge" data-tone="ok">+ {yoy}% YoY</span>;
+            })()}
           </div>
           <div className="card-body">
-            <SaMrrChart data={MOCK.SYSTEM_MRR_HISTORY} />
+            {(MOCK.SYSTEM_MRR_HISTORY || []).length > 0
+              ? <SaMrrChart data={MOCK.SYSTEM_MRR_HISTORY} />
+              : <PendingFeature variant="card" label="Histórico de MRR" hint="Aguardando integração com Stripe · sem dados pra plotar" />}
           </div>
         </div>
 
