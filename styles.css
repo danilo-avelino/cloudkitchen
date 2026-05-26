@@ -435,11 +435,12 @@ input, select, textarea { font-family: inherit; }
 }
 
 @media print {
-  /* Sem `size`/margins forçados no @page: o navegador usa o papel e as margens
-     escolhidos pelo usuário no diálogo de impressão do Windows (Mais definições
-     → Tamanho do papel / Margens). Impressoras térmicas vêm com paper=80mm e
-     margem 0; impressoras a4 aplicam suas margens físicas mínimas. */
+  /* `size: 80mm auto` define a página com 80mm de largura (coluna térmica) e
+     altura ajustada ao conteúdo · evita quebras no meio do cupom em térmica
+     ELGIN/Bematech (sem `auto` o navegador trata como A4 e parte na metade).
+     Em A4 o usuário ainda pode forçar outro tamanho no diálogo do Windows. */
   @page {
+    size: 80mm auto;
     margin: 0;
   }
   html, body {
@@ -476,6 +477,8 @@ input, select, textarea { font-family: inherit; }
   .print-area .small  { font-size: 9pt; }
   .print-area .rule   { border-top: 1px dashed black; margin: 2mm 0; }
   .print-area .rule-double { border-top: 2px solid black; margin: 2mm 0; }
-  .print-area .row    { display: flex; justify-content: space-between; gap: 4mm; }
+  .print-area .row    { display: flex; justify-content: space-between; gap: 4mm; break-inside: avoid; }
   .print-area .indent { padding-left: 6mm; }
+  /* Não quebrar uma linha de item ao meio em nenhuma hipótese */
+  .print-area > * { break-inside: avoid; }
 }

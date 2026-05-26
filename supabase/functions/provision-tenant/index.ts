@@ -52,12 +52,18 @@ serve(async (req) => {
     }
 
     // 3. Validação do payload
-    const { name, slug, plan = "starter", ownerEmail, ownerName } = await req.json();
+    const { name, slug, plan = "starter", ownerEmail, ownerName, ownerPassword } = await req.json();
     if (!name || !slug || !ownerEmail) {
       return json({ error: "name, slug, ownerEmail required" }, 400);
     }
     if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(slug)) {
       return json({ error: "slug inválido (use kebab-case, sem espaços)" }, 400);
+    }
+    // Quando ownerPassword vem preenchido, pulamos o convite por email e
+    // criamos o auth user já com senha (e email confirmado). Útil quando o
+    // superadmin quer entregar a credencial direto pro cliente.
+    if (ownerPassword != null && String(ownerPassword).length > 0 && String(ownerPassword).length < 6) {
+      return json({ error: "ownerPassword precisa ter ao menos 6 caracteres" }, 400);
     }
 
     // 4. Insert tenant
@@ -68,27 +74,65 @@ serve(async (req) => {
       .single();
     if (tErr) return json({ error: tErr.message }, 500);
 
-    // 5. Convida owner (cria auth user + envia email). Se já existe, recupera por listUsers.
+    // 5. Cria o owner: ou cria com senha definida pelo superadmin, ou envia
+    //    convite por email (fluxo padrão). Se o email já existe, recupera.
     let userId: string;
-    const { data: invite, error: iErr } = await admin.auth.admin.inviteUserByEmail(ownerEmail, {
-      data: { full_name: ownerName || name },
-    });
-    if (iErr) {
-      // Se erro for "already registered", busca o user existente
-      if (/already (been )?registered|exists/i.test(iErr.message)) {
-        const { data: existing } = await admin.auth.admin.listUsers();
-        const found = existing?.users?.find((u) => u.email?.toLowerCase() === ownerEmail.toLowerCase());
-        if (!found) {
-          await admin.from("tenants").delete().eq("id", tenant.id); // rollback
-          return json({ error: "Email existe mas não foi possível resolver" }, 500);
+    let createdWithPassword = false;
+    const usePasswordFlow = ownerPassword != null && String(ownerPassword).length >= 6;
+
+    if (usePasswordFlow) {
+      const { data: created, error: cErr } = await admin.auth.admin.createUser({
+        email: ownerEmail,
+        password: String(ownerPassword),
+        email_confirm: true,
+        user_metadata: { full_name: ownerName || name },
+      });
+      if (cErr) {
+        if (/already (been )?registered|exists/i.test(cErr.message)) {
+          const { data: existing } = await admin.auth.admin.listUsers();
+          const found = existing?.users?.find((u) => u.email?.toLowerCase() === ownerEmail.toLowerCase());
+          if (!found) {
+            await admin.from("tenants").delete().eq("id", tenant.id);
+            return json({ error: "Email existe mas não foi possível resolver" }, 500);
+          }
+          userId = found.id;
+          // Atualiza senha do usuário existente
+          const { error: uErr } = await admin.auth.admin.updateUserById(userId, {
+            password: String(ownerPassword),
+          });
+          if (uErr) {
+            await admin.from("tenants").delete().eq("id", tenant.id);
+            return json({ error: "Falha ao atualizar senha: " + uErr.message }, 500);
+          }
+          createdWithPassword = true;
+        } else {
+          await admin.from("tenants").delete().eq("id", tenant.id);
+          return json({ error: cErr.message }, 500);
         }
-        userId = found.id;
       } else {
-        await admin.from("tenants").delete().eq("id", tenant.id);
-        return json({ error: iErr.message }, 500);
+        userId = created.user.id;
+        createdWithPassword = true;
       }
     } else {
-      userId = invite.user.id;
+      const { data: invite, error: iErr } = await admin.auth.admin.inviteUserByEmail(ownerEmail, {
+        data: { full_name: ownerName || name },
+      });
+      if (iErr) {
+        if (/already (been )?registered|exists/i.test(iErr.message)) {
+          const { data: existing } = await admin.auth.admin.listUsers();
+          const found = existing?.users?.find((u) => u.email?.toLowerCase() === ownerEmail.toLowerCase());
+          if (!found) {
+            await admin.from("tenants").delete().eq("id", tenant.id);
+            return json({ error: "Email existe mas não foi possível resolver" }, 500);
+          }
+          userId = found.id;
+        } else {
+          await admin.from("tenants").delete().eq("id", tenant.id);
+          return json({ error: iErr.message }, 500);
+        }
+      } else {
+        userId = invite.user.id;
+      }
     }
 
     // 6. tenant_members (owner)
@@ -117,7 +161,7 @@ serve(async (req) => {
       .from("stock_categories")
       .insert(CAT_SEEDS.map((name, i) => ({ name, tenant_id: tenant.id, sort_order: i })));
 
-    return json({ tenantId: tenant.id, userId, slug }, 201);
+    return json({ tenantId: tenant.id, userId, slug, createdWithPassword }, 201);
   } catch (e) {
     return json({ error: String(e) }, 500);
   }

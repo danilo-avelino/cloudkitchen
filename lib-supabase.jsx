@@ -727,11 +727,21 @@ async function dbDeleteRevenueEntry(id) {
 // KITCHEN REQUESTS · requisições de cozinha
 // =====================================================================
 function mapKitchenRequestFromDb(row) {
+  // splits do DB vem como jsonb [{op, pct}]; calcula value (R$) a partir do total
+  const totalNum = (row.items || []).reduce((s, it) => s + (Number(it.line_cost) || 0), 0);
+  const splitsRaw = Array.isArray(row.splits) ? row.splits : null;
+  const splits = splitsRaw ? splitsRaw.map((s) => ({
+    op:    s.op,
+    pct:   Number(s.pct) || 0,
+    value: Number((((Number(s.pct) || 0) / 100) * totalNum).toFixed(2)),
+  })) : null;
   return {
     id:        row.id,
     code:      row.code || row.id?.slice(0, 8),
     op:        row.operation?.slug || row.operation_id,
     operationId: row.operation_id,
+    isShared:  !!row.is_shared,
+    splits,
     status:    row.status,
     priority:  row.priority,
     by:        row.requested_by_name || "—",
@@ -743,8 +753,8 @@ function mapKitchenRequestFromDb(row) {
       it.stock_item_id || null,
     ]),
     itemsCount: (row.items || []).length,
-    totalNum: (row.items || []).reduce((s, it) => s + (Number(it.line_cost) || 0), 0),
-    total: "R$ " + ((row.items || []).reduce((s, it) => s + (Number(it.line_cost) || 0), 0)).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+    totalNum,
+    total: "R$ " + totalNum.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
     notes: row.notes,
   };
 }
@@ -754,7 +764,8 @@ async function dbListKitchenRequests(tenantId, options = {}) {
   let q = _client.from("kitchen_requests")
     .select(`
       id, code, status, priority, requested_by_name, requested_at, notes,
-      operation_id, operation:operations(id, slug, name, short_label),
+      operation_id, is_shared, splits,
+      operation:operations(id, slug, name, short_label),
       items:kitchen_request_items(id, display_name, qty, unit, unit_cost, line_cost, stock_item_id, sort_order)
     `)
     .eq("tenant_id", tenantId)
@@ -767,12 +778,12 @@ async function dbListKitchenRequests(tenantId, options = {}) {
 
 async function dbInsertKitchenRequest(tenantId, draft) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
-  const { items = [], ...header } = draft;
+  const { items = [], splits: draftSplits = null, ...header } = draft;
+  const __isUuid = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
   // Resolve operation_id (slug → uuid)
   let operationId = header.operationId;
   if (!operationId && header.op) {
-    const __isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(header.op);
-    if (__isUuid) {
+    if (__isUuid(header.op)) {
       operationId = header.op;
     } else {
       const { data: op } = await _client.from("operations")
@@ -782,6 +793,23 @@ async function dbInsertKitchenRequest(tenantId, draft) {
   }
   if (!operationId) return { data: null, error: new Error(`Operação "${header.op}" não encontrada`) };
 
+  // Normaliza splits (slug → uuid) para persistir sempre com IDs canônicos
+  let splitsToSave = null;
+  if (Array.isArray(draftSplits) && draftSplits.length > 0) {
+    splitsToSave = [];
+    for (const s of draftSplits) {
+      let sid = s.op;
+      if (sid && !__isUuid(sid)) {
+        const { data: op } = await _client.from("operations")
+          .select("id").eq("tenant_id", tenantId).eq("slug", sid).maybeSingle();
+        sid = op?.id || null;
+      }
+      if (sid) splitsToSave.push({ op: sid, pct: Number(s.pct) || 0 });
+    }
+    if (splitsToSave.length === 0) splitsToSave = null;
+  }
+  const isShared = !!(splitsToSave && splitsToSave.length > 1);
+
   const { data: row, error } = await _client.from("kitchen_requests").insert({
     tenant_id:         tenantId,
     operation_id:      operationId,
@@ -790,6 +818,8 @@ async function dbInsertKitchenRequest(tenantId, draft) {
     priority:          header.priority || "normal",
     requested_by_name: header.by || "Cozinha",
     notes:             header.notes || null,
+    is_shared:         isShared,
+    splits:            splitsToSave,
   }).select().single();
   if (error) return { data: null, error };
 
@@ -2131,19 +2161,21 @@ async function dbListTenantsAdmin() {
 
 // Cria tenant + owner via edge function provision-tenant (usa SERVICE_ROLE).
 // Convida o owner por email e dispara seeds (payment_methods, stock_categories).
-async function dbProvisionTenant({ name, slug, plan, ownerEmail, ownerName }) {
+async function dbProvisionTenant({ name, slug, plan, ownerEmail, ownerName, ownerPassword }) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   try {
     const { data: { session } } = await _client.auth.getSession();
     if (!session) return { data: null, error: new Error("Não autenticado") };
     const url = window.SK_CONFIG?.supabaseUrl + "/functions/v1/provision-tenant";
+    const payload = { name, slug, plan, ownerEmail, ownerName };
+    if (ownerPassword) payload.ownerPassword = ownerPassword;
     const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + session.access_token,
       },
-      body: JSON.stringify({ name, slug, plan, ownerEmail, ownerName }),
+      body: JSON.stringify(payload),
     });
     const raw = await res.text();
     let json = null; try { json = raw ? JSON.parse(raw) : null; } catch (_) { /* non-json */ }

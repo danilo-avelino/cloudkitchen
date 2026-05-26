@@ -310,7 +310,7 @@ function StatusBar({ scope }) {
       )}
       <span style={statusBar.spacer} />
       <span style={statusBar.item}>{time}</span>
-      <span style={statusBar.item}>v1.1.2</span>
+      <span style={statusBar.item}>v1.1.3</span>
     </div>
   );
 }

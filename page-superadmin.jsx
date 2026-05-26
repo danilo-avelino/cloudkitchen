@@ -156,6 +156,7 @@ function SuperAdmin({ user, onLogout, embedded = false }) {
         plan: draft.plan,
         ownerEmail: draft.ownerEmail,
         ownerName: draft.ownerName,
+        ownerPassword: draft.ownerPassword || null,
       });
       if (error) {
         window.showToast?.("Falha ao provisionar: " + error.message, { tone: "crit", ttl: 6000 });
@@ -170,8 +171,11 @@ function SuperAdmin({ user, onLogout, embedded = false }) {
         await dbUpdateTenantAdmin(data.tenantId, extras);
       }
       await reloadTenants();
+      const usedPassword = !!(draft.ownerPassword && data?.createdWithPassword);
       window.showToast(
-        `Tenant "${draft.name}" provisionado · convite enviado para ${draft.ownerEmail}`,
+        usedPassword
+          ? `Tenant "${draft.name}" provisionado · senha definida pra ${draft.ownerEmail}`
+          : `Tenant "${draft.name}" provisionado · convite enviado para ${draft.ownerEmail}`,
         { tone: "ok", ttl: 5000 },
       );
       return { ok: true };
@@ -844,6 +848,10 @@ function NewTenantModal({ existingSlugs, onCancel, onSave, busy = false, dbOnlin
   const [ownerName, setOwnerName] = useState("");
   const [ownerEmail, setOwnerEmail] = useState("");
   const [ownerPwd, setOwnerPwd] = useState("");
+  // authMode controla como o owner recebe acesso:
+  //   "invite"   → envia convite por email (Supabase magic link) — padrão em DB
+  //   "password" → superadmin define a senha aqui mesmo e entrega pro cliente
+  const [authMode, setAuthMode] = useState(dbOnline ? "invite" : "password");
   const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
 
   // Auto-gera slug a partir do nome (até o usuário editar manualmente)
@@ -868,9 +876,21 @@ function NewTenantModal({ existingSlugs, onCancel, onSave, busy = false, dbOnlin
   const slugInvalid = slug && !/^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])?$/.test(slug);
   const ownerEmailValid = !withOwner || /\S+@\S+\.\S+/.test(ownerEmail);
   const ownerNameValid = !withOwner || ownerName.trim().length > 0;
-  const valid = name.trim() && slug && !slugTaken && !slugInvalid && ownerEmailValid && ownerNameValid;
+  // Senha só é obrigatória quando o modo é "password" — em "invite" o owner
+  // recebe um magic link e define a senha depois.
+  const ownerPwdRequired = withOwner && authMode === "password";
+  const ownerPwdValid = !ownerPwdRequired || (ownerPwd && ownerPwd.length >= 6);
+  const valid = name.trim() && slug && !slugTaken && !slugInvalid && ownerEmailValid && ownerNameValid && ownerPwdValid;
 
   const submit = () => {
+    // Em MOCK sempre temos senha (default "trocar123"). Em DB só mandamos
+    // ownerPassword quando o superadmin escolheu o modo "password"; em "invite"
+    // a edge function chama inviteUserByEmail e o owner define a senha depois.
+    const pwdToSend = !withOwner
+      ? null
+      : dbOnline
+        ? (authMode === "password" ? ownerPwd : null)
+        : (ownerPwd || "trocar123");
     onSave({
       name: name.trim(),
       slug: slug.trim(),
@@ -880,7 +900,7 @@ function NewTenantModal({ existingSlugs, onCancel, onSave, busy = false, dbOnlin
       plan, status,
       ownerName: withOwner ? ownerName.trim() : null,
       ownerEmail: withOwner ? ownerEmail.trim() : null,
-      ownerPassword: withOwner ? (ownerPwd || "trocar123") : null,
+      ownerPassword: pwdToSend,
     });
   };
 
@@ -997,25 +1017,63 @@ function NewTenantModal({ existingSlugs, onCancel, onSave, busy = false, dbOnlin
           <span style={{ color: "var(--fg-3)", fontSize: 11.5 }}>· {dbOnline ? "obrigatório em modo DB" : "cria login pra esse tenant"}</span>
         </label>
         {withOwner && (
-          <div style={{ display: "grid", gridTemplateColumns: dbOnline ? "1fr 1fr" : "1fr 1fr 140px", gap: 12 }}>
-            <FormRow label="Nome do owner">
-              <input className="input" value={ownerName} onChange={(e) => setOwnerName(e.target.value)}
-                     placeholder="Ex.: João Silva" />
-            </FormRow>
-            <FormRow label="Email do owner" hint={dbOnline ? "Convite Supabase será enviado nesse email" : null}>
-              <input className="input" type="email" value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)}
-                     placeholder="joao@cliente.com.br"
-                     style={{
-                       borderColor: ownerEmail && !ownerEmailValid ? "var(--crit)" : null,
-                     }} />
-            </FormRow>
-            {!dbOnline && (
-              <FormRow label="Senha inicial" hint="default: trocar123">
-                <input className="input mono" type="text" value={ownerPwd} onChange={(e) => setOwnerPwd(e.target.value)}
-                       placeholder="trocar123" />
-              </FormRow>
+          <>
+            {dbOnline && (
+              <div style={{ marginBottom: 12 }}>
+                <div className="h-eyebrow" style={{ marginBottom: 6 }}>Como o owner vai acessar</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {[
+                    { id: "invite",   label: "Enviar convite por email", desc: "Owner recebe magic link e define a senha" },
+                    { id: "password", label: "Definir senha aqui",       desc: "Você entrega a credencial pro cliente" },
+                  ].map((m) => {
+                    const active = authMode === m.id;
+                    return (
+                      <button key={m.id} type="button" onClick={() => setAuthMode(m.id)} style={{
+                        padding: "8px 10px", textAlign: "left", borderRadius: 4, cursor: "pointer",
+                        background: active ? "var(--bg-3)" : "var(--bg-1)",
+                        border: `1px solid ${active ? "var(--accent)" : "var(--line)"}`,
+                        color: "var(--fg-0)",
+                      }}>
+                        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 2 }}>{m.label}</div>
+                        <div style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{m.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
-          </div>
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: (dbOnline && authMode !== "password") ? "1fr 1fr" : "1fr 1fr 160px",
+              gap: 12,
+            }}>
+              <FormRow label="Nome do owner">
+                <input className="input" value={ownerName} onChange={(e) => setOwnerName(e.target.value)}
+                       placeholder="Ex.: João Silva" />
+              </FormRow>
+              <FormRow label="Email do owner"
+                       hint={dbOnline && authMode === "invite" ? "Convite Supabase será enviado nesse email" : null}>
+                <input className="input" type="email" value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)}
+                       placeholder="joao@cliente.com.br"
+                       style={{
+                         borderColor: ownerEmail && !ownerEmailValid ? "var(--crit)" : null,
+                       }} />
+              </FormRow>
+              {(!dbOnline || authMode === "password") && (
+                <FormRow label="Senha inicial"
+                         hint={dbOnline
+                           ? (ownerPwd && !ownerPwdValid ? "Mínimo 6 caracteres" : "Mínimo 6 caracteres · entregue pro cliente")
+                           : "default: trocar123"}>
+                  <input className="input mono" type="text" value={ownerPwd}
+                         onChange={(e) => setOwnerPwd(e.target.value)}
+                         placeholder={dbOnline ? "ex.: Cliente@2026" : "trocar123"}
+                         style={{
+                           borderColor: dbOnline && ownerPwd && !ownerPwdValid ? "var(--crit)" : null,
+                         }} />
+                </FormRow>
+              )}
+            </div>
+          </>
         )}
       </div>
 

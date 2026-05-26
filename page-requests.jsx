@@ -13,6 +13,7 @@ function Requests({ scope }) {
   const [creating, setCreating] = useState(false);
   const [editingReq, setEditingReq] = useState(null);
   const [printingReq, setPrintingReq] = useState(null);
+  const [printedIds, setPrintedIds] = useState(() => new Set());
   const [showHistory, setShowHistory] = useState(false);
 
   // Carrega do DB quando online
@@ -61,8 +62,14 @@ function Requests({ scope }) {
   // template, abrimos o diálogo nativo de impressão, e limpamos depois.
   useEffect(() => {
     if (!printingReq) return;
+    const idToMark = printingReq.id;
     const t = setTimeout(() => {
       window.print();
+      setPrintedIds((prev) => {
+        const next = new Set(prev);
+        next.add(idToMark);
+        return next;
+      });
       setPrintingReq(null);
     }, 60);
     return () => clearTimeout(t);
@@ -160,6 +167,20 @@ function Requests({ scope }) {
     window.showToast(`Requisição ${id} atualizada`, { tone: "ok" });
   };
 
+  // Exclui requisição (usado quando o usuário zera todos os itens no editor)
+  const handleEditDelete = async (id) => {
+    if (source === "db") {
+      const { error } = await dbDeleteKitchenRequest(id);
+      if (error) {
+        window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+    }
+    setItems((prev) => prev.filter((r) => r.id !== id));
+    setEditingReq(null);
+    window.showToast(`Requisição ${id} excluída`, { tone: "ok" });
+  };
+
   const handleCreate = async (draft) => {
     if (source === "db" && tenantId) {
       const code = `REQ-${Date.now().toString(36).slice(-6).toUpperCase()}`;
@@ -169,6 +190,7 @@ function Requests({ scope }) {
         priority:  draft.priority,
         by:        draft.by || "Cozinha",
         notes:     draft.notes || null,
+        splits:    draft.splits || null,
         items:     draft.lines.map((ln) => ({
           name:          ln.name,
           stock_item_id: ln.stock_item_id || null,
@@ -185,7 +207,10 @@ function Requests({ scope }) {
       const { data: refreshed } = await dbListKitchenRequests(tenantId, { limit: 100 });
       if (refreshed) setItems(refreshed);
       setCreating(false);
-      window.showToast(`Requisição ${code} criada no Supabase`, { tone: "ok" });
+      const sharedMsg = draft.splits && draft.splits.length > 1
+        ? ` · custo rateado entre ${draft.splits.length} operações`
+        : "";
+      window.showToast(`Requisição ${code} criada no Supabase${sharedMsg}`, { tone: "ok" });
       return;
     }
     // Fallback MOCK
@@ -302,6 +327,7 @@ function Requests({ scope }) {
                         canAdvance={col.id !== "delivered"}
                         onEdit={col.id === "pending" ? () => setEditingReq(r) : null}
                         onPrint={col.id === "pending" ? () => setPrintingReq(r) : null}
+                        printed={printedIds.has(r.id)}
                       />
                     ))}
                   </div>
@@ -326,13 +352,19 @@ function Requests({ scope }) {
             </thead>
             <tbody>
               {filtered.map((r) => {
+                const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
                 const op = MOCK.opById(r.op);
                 const tone = r.status === "pending" ? "warn" : r.status === "delivered" ? "ok" : "info";
                 const lbl = { pending: "Pendente", separated: "Separada", delivered: "Entregue" }[r.status];
                 return (
                   <tr key={r.id} onClick={() => setEditingReq(r)} style={{ cursor: "pointer" }}
                       title="Clique para abrir os detalhes da requisição">
-                    <td><span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />{op.name}</span></td>
+                    <td>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ width: 6, height: 6, borderRadius: 50, background: isShared ? "#94a3b8" : op.color }} />
+                        {isShared ? "🔗 Uso compartilhado" : op.name}
+                      </span>
+                    </td>
                     <td className="dim">{r.by}</td>
                     <td className="num">{r.itemsCount}</td>
                     <td className="num">{r.total}</td>
@@ -342,8 +374,9 @@ function Requests({ scope }) {
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                         {r.status === "pending" && (
                           <>
-                            <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setPrintingReq(r)} title="Imprimir">
-                              <I.Print size={11} />
+                            <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setPrintingReq(r)}
+                                    title={printedIds.has(r.id) ? "Reimprimir (já impresso)" : "Imprimir"}>
+                              {printedIds.has(r.id) ? <span aria-label="já impresso">✅</span> : <I.Print size={11} />}
                             </button>
                             <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setEditingReq(r)}>
                               <I.Edit size={11} />Editar
@@ -378,6 +411,7 @@ function Requests({ scope }) {
           stockItems={stockItems}
           onCancel={() => setEditingReq(null)}
           onSubmit={(draft) => handleEditSave(editingReq.id, draft)}
+          onDelete={() => handleEditDelete(editingReq.id)}
         />
       )}
 
@@ -436,8 +470,10 @@ function RequestsHistoryModal({ requests = [], onClose }) {
   );
 
   // Resolve qualquer formato de r.op (slug ou UUID) para o id canônico (UUID) da ops list.
-  // Sem match → SHARED_KEY (requisição compartilhada/sem operação).
+  // Requisição marcada como compartilhada (isShared/splits) → SHARED_KEY, ignorando a
+  // operação primária (que existe só para satisfazer NOT NULL no banco).
   const resolveOpKey = (r) => {
+    if (r.isShared || (r.splits && r.splits.length > 1)) return SHARED_KEY;
     const raw = r.op || r.operationId;
     if (!raw) return SHARED_KEY;
     const byId   = ops.find((o) => o.id === raw);
@@ -586,14 +622,21 @@ function RequestsHistoryModal({ requests = [], onClose }) {
   );
 }
 
-function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint }) {
+function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint, printed }) {
+  const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
   const op = MOCK.opById(r.op);
-  const tone = r.priority === "high" ? "crit" : "neutral";
   return (
     <div style={{ background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
-        <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-0)" }}>{op.name}</span>
+        <span style={{ width: 6, height: 6, borderRadius: 50, background: isShared ? "#94a3b8" : op.color }} />
+        <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-0)" }}>
+          {isShared ? "🔗 Uso compartilhado" : op.name}
+        </span>
+        {r.by && (
+          <span style={{ fontSize: 11.5, color: "var(--fg-2)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={{ color: "var(--fg-3)" }}>·</span> {r.by}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -645,13 +688,14 @@ function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint }) {
         <span style={{ flex: 1 }} />
         <span className="mono" style={{ fontSize: 11.5, color: "var(--fg-0)", fontWeight: 500 }}>{r.total}</span>
       </div>
-      {r.priority === "high" && <span className="badge" data-tone="crit" style={{ alignSelf: "flex-start" }}>Prioridade alta</span>}
       {(canAdvance || onEdit || onPrint) && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {onPrint && (
-            <button className="btn" data-size="sm" onClick={onPrint} title="Imprimir (papel térmico)"
-                    style={{ justifyContent: "center", padding: "5px 9px" }}>
+            <button className="btn" data-size="sm" onClick={onPrint}
+                    title={printed ? "Reimprimir (já impresso)" : "Imprimir (papel térmico)"}
+                    style={{ justifyContent: "center", padding: "5px 9px", display: "inline-flex", alignItems: "center", gap: 4 }}>
               <I.Print size={12} />
+              {printed && <span aria-label="já impresso">✅</span>}
             </button>
           )}
           {onEdit && (
@@ -675,6 +719,7 @@ function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint }) {
 // Renderizado via portal direto no <body> para escapar de containers posicionados
 // do AppShell (que estavam empurrando o cupom para fora da área imprimível na ELGIN).
 function PrintTicket({ request }) {
+  const isShared = !!(request.isShared || (request.splits && request.splits.length > 1));
   const op = MOCK.opById(request.op);
 
   const content = (
@@ -690,15 +735,10 @@ function PrintTicket({ request }) {
       </div>
       <div className="row">
         <span>Operação:</span>
-        <span className="bold">{op.short}</span>
+        <span className="bold">{isShared ? "COMPARTILHADO" : op.short}</span>
       </div>
-      <div>{op.name}</div>
+      <div>{isShared ? "Uso compartilhado · custo rateado" : op.name}</div>
       <div>Solicitante: {request.by}</div>
-      {request.priority === "high" && (
-        <div className="bold center" style={{ marginTop: "2mm", border: "1px solid black", padding: "1mm" }}>
-          ** PRIORIDADE ALTA **
-        </div>
-      )}
       {request.notes && (
         <div style={{ marginTop: "2mm", whiteSpace: "pre-wrap" }}>
           <span className="bold">Obs.:</span> {request.notes}
@@ -748,7 +788,7 @@ function PrintTicket({ request }) {
 // ===== Modal de edição da requisição (somente em status pendente) =====
 // Itens são travados ao catálogo de estoque · usuário pode editar qty ou
 // remover linhas, mas o insumo (nome+unidade+custo) sai do MOCK.STOCK_ITEMS.
-function EditRequestModal({ request, onCancel, onSubmit, stockItems = MOCK.STOCK_ITEMS }) {
+function EditRequestModal({ request, onCancel, onSubmit, onDelete, stockItems = MOCK.STOCK_ITEMS }) {
   const [lines, setLines] = useState(() =>
     request.items.map((entry) => {
       const [name, qtyText, stockId] = entry;
@@ -764,15 +804,22 @@ function EditRequestModal({ request, onCancel, onSubmit, stockItems = MOCK.STOCK
   );
 
   const validLines = lines.filter((ln) => ln.stock_item_id && parseFloat(String(ln.qty).replace(",", ".")) > 0);
-  const valid = validLines.length > 0;
+  // Quando todos os itens são zerados, o save vira "Excluir requisição" — assim a UX
+  // permite que o usuário descarte a requisição zerando tudo em vez de ficar travado.
+  const isEmpty = validLines.length === 0;
+  const isShared = !!(request.isShared || (request.splits && request.splits.length > 1));
   const op = MOCK.opById(request.op);
   const [submitting, setSubmitting] = useState(false);
 
   const handleSubmitClick = async () => {
-    if (submitting || !valid) return;
+    if (submitting) return;
     setSubmitting(true);
     try {
-      await onSubmit({ lines: validLines.map((ln) => buildSubmitLine(ln)) });
+      if (isEmpty) {
+        if (onDelete) await onDelete();
+      } else {
+        await onSubmit({ lines: validLines.map((ln) => buildSubmitLine(ln)) });
+      }
     } finally {
       setSubmitting(false);
     }
@@ -787,15 +834,21 @@ function EditRequestModal({ request, onCancel, onSubmit, stockItems = MOCK.STOCK
       minHeight="92vh"
       footer={<>
         <button className="btn" data-size="sm" onClick={onCancel} disabled={submitting}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || submitting}
+        <button className="btn" data-size="sm"
+                data-variant={isEmpty ? "danger" : "primary"}
+                disabled={submitting}
                 onClick={handleSubmitClick}>
-          {submitting ? "Salvando…" : "Salvar alterações"}
+          {submitting
+            ? (isEmpty ? "Excluindo…" : "Salvando…")
+            : (isEmpty ? "Excluir requisição" : "Salvar alterações")}
         </button>
       </>}
     >
       <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "var(--fg-2)" }}>
-        <span style={{ width: 8, height: 8, borderRadius: 50, background: op.color }} />
-        <span style={{ color: "var(--fg-0)", fontWeight: 500 }}>{op.name}</span>
+        <span style={{ width: 8, height: 8, borderRadius: 50, background: isShared ? "#94a3b8" : op.color }} />
+        <span style={{ color: "var(--fg-0)", fontWeight: 500 }}>
+          {isShared ? "🔗 Uso compartilhado" : op.name}
+        </span>
         <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
           {request.by} · {request.at}
         </span>
@@ -832,7 +885,7 @@ function buildSubmitLine(ln, stockItems = MOCK.STOCK_ITEMS) {
 // O popover é renderizado via portal no document.body com position: fixed pra
 // escapar do overflow:auto do modal (senão fica recortado pela borda inferior).
 // Filtro por nome ou categoria, acento/case-insensitive.
-function StockItemPicker({ items, value, onChange, disabledIds = [], unmatchedHint }) {
+function StockItemPicker({ items, value, onChange, onPicked, openSignal, disabledIds = [], unmatchedHint }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [pos, setPos] = useState({ top: 0, left: 0, width: 0, openUp: false });
@@ -842,6 +895,11 @@ function StockItemPicker({ items, value, onChange, disabledIds = [], unmatchedHi
   const [activeIdx, setActiveIdx] = useState(0);
 
   const selected = items.find((it) => it.id === value) || null;
+
+  // Abertura programática via openSignal (parent troca o valor pra disparar)
+  useEffect(() => {
+    if (openSignal != null && openSignal > 0) setOpen(true);
+  }, [openSignal]);
 
   // Posiciona o popover relativo ao trigger; abre pra cima se faltar espaço embaixo.
   useEffect(() => {
@@ -895,6 +953,7 @@ function StockItemPicker({ items, value, onChange, disabledIds = [], unmatchedHi
     onChange(it.id);
     setOpen(false);
     setSearch("");
+    if (onPicked) onPicked(it.id);
   };
 
   const onKeyDown = (e) => {
@@ -1033,6 +1092,33 @@ function StockLinesEditor({ lines, setLines, allowAdd, emptyHint, stockItems = M
   const removeLine = (i)        => setLines(lines.filter((_, j) => j !== i));
   const addLine    = ()         => setLines([...lines, { stock_item_id: "", qty: "" }]);
 
+  // Atalhos teclado: ao escolher item no picker, foco vai pra qty da mesma linha.
+  // Ao pressionar Enter na qty, abre o picker da próxima linha (cria se preciso).
+  const qtyRefs = useRef([]);
+  const [openSignals, setOpenSignals] = useState({});
+  const focusQty = (i) => {
+    // setTimeout 0 → roda após o React commitar o re-render (input deixa de estar disabled)
+    setTimeout(() => {
+      const el = qtyRefs.current[i];
+      if (el) { el.focus(); el.select(); }
+    }, 0);
+  };
+  const triggerOpenPicker = (i) => {
+    setOpenSignals((cur) => ({ ...cur, [i]: (cur[i] || 0) + 1 }));
+  };
+  const handleQtyEnter = (e, i) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const cur = lines[i];
+    const qOk = cur.stock_item_id && parseFloat(String(cur.qty).replace(",", ".")) > 0;
+    if (!qOk) return;
+    if (i === lines.length - 1) {
+      if (!allowAdd) return;
+      setLines([...lines, { stock_item_id: "", qty: "" }]);
+    }
+    triggerOpenPicker(i + 1);
+  };
+
   // Itens já selecionados (excluindo a linha atual) para evitar duplicar
   const usedIds = (currentIdx) =>
     new Set(lines.filter((_, j) => j !== currentIdx).map((ln) => ln.stock_item_id).filter(Boolean));
@@ -1066,12 +1152,16 @@ function StockLinesEditor({ lines, setLines, allowAdd, emptyHint, stockItems = M
                 items={catalog}
                 value={ln.stock_item_id}
                 onChange={(id) => setLine(i, "stock_item_id", id)}
+                onPicked={() => focusQty(i)}
+                openSignal={openSignals[i]}
                 disabledIds={Array.from(taken)}
                 unmatchedHint={unmatched ? ln.legacyName : null}
               />
-              <input className="input mono" value={ln.qty} placeholder="0"
+              <input ref={(el) => { qtyRefs.current[i] = el; }}
+                     className="input mono" value={ln.qty} placeholder="0"
                      inputMode="decimal"
                      onChange={(e) => setLine(i, "qty", e.target.value)}
+                     onKeyDown={(e) => handleQtyEnter(e, i)}
                      style={{ textAlign: "right", padding: "4px 8px" }}
                      disabled={!item} />
               <span style={{
@@ -1130,7 +1220,6 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
   const SHARED = "shared";
   const [op, setOp] = useState(defaultOp || ops[0]?.id || "");
   const [by, setBy] = useState("");
-  const [priority, setPriority] = useState("normal");
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState([{ stock_item_id: "", qty: "" }]);
 
@@ -1256,7 +1345,8 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
     : true;
 
   const validLines = lines.filter((ln) => ln.stock_item_id && parseFloat(String(ln.qty).replace(",", ".")) > 0);
-  const valid = op && validLines.length > 0 && splitValid;
+  const byValid = by.trim().length > 0;
+  const valid = op && validLines.length > 0 && splitValid && byValid;
   // Total estimado · custo do estoque × qty (usado pelo rateio entre operações)
   const totalEst = lines.reduce((s, ln) => {
     const item = stockItems.find((it) => it.id === ln.stock_item_id);
@@ -1274,7 +1364,7 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
     return {
       op: primaryOp,
       by: by.trim(),
-      priority,
+      priority: "normal",
       notes: notes.trim() || null,
       lines: validLines.map((ln) => buildSubmitLine(ln, stockItems)),
       splits: splitsArr,
@@ -1301,7 +1391,7 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
           {submitting ? "Enviando…" : "Enviar requisição"}
         </button>
       </>}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
         <FormRow label="Operação">
           <select className="select" value={op} onChange={(e) => setOp(e.target.value)}>
             <option value={SHARED}>🔗 Uso compartilhado</option>
@@ -1309,14 +1399,15 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
             {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
           </select>
         </FormRow>
-        <FormRow label="Solicitante">
-          <input className="input" placeholder="Ex.: Stefano (cozinha)" value={by} onChange={(e) => setBy(e.target.value)} />
-        </FormRow>
-        <FormRow label="Prioridade">
-          <select className="select" value={priority} onChange={(e) => setPriority(e.target.value)}>
-            <option value="normal">Normal</option>
-            <option value="high">Alta</option>
-          </select>
+        <FormRow label="Solicitante *">
+          <input
+            className="input"
+            placeholder="Ex.: Stefano (cozinha)"
+            value={by}
+            onChange={(e) => setBy(e.target.value)}
+            aria-invalid={!byValid}
+            style={!byValid ? { borderColor: "var(--crit)", color: "var(--crit)" } : null}
+          />
         </FormRow>
       </div>
 

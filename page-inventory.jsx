@@ -179,7 +179,11 @@ function Inventory() {
     };
   }, [inventories, finalized]);
 
-  const handleCreateInventory = async (draft, existing = null) => {
+  // opts.keepOpen=true · usado quando o usuário clica "Criar" na Etapa 1 do
+  // wizard: persiste o inventário como in_progress mas mantém o modal aberto
+  // re-mountando-o no modo "continuar" (já abre direto na Etapa 2 com cats/
+  // responsável/contagens pré-carregados).
+  const handleCreateInventory = async (draft, existing = null, opts = {}) => {
     const today = new Date().toISOString();
     const id = existing?.id || `INV-${today.slice(0, 10)}`;
     const newInv = {
@@ -191,6 +195,17 @@ function Inventory() {
       status:      draft.status,
       categories:  draft.categories,
       items:       draft.items,
+    };
+    const closeOrResume = (savedInv) => {
+      if (opts.keepOpen && draft.status !== "finalized") {
+        // Transiciona o modal: fecha o "creating" e abre o "resuming" com o
+        // inventário recém-salvo · React 18 bate em batch sem flicker.
+        setCreating(false);
+        setResuming(savedInv);
+      } else {
+        setCreating(false);
+        setResuming(null);
+      }
     };
     // Se DB online + Fase 11 aplicada, persiste no banco
     if (source === "db" && tenantId) {
@@ -209,22 +224,24 @@ function Inventory() {
       ]);
       if (refreshed) setInventories(refreshed);
       if (refreshedItems) setStockItems(refreshedItems);
-      setCreating(false);
-      setResuming(null);
+      const savedInv = (refreshed && refreshed.find((x) => x.id === id)) || newInv;
+      closeOrResume(savedInv);
       const finalized = draft.status === "finalized";
-      const label = finalized ? "finalizado" : "salvo parcialmente";
-      const extra = finalized && m.divergences > 0
-        ? ` · ${m.divergences} ajuste(s) aplicado(s) ao estoque`
-        : "";
-      window.showToast(`Inventário ${label} no Supabase · score ${m.accuracy}%${extra}`, { tone: m.divergences > 0 ? "warn" : "ok", ttl: 4500 });
+      if (!opts.silent) {
+        const label = finalized ? "finalizado" : "salvo parcialmente";
+        const extra = finalized && m.divergences > 0
+          ? ` · ${m.divergences} ajuste(s) aplicado(s) ao estoque`
+          : "";
+        window.showToast(`Inventário ${label} no Supabase · score ${m.accuracy}%${extra}`, { tone: m.divergences > 0 ? "warn" : "ok", ttl: 4500 });
+      }
       return;
     }
     // MOCK
     setInventories((prev) => existing
       ? prev.map((x) => x.id === existing.id ? newInv : x)
       : [newInv, ...prev]);
-    setCreating(false);
-    setResuming(null);
+    closeOrResume(newInv);
+    if (opts.silent) return;
     if (draft.status === "finalized") {
       const m = computeInvMetrics(newInv.items);
       window.showToast(
@@ -339,7 +356,7 @@ function Inventory() {
         <NewInventoryModal
           stockItems={stockItems}
           onCancel={() => setCreating(false)}
-          onSave={handleCreateInventory}
+          onSave={(draft, opts) => handleCreateInventory(draft, null, opts)}
         />
       )}
       {resuming && (
@@ -347,7 +364,7 @@ function Inventory() {
           stockItems={stockItems}
           initial={resuming}
           onCancel={() => setResuming(null)}
-          onSave={(draft) => handleCreateInventory(draft, resuming)}
+          onSave={(draft, opts) => handleCreateInventory(draft, resuming, opts)}
         />
       )}
       {viewing && (
@@ -1081,7 +1098,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
 
   const [saving, setSaving] = useState(false);
 
-  const savePartial = async () => {
+  const savePartial = async (opts = {}) => {
     if (saving) return;
     setSaving(true);
     try {
@@ -1091,7 +1108,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
         role: "Estoquista",
         status: "in_progress",
         items: submitItems,
-      });
+      }, opts);
     } finally {
       setSaving(false);
     }
@@ -1140,10 +1157,19 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
                 {saving ? "Salvando…" : "Salvar parcial"}
               </button>
             )}
-            {step < 3 ? (
+            {step === 1 ? (
+              // Etapa 1: "Criar" persiste o inventário como in_progress (cria
+              // o registro no DB) e mantém o modal aberto · keepOpen=true faz
+              // o parent transicionar pro modo "continuar", que abre na Etapa 2.
+              <button className="btn" data-variant="primary" data-size="sm"
+                      onClick={() => savePartial({ keepOpen: true })}
+                      disabled={saving || selectedCats.length === 0 || !responsible.trim()}>
+                {saving ? "Criando…" : "Criar"}<I.ChevronR size={11} />
+              </button>
+            ) : step < 3 ? (
               <button className="btn" data-variant="primary" data-size="sm" onClick={next}
-                      disabled={saving || (step === 1 && (selectedCats.length === 0 || !responsible.trim()))}>
-                Avançar<I.ChevronR size={11} />
+                      disabled={saving}>
+                Finalizar<I.ChevronR size={11} />
               </button>
             ) : (
               <button className="btn" data-variant="primary" data-size="sm" onClick={finalize}
@@ -1261,6 +1287,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
           counts={counts}
           setCount={setCount}
           filledCount={filledCount}
+          onAutoSave={() => savePartial({ silent: true, keepOpen: true })}
         />
       )}
 
@@ -1309,7 +1336,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
 }
 
 // Etapa 2 · Dashboard de categorias + contagem focada por categoria
-function CountingStep({ scopedItems, counts, setCount, filledCount }) {
+function CountingStep({ scopedItems, counts, setCount, filledCount, onAutoSave }) {
   const cats = useMemo(() => {
     const map = {};
     scopedItems.forEach((it) => {
@@ -1337,10 +1364,13 @@ function CountingStep({ scopedItems, counts, setCount, filledCount }) {
     const nextCat = idx >= 0 && idx < cats.length - 1 ? cats[idx + 1] : null;
     const visibleItems = scopedItems.filter((it) => (it.cat || "Sem categoria") === focusedCat);
 
-    // Troca de categoria. O state `counts` é compartilhado entre categorias,
-    // então o que já foi contado permanece (use "Salvar parcial" no rodapé
-    // para persistir no banco antes de fechar o modal).
-    const goTo = (catName) => setFocusedCat(catName);
+    // Troca de categoria. Persistimos as contagens em background (silent) antes
+    // de mudar de foco — assim o usuário pode trocar entre categorias com a
+    // certeza de que o que já contou ficou salvo no banco.
+    const goTo = (catName) => {
+      onAutoSave?.();
+      setFocusedCat(catName);
+    };
 
     return (
       <div>

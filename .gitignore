@@ -29,3 +29,6 @@ uploads/*
 
 # TestSprite (testes gerados + relatórios mudam a cada run)
 testsprite_tests/
+
+# Supabase CLI · cache local (não deve ser commitado)
+supabase/.temp/
