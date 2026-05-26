@@ -14,6 +14,12 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+# Força todas as JS actions a rodar em Node 24 agora (default a partir de
+# 02/jun/2026). Necessário porque actions/upload-pages-artifact@v4 ainda pina
+# upload-artifact por SHA numa versão Node 20.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest

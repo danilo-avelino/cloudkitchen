@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Força JS actions em Node 24 agora (default em 02/jun/2026)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
