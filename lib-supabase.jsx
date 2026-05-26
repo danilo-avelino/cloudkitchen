@@ -827,8 +827,11 @@ async function dbInsertKitchenRequest(tenantId, draft) {
   // IMPORTANTE: unit_cost é o custo UNITÁRIO do insumo. line_cost é coluna gerada
   // (qty * unit_cost) no schema, então passar o custo da linha aqui dobra o cálculo.
   const itemRows = items.map((it, i) => {
-    const qtyN = Number(it.qty || it[1]?.match(/[\d.,]+/)?.[0]?.replace(",", ".")) || 1;
-    // Se vier só estCost (custo da linha), divide por qty pra obter o unitário.
+    // `it.qty` pode vir como "4 kg" (shape moderno do buildSubmitLine) ou "4 kg"
+    // dentro de it[1] (legado). `Number("4 kg")` é NaN — use parseFloat pra extrair
+    // o número líder, senão o `|| 1` mascara o erro e tudo salva como 1.
+    const rawQty = String(it.qty ?? it[1] ?? "").trim();
+    const qtyN = parseFloat(rawQty.replace(",", ".")) || 1;
     const unitCost = Number(it.unitCost) > 0
       ? Number(it.unitCost)
       : (qtyN > 0 ? (Number(it.estCost) || 0) / qtyN : 0);
@@ -837,7 +840,7 @@ async function dbInsertKitchenRequest(tenantId, draft) {
       stock_item_id:      it.stock_item_id || null,
       display_name:       it.name || it[0],
       qty:                qtyN,
-      unit:               it.unit || (it[1]?.match(/\D+$/)?.[0]?.trim() || "un"),
+      unit:               it.unit || (rawQty.match(/[a-zA-Z]+\s*$/)?.[0]?.trim() || "un"),
       unit_cost:          unitCost,
       sort_order:         i,
     };
@@ -847,6 +850,48 @@ async function dbInsertKitchenRequest(tenantId, draft) {
     if (iErr) return { data: row, error: iErr };
   }
   return { data: row, error: null };
+}
+
+// Substitui TODOS os items de uma requisição (delete + insert).
+// Usado pelo editor de requisição: ao salvar, o usuário pode ter alterado qty,
+// removido linhas ou trocado insumos. Sem isso o save fica só no state local e
+// o trigger de baixa (separated → estoque) usa os itens originais do banco.
+// `items` segue o mesmo shape de dbInsertKitchenRequest.items.
+async function dbReplaceKitchenRequestItems(requestId, items, header = {}) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  // Atualiza o cabeçalho (notes etc.) — independente de a lista de itens mudar,
+  // o usuário pode estar editando só a observação.
+  if (header && Object.prototype.hasOwnProperty.call(header, "notes")) {
+    const { error: hdrErr } = await _client.from("kitchen_requests")
+      .update({ notes: header.notes ?? null }).eq("id", requestId);
+    if (hdrErr) return { error: hdrErr };
+  }
+  const { error: delErr } = await _client.from("kitchen_request_items")
+    .delete().eq("kitchen_request_id", requestId);
+  if (delErr) return { error: delErr };
+  if (!items || items.length === 0) return { error: null };
+  // unit_cost é o custo UNITÁRIO. line_cost é coluna gerada (qty * unit_cost);
+  // gravar o custo da linha aqui dobra o cálculo. Se vier só estCost, divide por qty.
+  const itemRows = items.map((it, i) => {
+    // `it.qty` chega como "4 kg" (buildSubmitLine) — `Number("4 kg")` é NaN e o
+    // `|| 1` antigo mascarava o erro, salvando sempre 1. Ver [[feedback_brl_number_parse]].
+    const rawQty = String(it.qty ?? it[1] ?? "").trim();
+    const qtyN = parseFloat(rawQty.replace(",", ".")) || 1;
+    const unitCost = Number(it.unitCost) > 0
+      ? Number(it.unitCost)
+      : (qtyN > 0 ? (Number(it.estCost) || 0) / qtyN : 0);
+    return {
+      kitchen_request_id: requestId,
+      stock_item_id:      it.stock_item_id || null,
+      display_name:       it.name || it[0],
+      qty:                qtyN,
+      unit:               it.unit || (rawQty.match(/[a-zA-Z]+\s*$/)?.[0]?.trim() || "un"),
+      unit_cost:          unitCost,
+      sort_order:         i,
+    };
+  });
+  const { error: insErr } = await _client.from("kitchen_request_items").insert(itemRows);
+  return { error: insErr || null };
 }
 
 async function dbUpdateKitchenRequestStatus(id, status, userId) {
@@ -2045,14 +2090,18 @@ async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
     .lte("created_at", toDate);
   if (error) return { data: null, source: "mock", error };
 
+  // `kind='out'` grava qty negativa (schema constraint). Pra consumo, usamos
+  // valor absoluto — assim o sort DESC traz o MAIOR consumo primeiro, em vez de
+  // ordenar pelo "menos negativo" (que aparecia como -R$ 1,29 no topo).
   const agg = {};
   for (const mv of data || []) {
     const id = mv.stock_item_id;
     if (!agg[id]) {
       agg[id] = { name: mv.stock_item?.name, unit: mv.stock_item?.unit, totalQty: 0, totalCost: 0 };
     }
-    agg[id].totalQty += Number(mv.qty) || 0;
-    agg[id].totalCost += (Number(mv.qty) || 0) * (Number(mv.stock_item?.unit_cost) || 0);
+    const qtyAbs = Math.abs(Number(mv.qty) || 0);
+    agg[id].totalQty += qtyAbs;
+    agg[id].totalCost += qtyAbs * (Number(mv.stock_item?.unit_cost) || 0);
   }
   const sorted = Object.values(agg).sort((a, b) => b.totalCost - a.totalCost);
   return { data: sorted.slice(0, limit), source: "db", error: null };
@@ -2259,6 +2308,7 @@ Object.assign(window, {
   dbListPaymentMethods,
   dbListRevenueEntries, dbInsertRevenueEntry, dbUpdateRevenueEntry, dbDeleteRevenueEntry,
   dbListKitchenRequests, dbInsertKitchenRequest, dbUpdateKitchenRequestStatus, dbDeleteKitchenRequest,
+  dbReplaceKitchenRequestItems,
   dbListPurchaseOrders, dbInsertPurchaseOrder, dbDeletePurchaseOrder,
   dbUpdatePurchaseOrderItem, dbDeletePurchaseOrderItem,
   dbListGoodsReceipts, dbInsertGoodsReceipt,

@@ -237,20 +237,22 @@ function computeStockStatus(it) {
 }
 
 // Aplica uma movimentação no item:
-//   deltaQty > 0  → entrada (atualiza custo médio se newUnitCost informado)
+//   deltaQty > 0  → entrada (substitui o custo do insumo pelo da última compra)
 //   deltaQty < 0  → saída
 // Retorna { ok, oldQty, newQty } ou null se item inválido.
+//
+// IMPORTANTE (2026-05-26): trocamos custo médio ponderado por "custo da última
+// compra" — o usuário quer que o estoque reflita o que pagou no último recebimento,
+// sem cálculos extras. Espelha o trigger `app.tg_apply_stock_movement` no Postgres.
 function applyStockMovement(stockItem, deltaQty, newUnitCost) {
   if (!stockItem) return null;
   const oldQty  = Number(stockItem.qty)  || 0;
-  const oldCost = Number(stockItem.cost) || 0;
   const delta   = Number(deltaQty)       || 0;
   const newQty  = oldQty + delta;
 
-  // Custo médio ponderado · só nas entradas com custo informado
-  if (delta > 0 && newUnitCost > 0) {
-    const totalValue = oldQty * oldCost + delta * Number(newUnitCost);
-    stockItem.cost = newQty > 0 ? Number((totalValue / newQty).toFixed(2)) : oldCost;
+  // Entrada com custo informado → sobrescreve o custo do insumo.
+  if (delta > 0 && Number(newUnitCost) > 0) {
+    stockItem.cost = Number(Number(newUnitCost).toFixed(4));
   }
   stockItem.qty    = Math.max(0, Number(newQty.toFixed(3)));
   stockItem.status = computeStockStatus(stockItem);

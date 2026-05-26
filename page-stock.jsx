@@ -244,7 +244,8 @@ function Stock({ scope }) {
     !it.cat || it.cat === "Sem categoria" || it.cat === "Outro" ||
     !it.supplier ||
     !it.reorder || it.reorder <= 0 ||
-    !it.max || it.max <= 0
+    !it.max || it.max <= 0 ||
+    !it.cost || Number(it.cost) <= 0
   ).length, [items]);
 
   // Ordem fixa por urgência: ruptura → baixo → ok. Empate: nome alfabético.
@@ -283,39 +284,59 @@ function Stock({ scope }) {
     return "ok";
   };
 
-  const handleEntry = async ({ itemId, qty, cost, note }) => {
-    const before = items.find((it) => it.id === itemId);
-    // Update otimista
+  const handleEntry = async (draft) => {
+    // Aceita formato novo (multi-linha) e formato antigo (linha única) para retro-compat.
+    const linesIn = Array.isArray(draft.lines) && draft.lines.length > 0
+      ? draft.lines
+      : [{ itemId: draft.itemId, qty: draft.qty, cost: draft.cost }];
+    const note = draft.note || "Entrada manual";
+
+    // Update otimista: aplica todas as linhas localmente. `unit_cost` na nova regra
+    // (última compra) sobrescreve, não faz média ponderada.
+    const beforeMap = new Map();
     setItems((prev) => prev.map((it) => {
-      if (it.id !== itemId) return it;
+      const ln = linesIn.find((l) => l.itemId === it.id);
+      if (!ln) return it;
+      if (!beforeMap.has(it.id)) beforeMap.set(it.id, it);
+      const qty = Number(ln.qty) || 0;
+      const cost = Number(ln.cost) || 0;
       const newQty = it.qty + qty;
-      const newCost = cost > 0 && qty > 0
-        ? Number((((it.qty * it.cost) + (qty * cost)) / Math.max(newQty, 0.0001)).toFixed(2))
-        : it.cost;
+      const newCost = cost > 0 && qty > 0 ? cost : it.cost;
       const updated = { ...it, qty: newQty, cost: newCost };
       return { ...updated, status: recomputeStatus(updated) };
     }));
     setShowEntry(false);
 
     if (source === "db" && tenantId) {
-      const { error } = await dbApplyStockMovement(
-        tenantId, itemId, qty, "in",
-        note || "Entrada manual",
-        cost,
-      );
-      if (error) {
-        // Rollback
-        if (before) setItems((prev) => prev.map((it) => it.id === itemId ? before : it));
-        window.showToast(`Erro ao salvar entrada: ${error.message}`, { tone: "crit", ttl: 4500 });
-        return;
+      const failures = [];
+      for (const ln of linesIn) {
+        const qty = Number(ln.qty) || 0;
+        if (qty <= 0) continue;
+        const { error } = await dbApplyStockMovement(
+          tenantId, ln.itemId, qty, "in",
+          note,
+          Number(ln.cost) || undefined,
+        );
+        if (error) failures.push({ itemId: ln.itemId, error });
       }
-      // Refetch p/ refletir qty/custo autoritativo do banco (trigger recalcula)
+      if (failures.length > 0) {
+        // Rollback dos itens que falharam
+        setItems((prev) => prev.map((it) => {
+          const failed = failures.find((f) => f.itemId === it.id);
+          return failed && beforeMap.has(it.id) ? beforeMap.get(it.id) : it;
+        }));
+        window.showToast(`Erro em ${failures.length} item(ns): ${failures[0].error.message}`, { tone: "crit", ttl: 4500 });
+      }
+      // Refetch p/ refletir qty/custo autoritativo do banco (mesmo com falhas parciais)
       const { data: refreshed } = await dbListStockItems(tenantId);
       if (refreshed) setItems(refreshed);
-      window.showToast(`+${qty} registrado no Supabase · ${note || "entrada manual"}`, { tone: "ok" });
+      const okCount = linesIn.length - failures.length;
+      if (okCount > 0) {
+        window.showToast(`${okCount} entrada(s) registrada(s) no Supabase · ${note}`, { tone: "ok" });
+      }
       return;
     }
-    window.showToast(`+${qty} registrado · ${note || "entrada manual"}`, { tone: "ok" });
+    window.showToast(`${linesIn.length} entrada(s) registrada(s) · ${note}`, { tone: "ok" });
   };
 
   // Liga/desliga "Compor CMV" — itens com false são excluídos do cálculo de CMV
@@ -599,7 +620,7 @@ function Stock({ scope }) {
                 <th>Fornecedor</th>
                 <th>Status</th>
                 <th className="num">Qtd</th>
-                <th className="num">Custo médio</th>
+                <th className="num">Última compra</th>
                 <th className="num">Valor total</th>
                 <th className="num">Mín / Máx</th>
                 <th>Validade</th>
@@ -964,48 +985,173 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
 }
 
 function StockEntryModal({ items, onClose, onSave }) {
-  const [itemId, setItemId] = useState(items[0]?.id || "");
-  const [qty,    setQty]    = useState("");
-  const [cost,   setCost]   = useState("");
-  const [note,   setNote]   = useState("");
-  const item = items.find((i) => i.id === itemId);
-  const valid = itemId && parseFloat(qty) > 0;
+  // Picker vem do page-requests.jsx via window — lazy lookup pra evitar
+  // ReferenceError cross-file quando esbuild trata cada .jsx como módulo strict.
+  const StockItemPicker = window.StockItemPicker;
+  const catalog = useMemo(
+    () => [...(items || [])].sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
+    [items],
+  );
 
-  const submit = (e) => {
+  const [lines, setLines] = useState([{ stock_item_id: "", qty: "", cost: "" }]);
+  const [note,  setNote]  = useState("");
+  const [openSignals, setOpenSignals] = useState({});
+  // Abre o picker da primeira linha automaticamente quando o modal monta.
+  useEffect(() => { setOpenSignals({ 0: 1 }); }, []);
+
+  const parseN = (raw) => parseFloat(String(raw ?? "").replace(",", ".")) || 0;
+  const setLine    = (i, k, v) => setLines((prev) => prev.map((ln, j) => j === i ? { ...ln, [k]: v } : ln));
+  const removeLine = (i) => setLines((prev) => prev.filter((_, j) => j !== i));
+  const addLine    = () => {
+    const newIdx = lines.length; // posição do item recém-criado (após o push)
+    setLines((prev) => [...prev, { stock_item_id: "", qty: "", cost: "" }]);
+    setOpenSignals((cur) => ({ ...cur, [newIdx]: (cur[newIdx] || 0) + 1 }));
+  };
+
+  // Não permite o mesmo insumo em duas linhas
+  const usedIds = (currentIdx) =>
+    new Set(lines.filter((_, j) => j !== currentIdx).map((ln) => ln.stock_item_id).filter(Boolean));
+
+  const validLines = lines.filter((ln) => ln.stock_item_id && parseN(ln.qty) > 0);
+  const total = validLines.reduce((s, ln) => s + parseN(ln.qty) * parseN(ln.cost), 0);
+  const valid = validLines.length > 0;
+
+  // Enter no campo de custo da última linha vira "Adicionar item"
+  const onCostKeyDown = (e, i) => {
+    if (e.key !== "Enter") return;
     e.preventDefault();
-    if (!valid) return;
-    onSave({
-      itemId,
-      qty:  parseFloat(String(qty).replace(",", ".")),
-      cost: parseFloat(String(cost).replace(",", ".")) || 0,
-      note: note.trim(),
-    });
+    const ln = lines[i];
+    if (!ln.stock_item_id || parseN(ln.qty) <= 0) return;
+    if (i === lines.length - 1) addLine();
+  };
+
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async () => {
+    if (!valid || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSave({
+        note: note.trim(),
+        lines: validLines.map((ln) => ({
+          itemId: ln.stock_item_id,
+          qty:    parseN(ln.qty),
+          cost:   parseN(ln.cost),
+        })),
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
-    <Modal title="Entrada manual de estoque" subtitle="Registre uma compra recebida ou ajuste positivo." onClose={onClose}
-      footer={<>
-        <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid}>Confirmar entrada</button>
-      </>}>
-      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <FormRow label="Insumo">
-          <select className="select" value={itemId} onChange={(e) => setItemId(e.target.value)}>
-            {items.map((i) => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}
-          </select>
-        </FormRow>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <FormRow label={`Qtd (${item?.unit || ""})`}>
-            <input className="input mono" inputMode="decimal" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="0" />
-          </FormRow>
-          <FormRow label="Custo unit. (R$)" hint="Atualiza custo médio">
-            <input className="input mono" inputMode="decimal" value={cost} onChange={(e) => setCost(e.target.value)} placeholder="0,00" />
-          </FormRow>
+    <Modal title="Entrada manual de estoque"
+           subtitle="Selecione insumos do estoque · qty e custo unitário por linha."
+           onClose={onClose}
+           width={760}
+      footer={
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 12 }}>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-3)" }}>
+            {validLines.length} {validLines.length === 1 ? "item" : "itens"} · total R$ {total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onClose} disabled={submitting}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid || submitting}>
+              {submitting ? "Salvando…" : "Confirmar entrada"}
+            </button>
+          </div>
         </div>
-        <FormRow label="Nota / NF">
-          <input className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ex.: NF 8423 · Hortifruti" />
+      }>
+      <div className="h-eyebrow" style={{ marginBottom: 8 }}>Itens · {lines.length}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {/* Header da grade */}
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 90px 110px 100px 32px",
+          gap: 10, alignItems: "center",
+          padding: "0 4px",
+          fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)",
+          letterSpacing: "0.08em", textTransform: "uppercase",
+        }}>
+          <span>Insumo</span>
+          <span style={{ textAlign: "right" }}>Qtd</span>
+          <span style={{ textAlign: "right" }}>Custo unit.</span>
+          <span style={{ textAlign: "right" }}>Subtotal</span>
+          <span />
+        </div>
+
+        {lines.map((ln, i) => {
+          const item = catalog.find((it) => it.id === ln.stock_item_id);
+          const qtyN = parseN(ln.qty);
+          const subtotal = qtyN * parseN(ln.cost);
+          const taken = usedIds(i);
+          return (
+            <div key={i} style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 90px 110px 100px 32px",
+              gap: 10, alignItems: "center",
+            }}>
+              {StockItemPicker ? (
+                <StockItemPicker
+                  items={catalog}
+                  value={ln.stock_item_id}
+                  onChange={(id) => setLine(i, "stock_item_id", id)}
+                  openSignal={openSignals[i]}
+                  disabledIds={Array.from(taken)}
+                />
+              ) : (
+                // Fallback raríssimo caso page-requests.jsx ainda não tenha carregado
+                <select className="select" value={ln.stock_item_id}
+                        onChange={(e) => setLine(i, "stock_item_id", e.target.value)}>
+                  <option value="">Selecione…</option>
+                  {catalog.filter((it) => !taken.has(it.id)).map((it) =>
+                    <option key={it.id} value={it.id}>{it.name} ({it.unit})</option>
+                  )}
+                </select>
+              )}
+              <input className="input mono" inputMode="decimal"
+                     value={ln.qty} placeholder="0"
+                     onChange={(e) => setLine(i, "qty", e.target.value)}
+                     style={{ textAlign: "right" }}
+                     disabled={!item} />
+              <input className="input mono" inputMode="decimal"
+                     value={ln.cost} placeholder="0,00"
+                     onChange={(e) => setLine(i, "cost", e.target.value)}
+                     onKeyDown={(e) => onCostKeyDown(e, i)}
+                     style={{ textAlign: "right" }}
+                     disabled={!item} />
+              <span className="mono" style={{
+                fontSize: 11.5,
+                color: subtotal > 0 ? "var(--fg-1)" : "var(--fg-3)",
+                textAlign: "right",
+              }}>
+                {subtotal > 0
+                  ? "R$ " + subtotal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                  : "—"}
+              </span>
+              <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                      onClick={() => removeLine(i)}
+                      disabled={lines.length === 1}
+                      style={{ padding: "4px 6px" }}
+                      title={lines.length === 1 ? "É preciso ao menos uma linha" : "Remover item"}>
+                <I.X size={11} />
+              </button>
+            </div>
+          );
+        })}
+
+        <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                onClick={addLine}
+                style={{ alignSelf: "flex-start", marginTop: 4 }}>
+          <I.Plus size={11} />Adicionar item
+        </button>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <FormRow label="Nota / NF (aplica a todos os itens)">
+          <input className="input" value={note} onChange={(e) => setNote(e.target.value)}
+                 placeholder="Ex.: NF 8423 · Hortifruti" />
         </FormRow>
-      </form>
+      </div>
     </Modal>
   );
 }
@@ -2195,7 +2341,8 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
       !it.cat || it.cat === "Sem categoria" || it.cat === "Outro" ||
       !it.supplier ||
       !it.reorder || it.reorder <= 0 ||
-      !it.max || it.max <= 0
+      !it.max || it.max <= 0 ||
+      !it.cost || Number(it.cost) <= 0
     );
   }, [items]);
 
@@ -2380,6 +2527,7 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
     supplier: !current.supplier,
     reorder: !current.reorder || current.reorder <= 0,
     max: !current.max || current.max <= 0,
+    cost: !current.cost || Number(current.cost) <= 0,
   };
 
   return (
@@ -2519,7 +2667,7 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
               <input className="input mono" inputMode="decimal" value={draft.max || ""} onChange={(e) => setDraft({ ...draft, max: e.target.value })} placeholder="0"
                      style={minMaxAlert?.maxBelow ? { borderColor: "var(--ok)" } : null} />
             </FormRow>
-            <FormRow label="Custo unit. (R$)">
+            <FormRow label={`Custo unit. (R$) ${missing.cost ? "·  faltando" : ""}`}>
               <input className="input mono" inputMode="decimal" value={draft.cost || ""} onChange={(e) => setDraft({ ...draft, cost: e.target.value })} placeholder="0,00" />
             </FormRow>
           </div>

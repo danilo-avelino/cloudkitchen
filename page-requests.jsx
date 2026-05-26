@@ -147,10 +147,26 @@ function Requests({ scope }) {
     }
   };
 
-  const handleEditSave = (id, draft) => {
+  const handleEditSave = async (id, draft) => {
+    // Persiste no Supabase ANTES de atualizar o state — assim o trigger de baixa
+    // (separated → estoque) consome os itens corretos quando o usuário avançar.
+    if (source === "db") {
+      const { error } = await dbReplaceKitchenRequestItems(id, draft.lines, { notes: draft.notes });
+      if (error) {
+        window.showToast(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+      if (tenantId) {
+        const { data: refreshed } = await dbListKitchenRequests(tenantId, { limit: 100 });
+        if (refreshed) setItems(refreshed);
+      }
+      setEditingReq(null);
+      window.showToast(`Requisição ${id} atualizada`, { tone: "ok" });
+      return;
+    }
+    // Fallback MOCK
     setItems((prev) => prev.map((r) => {
       if (r.id !== id) return r;
-      // Recalcula total se houver custos por item; senão mantém o original
       const lineCosts = draft.lines.map((ln) => parseFloat(String(ln.estCost).replace(",", ".")));
       const allHaveCost = lineCosts.every((c) => Number.isFinite(c) && c > 0);
       const newTotal = allHaveCost
@@ -161,6 +177,7 @@ function Requests({ scope }) {
         items: draft.lines.map((ln) => [ln.name, ln.qty, ln.stock_item_id || null]),
         itemsCount: draft.lines.length,
         total: newTotal,
+        notes: draft.notes,
       };
     }));
     setEditingReq(null);
@@ -802,6 +819,7 @@ function EditRequestModal({ request, onCancel, onSubmit, onDelete, stockItems = 
       };
     })
   );
+  const [notes, setNotes] = useState(request.notes || "");
 
   const validLines = lines.filter((ln) => ln.stock_item_id && parseFloat(String(ln.qty).replace(",", ".")) > 0);
   // Quando todos os itens são zerados, o save vira "Excluir requisição" — assim a UX
@@ -818,7 +836,10 @@ function EditRequestModal({ request, onCancel, onSubmit, onDelete, stockItems = 
       if (isEmpty) {
         if (onDelete) await onDelete();
       } else {
-        await onSubmit({ lines: validLines.map((ln) => buildSubmitLine(ln)) });
+        await onSubmit({
+          lines: validLines.map((ln) => buildSubmitLine(ln, stockItems)),
+          notes: notes.trim() || null,
+        });
       }
     } finally {
       setSubmitting(false);
@@ -862,6 +883,19 @@ function EditRequestModal({ request, onCancel, onSubmit, onDelete, stockItems = 
         emptyHint="Nenhum item · selecione um insumo ou cancele"
         stockItems={stockItems}
       />
+
+      <div style={{ marginTop: 14 }}>
+        <FormRow label="Observação">
+          <textarea
+            className="input"
+            placeholder="Ex.: urgente para o jantar, entregar embalado, etc."
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={3}
+            style={{ resize: "vertical", minHeight: 60, fontFamily: "inherit" }}
+          />
+        </FormRow>
+      </div>
     </Modal>
   );
 }
@@ -1087,7 +1121,7 @@ function StockItemPicker({ items, value, onChange, onPicked, openSignal, disable
 
 // Editor de linhas que força seleção de itens do estoque.
 // Estado por linha: { stock_item_id, qty } · nome/unit/custo derivam do MOCK.
-function StockLinesEditor({ lines, setLines, allowAdd, emptyHint, stockItems = MOCK.STOCK_ITEMS }) {
+function StockLinesEditor({ lines, setLines, allowAdd, emptyHint, stockItems = MOCK.STOCK_ITEMS, firstLineOpenSignal }) {
   const setLine    = (i, k, v) => setLines(lines.map((ln, j) => j === i ? { ...ln, [k]: v } : ln));
   const removeLine = (i)        => setLines(lines.filter((_, j) => j !== i));
   const addLine    = ()         => setLines([...lines, { stock_item_id: "", qty: "" }]);
@@ -1096,6 +1130,29 @@ function StockLinesEditor({ lines, setLines, allowAdd, emptyHint, stockItems = M
   // Ao pressionar Enter na qty, abre o picker da próxima linha (cria se preciso).
   const qtyRefs = useRef([]);
   const [openSignals, setOpenSignals] = useState({});
+  // Padrão "limpa-no-foco, restaura-no-blur": ao focar, apaga o valor pra usuário
+  // digitar; se sair sem digitar nada, volta ao valor original.
+  const qtyFocusBackup = useRef({});
+  const onQtyFocus = (i, currentValue) => {
+    qtyFocusBackup.current[i] = currentValue;
+    setLine(i, "qty", "");
+  };
+  const onQtyBlur = (i) => {
+    const saved = qtyFocusBackup.current[i];
+    delete qtyFocusBackup.current[i];
+    // Lê valor atual da fonte da verdade (state), não da closure de render.
+    const curr = lines[i]?.qty;
+    if (saved !== undefined && (curr === "" || curr === null || curr === undefined)) {
+      setLine(i, "qty", saved);
+    }
+  };
+  // Atalho externo: pai (modal) pode pedir pra abrir o picker da primeira linha
+  // — usado pelo Tab no campo "Solicitante" pra ir direto ao dropdown.
+  useEffect(() => {
+    if (firstLineOpenSignal != null && firstLineOpenSignal > 0) {
+      setOpenSignals((cur) => ({ ...cur, 0: (cur[0] || 0) + 1 }));
+    }
+  }, [firstLineOpenSignal]);
   const focusQty = (i) => {
     // setTimeout 0 → roda após o React commitar o re-render (input deixa de estar disabled)
     setTimeout(() => {
@@ -1162,6 +1219,8 @@ function StockLinesEditor({ lines, setLines, allowAdd, emptyHint, stockItems = M
                      inputMode="decimal"
                      onChange={(e) => setLine(i, "qty", e.target.value)}
                      onKeyDown={(e) => handleQtyEnter(e, i)}
+                     onFocus={() => onQtyFocus(i, ln.qty)}
+                     onBlur={() => onQtyBlur(i)}
                      style={{ textAlign: "right", padding: "4px 8px" }}
                      disabled={!item} />
               <span style={{
@@ -1372,6 +1431,9 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
   };
 
   const [submitting, setSubmitting] = useState(false);
+  // Tab no Solicitante abre o picker da primeira linha de itens. Sinal incremental
+  // — cada Tab incrementa, o editor escuta e dispara o openSignal[0] interno.
+  const [openFirstItemSignal, setOpenFirstItemSignal] = useState(0);
   const handleSubmitClick = async () => {
     if (submitting || !valid) return;
     setSubmitting(true);
@@ -1405,6 +1467,12 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
             placeholder="Ex.: Stefano (cozinha)"
             value={by}
             onChange={(e) => setBy(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Tab" && !e.shiftKey) {
+                e.preventDefault();
+                setOpenFirstItemSignal((n) => n + 1);
+              }
+            }}
             aria-invalid={!byValid}
             style={!byValid ? { borderColor: "var(--crit)", color: "var(--crit)" } : null}
           />
@@ -1513,7 +1581,8 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
         </div>
       )}
 
-      <StockLinesEditor lines={lines} setLines={setLines} allowAdd stockItems={stockItems} />
+      <StockLinesEditor lines={lines} setLines={setLines} allowAdd stockItems={stockItems}
+                        firstLineOpenSignal={openFirstItemSignal} />
 
       <div style={{ marginTop: 14 }}>
         <FormRow label="Observação">
@@ -1531,4 +1600,5 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
   );
 }
 
-window.Requests = Requests;
+window.Requests         = Requests;
+window.StockItemPicker  = StockItemPicker;

@@ -31,6 +31,15 @@ const _isoTimeBR = (iso) => {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
 const _dayKey = (iso) => (iso || "").slice(0, 10); // YYYY-MM-DD
+// Parser BR-safe: aceita "8,50", "1.234,56", "8.5" e devolve Number.
+// Sem isso, `Number("8,50")` vira NaN e o unit_cost some antes do stock_movements.
+const _parseBR = (raw) => {
+  if (raw === "" || raw === null || raw === undefined) return 0;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+  const s = String(raw).trim().replace(/\s+/g, "").replace(/\./g, "").replace(",", ".");
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+};
 
 function Purchases() {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
@@ -90,15 +99,21 @@ function Purchases() {
   const supplierStatusFor = (list, supplier) => {
     const rs = receipts.filter((r) => r.list_id === list.id && r.supplier === supplier);
     if (rs.length === 0) return "pending";
-    // soma qty recebida por list_item_id
+    // soma qty recebida + flag divergente por list_item_id
     const receivedByItem = {};
+    const divergentByItem = {};
     rs.forEach((r) => r.items.forEach((it) => {
       if (!it.list_item_id) return;
       receivedByItem[it.list_item_id] = (receivedByItem[it.list_item_id] || 0) + (it.qty_received || 0);
+      if (it.divergent) divergentByItem[it.list_item_id] = true;
     }));
     const itensFornecedor = list.items.filter((li) => li.supplier === supplier);
-    const allReceived = itensFornecedor.every((li) => (receivedByItem[li.id] || 0) >= li.qty);
-    return allReceived ? "received" : "partial";
+    // Item é dado por encerrado quando: qty recebida ≥ pedida OU já foi recebido
+    // com divergência (operador acusou que aquela quantidade é a final).
+    const allClosed = itensFornecedor.every((li) =>
+      (receivedByItem[li.id] || 0) >= li.qty || divergentByItem[li.id]
+    );
+    return allClosed ? "received" : "partial";
   };
 
   // Status agregado da lista a partir do status de cada fornecedor
@@ -500,7 +515,7 @@ function Purchases() {
           receipts={receipts.filter((r) => r.list_id === selectedList.id)}
           supplierStatusFor={supplierStatusFor}
           onBack={() => setSelectedListId(null)}
-          onReceive={(supplier) => setReceiving({ listId: selectedList.id, supplier })}
+          onReceive={(supplier, itemId) => setReceiving({ listId: selectedList.id, supplier, itemId: itemId || null })}
           onViewOriginal={(supplier) => setViewingOrig({ listId: selectedList.id, supplier })}
         />
       ) : (
@@ -530,6 +545,7 @@ function Purchases() {
         <GoodsReceiptModal
           list={lists.find((l) => l.id === receiving.listId)}
           supplier={receiving.supplier}
+          itemId={receiving.itemId}
           receipts={receipts.filter((r) => r.list_id === receiving.listId && r.supplier === receiving.supplier)}
           onCancel={() => setReceiving(null)}
           onConfirm={handleConfirmReceipt}
@@ -778,9 +794,16 @@ function PurchaseDetailView({ list, receipts, supplierStatusFor, onBack, onRecei
   const total = list.items.reduce((s, it) => s + (it.est_cost || 0), 0);
   const suppliers = [...new Set(list.items.map((it) => it.supplier))];
 
+  // Busca dentro da lista: filtra itens por nome ou fornecedor, sem alterar o total.
+  const [search, setSearch] = useState("");
+  const norm = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const q = norm(search.trim());
+  const itemMatches = (it) =>
+    !q || norm(it.name).includes(q) || norm(it.supplier).includes(q) || norm(it.category).includes(q);
+
   return (
     <>
-      <div style={{ padding: "20px 28px 14px", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+      <div style={{ padding: "20px 28px 14px", display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 16 }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <button className="btn" data-variant="ghost" data-size="sm" onClick={onBack}>
@@ -795,6 +818,29 @@ function PurchaseDetailView({ list, receipts, supplierStatusFor, onBack, onRecei
           {list.notes && <p className="h-sub" style={{ marginTop: 4 }}>{list.notes}</p>}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ position: "relative", width: 280 }}>
+            <I.Search size={12} style={{
+              position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)",
+              color: "var(--fg-3)", pointerEvents: "none",
+            }} />
+            <input
+              className="input"
+              value={search}
+              placeholder="Buscar item ou fornecedor…"
+              onChange={(e) => setSearch(e.target.value)}
+              style={{ width: "100%", paddingLeft: 28, paddingRight: search ? 28 : 10, fontSize: 12 }}
+            />
+            {search && (
+              <button type="button" onClick={() => setSearch("")} title="Limpar busca"
+                      style={{
+                        position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                        background: "transparent", border: "none", padding: 4,
+                        color: "var(--fg-3)", cursor: "pointer", display: "grid", placeItems: "center",
+                      }}>
+                <I.X size={11} />
+              </button>
+            )}
+          </div>
           <button className="btn" data-size="sm" onClick={() => onViewOriginal(null)} title="Ver a lista como foi gerada (snapshot)">
             <I.Stock size={12} />Ver lista original
           </button>
@@ -821,26 +867,46 @@ function PurchaseDetailView({ list, receipts, supplierStatusFor, onBack, onRecei
           </span>
         </div>
 
-        {/* Cards por fornecedor */}
-        {suppliers.map((sup) => {
-          const supItems = list.items.filter((it) => it.supplier === sup);
-          const supTotal = supItems.reduce((s, it) => s + (it.est_cost || 0), 0);
-          const supReceipts = receipts.filter((r) => r.supplier === sup);
-          const status = supplierStatusFor(list, sup);
-          return (
-            <SupplierGroupCard
-              key={sup}
-              supplier={sup}
-              items={supItems}
-              total={supTotal}
-              status={status}
-              receipts={supReceipts}
-              canReceive={status !== "received"}
-              onReceive={() => onReceive(sup)}
-              onViewOriginal={() => onViewOriginal(sup)}
-            />
-          );
-        })}
+        {/* Cards por fornecedor — só renderiza fornecedor com itens que casam com a busca */}
+        {(() => {
+          const visibleCards = suppliers
+            .map((sup) => {
+              const supItems = list.items.filter((it) => it.supplier === sup && itemMatches(it));
+              if (supItems.length === 0) return null;
+              const supTotal = supItems.reduce((s, it) => s + (it.est_cost || 0), 0);
+              const supReceipts = receipts.filter((r) => r.supplier === sup);
+              const status = supplierStatusFor(list, sup);
+              return (
+                <SupplierGroupCard
+                  key={sup}
+                  supplier={sup}
+                  items={supItems}
+                  total={supTotal}
+                  status={status}
+                  receipts={supReceipts}
+                  canReceive={status !== "received"}
+                  onReceive={() => onReceive(sup)}
+                  onReceiveItem={(itemId) => onReceive(sup, itemId)}
+                  onViewOriginal={() => onViewOriginal(sup)}
+                />
+              );
+            })
+            .filter(Boolean);
+          if (visibleCards.length === 0 && q) {
+            return (
+              <div style={{ textAlign: "center", padding: 48 }}>
+                <div className="h-eyebrow" style={{ marginBottom: 8 }}>Nada encontrado</div>
+                <div style={{ fontSize: 13, color: "var(--fg-2)", marginBottom: 14 }}>
+                  Nenhum item ou fornecedor casa com <strong style={{ color: "var(--fg-0)" }}>"{search}"</strong>.
+                </div>
+                <button className="btn" data-size="sm" onClick={() => setSearch("")}>
+                  Limpar busca
+                </button>
+              </div>
+            );
+          }
+          return visibleCards;
+        })()}
 
         {/* Histórico de recebimentos da lista */}
         {receipts.length > 0 && <ReceiptsHistory receipts={receipts} />}
@@ -849,17 +915,47 @@ function PurchaseDetailView({ list, receipts, supplierStatusFor, onBack, onRecei
   );
 }
 
-function SupplierGroupCard({ supplier, items, total, status, receipts, canReceive, onReceive, onViewOriginal }) {
+function SupplierGroupCard({ supplier, items, total, status, receipts, canReceive, onReceive, onReceiveItem, onViewOriginal }) {
   const supInfo = MOCK.supplierByName ? MOCK.supplierByName(supplier) : null;
   const tone = { pending: "warn", partial: "info", received: "ok" }[status] || "warn";
   const lbl  = { pending: "A receber", partial: "Parcial", received: "Recebido" }[status];
 
-  // Soma qty recebida por list_item_id (todos os recebimentos do fornecedor)
+  // Soma qty recebida + flag divergente por list_item_id (todos recebimentos do fornecedor)
   const receivedByItem = useMemo(() => {
     const acc = {};
     receipts.forEach((r) => r.items.forEach((it) => {
       if (!it.list_item_id) return;
       acc[it.list_item_id] = (acc[it.list_item_id] || 0) + (it.qty_received || 0);
+    }));
+    return acc;
+  }, [receipts]);
+
+  const divergentByItem = useMemo(() => {
+    const acc = {};
+    receipts.forEach((r) => r.items.forEach((it) => {
+      if (!it.list_item_id) return;
+      if (it.divergent) acc[it.list_item_id] = true;
+    }));
+    return acc;
+  }, [receipts]);
+
+  // Custo real recebido: percorre recebimentos do mais antigo ao mais novo e guarda
+  // o último unit_cost por item + soma dos line_cost. Quando há recebimentos, exibimos
+  // esses valores em vez do estimado, pra refletir o que foi efetivamente pago.
+  const actualByItem = useMemo(() => {
+    const acc = {}; // { list_item_id: { lastUnit, totalCost } }
+    const sorted = [...receipts].sort((a, b) =>
+      String(a.received_at || "").localeCompare(String(b.received_at || ""))
+    );
+    sorted.forEach((r) => r.items.forEach((it) => {
+      if (!it.list_item_id) return;
+      const prev = acc[it.list_item_id] || { lastUnit: 0, totalCost: 0 };
+      const line = Number(it.line_cost) ||
+        ((Number(it.qty_received) || 0) * (Number(it.unit_cost) || 0));
+      acc[it.list_item_id] = {
+        lastUnit: Number(it.unit_cost) > 0 ? Number(it.unit_cost) : prev.lastUnit,
+        totalCost: prev.totalCost + line,
+      };
     }));
     return acc;
   }, [receipts]);
@@ -903,16 +999,26 @@ function SupplierGroupCard({ supplier, items, total, status, receipts, canReceiv
             <th className="num">Custo unit.</th>
             <th className="num">Custo composto</th>
             <th>Status</th>
+            <th style={{ width: 110 }} />
           </tr>
         </thead>
         <tbody>
           {items.map((it) => {
             const recQty = receivedByItem[it.id] || 0;
+            // Divergência confirmada (op. acusou no recebimento) encerra o item,
+            // mesmo se a qty for menor que a pedida — não aparece mais como Parcial.
+            const closedByDiverg = !!divergentByItem[it.id] && recQty > 0;
             const itemStatus = recQty <= 0 ? "pending"
-              : recQty < it.qty ? "partial"
-              : "received";
+              : (recQty >= it.qty || closedByDiverg) ? "received"
+              : "partial";
             const itemTone = { pending: "warn", partial: "info", received: "ok" }[itemStatus];
             const itemLbl  = { pending: "A receber", partial: "Parcial", received: "OK" }[itemStatus];
+            const canReceiveItem = itemStatus !== "received";
+            // Quando já houve recebimento, exibe o custo efetivo (último unitário + soma
+            // recebida); senão, mostra a estimativa original da lista em tom dim.
+            const actual = actualByItem[it.id];
+            const displayUnit  = actual ? actual.lastUnit  : it.est_unit_cost;
+            const displayTotal = actual ? actual.totalCost : it.est_cost;
             return (
               <tr key={it.id}>
                 <td className="row-strong">{it.name}</td>
@@ -920,9 +1026,28 @@ function SupplierGroupCard({ supplier, items, total, status, receipts, canReceiv
                 <td className="num" style={{ color: itemStatus === "received" ? "var(--ok)" : "var(--fg-1)" }}>
                   {recQty > 0 ? `${Number(recQty.toFixed(2))} ${it.unit}` : "—"}
                 </td>
-                <td className="num">{_fmtBRLp(it.est_unit_cost)}</td>
-                <td className="num">{_fmtBRLp(it.est_cost)}</td>
+                <td className="num" style={actual ? null : { color: "var(--fg-3)" }}
+                    title={actual ? "Custo unitário do último recebimento" : "Custo estimado (sem recebimento ainda)"}>
+                  {_fmtBRLp(displayUnit)}
+                </td>
+                <td className="num" style={actual ? null : { color: "var(--fg-3)" }}
+                    title={actual ? "Custo efetivo somando todos os recebimentos" : "Custo composto estimado"}>
+                  {_fmtBRLp(displayTotal)}
+                </td>
                 <td><span className="badge" data-tone={itemTone}>{itemLbl}</span></td>
+                <td style={{ textAlign: "right" }}>
+                  {onReceiveItem && canReceiveItem && (
+                    <button
+                      type="button"
+                      className="btn"
+                      data-size="sm"
+                      onClick={() => onReceiveItem(it.id)}
+                      title="Receber apenas este item"
+                    >
+                      <I.Box size={11} />Receber
+                    </button>
+                  )}
+                </td>
               </tr>
             );
           })}
@@ -983,7 +1108,9 @@ function ReceiptsHistory({ receipts }) {
 }
 
 // ============ Modal de Recebimento de Mercadoria ============
-function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
+// Quando `itemId` vem preenchido, o modal abre em modo "single item" — útil
+// pra confirmar chegada parcial de um insumo sem mexer no resto da solicitação.
+function GoodsReceiptModal({ list, supplier, itemId, receipts, onCancel, onConfirm }) {
   if (!list) return null;
 
   // Itens do fornecedor pendentes (qty - já recebido)
@@ -996,19 +1123,27 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
     return acc;
   }, [receipts]);
 
-  const supItems = list.items.filter((it) => it.supplier === supplier);
+  const singleMode = !!itemId;
+  const supItems = list.items.filter((it) =>
+    it.supplier === supplier && (!singleMode || it.id === itemId)
+  );
 
-  // Linhas iniciais: cada item da lista, com qty_received = pendente; manuais com list_item_id null
+  // Linhas iniciais: cada item da lista, com qty_received = pendente; manuais com list_item_id null.
+  // Fonte da verdade agora é (qty_received, line_total). unit_cost = line_total / qty_received
+  // é derivado — usuário digita o total da NF e o sistema calcula o unitário.
   const [lines, setLines] = useState(() =>
     supItems.map((it) => {
       const remaining = Math.max(0, Number((it.qty - (receivedByItem[it.id] || 0)).toFixed(2)));
+      const qty = remaining > 0 ? remaining : it.qty;
+      const estUnit = Number(it.est_unit_cost) || 0;
       return {
         list_item_id: it.id,
         name: it.name,
         unit: it.unit,
         qty_ordered: it.qty,
-        qty_received: remaining > 0 ? remaining : it.qty, // default: o que falta receber
-        unit_cost: it.est_unit_cost,
+        qty_received: qty,
+        // line_total pré-preenchido com a estimativa pra não obrigar o operador a redigitar
+        line_total: Number((qty * estUnit).toFixed(2)),
         divergent: false,
         divergence_reason: "",
       };
@@ -1018,19 +1153,46 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
   const [nf,    setNf]    = useState("");
   const [by,    setBy]    = useState("");
   const [notes, setNotes] = useState("");
+  // Guarda contra double-submit: `onConfirm` é async (insert no Supabase) e o
+  // modal só fecha quando o pai chama setReceiving(null). Sem isso, dois cliques
+  // rápidos no botão geram dois GoodsReceipts.
+  const [submitting, setSubmitting] = useState(false);
 
-  // Auto-flag de divergência: qtd recebida ≠ pedida OU custo diferente do estimado
+  // Padrão "limpa-no-foco, restaura-no-blur": clicar no campo apaga o valor pra
+  // o operador digitar direto; se ele sair sem digitar nada, o valor anterior volta.
+  const focusBackup = useRef({});
+  const onFocusClear = (i, key, currentValue) => {
+    focusBackup.current[`${i}_${key}`] = currentValue;
+    setLine(i, key, "");
+  };
+  const onBlurRestore = (i, key) => {
+    const k = `${i}_${key}`;
+    const saved = focusBackup.current[k];
+    delete focusBackup.current[k];
+    // Lê o valor atual da fonte da verdade (state) — `lines` é o snapshot do render.
+    const curr = lines[i] ? lines[i][key] : "";
+    if (saved !== undefined && (curr === "" || curr === null || curr === undefined)) {
+      setLine(i, key, saved);
+    }
+  };
+
+  // unit_cost derivado: total / qty. Trata divisão por zero.
+  const unitCostOf = (ln) => {
+    const q = _parseBR(ln.qty_received);
+    const t = _parseBR(ln.line_total);
+    return q > 0 ? t / q : 0;
+  };
+
+  // Auto-flag de divergência: qtd recebida ≠ pedida (manual sempre diverg.)
   const lineWithDiverg = (ln) => {
-    if (!ln.list_item_id) return true; // manual sempre divergente
-    const qtyDiff = Number(ln.qty_received) !== Number(ln.qty_ordered);
-    return qtyDiff;
+    if (!ln.list_item_id) return true;
+    return _parseBR(ln.qty_received) !== _parseBR(ln.qty_ordered);
   };
 
   const setLine = (i, key, value) => {
     setLines((prev) => prev.map((ln, j) => {
       if (j !== i) return ln;
       const next = { ...ln, [key]: value };
-      // Recalcula divergent automaticamente quando qty muda (se usuário não fixou manualmente)
       if (key === "qty_received") next.divergent = lineWithDiverg(next);
       return next;
     }));
@@ -1045,63 +1207,98 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
       unit: "und",
       qty_ordered: 0,
       qty_received: 0,
-      unit_cost: 0,
+      line_total: 0,
       divergent: true,
       divergence_reason: "Item adicionado no recebimento",
     }]);
   };
 
-  const totalReceived = lines.reduce((s, ln) => s + ((Number(ln.qty_received) || 0) * (Number(ln.unit_cost) || 0)), 0);
+  const totalReceived = lines.reduce((s, ln) => s + _parseBR(ln.line_total), 0);
   const divergentCount = lines.filter((ln) => ln.divergent).length;
-  const validLines = lines.filter((ln) => ln.name.trim() && Number(ln.qty_received) >= 0);
-  // Exige observação quando há divergência
-  const needsNotes = divergentCount > 0;
+  // Linhas recebidas com Total = 0 (qty>0 e total<=0) → o `unit_cost` registrado no
+  // stock_movements vai ficar NULL e o custo do insumo no estoque não será atualizado.
+  // Aviso amarelo sem bloquear (operador pode confirmar — ex.: cortesia/brinde).
+  const zeroCostLines = lines.filter((ln) =>
+    _parseBR(ln.qty_received) > 0 && _parseBR(ln.line_total) <= 0
+  );
+  const zeroCostCount = zeroCostLines.length;
+  const zeroCostNames = zeroCostLines.map((ln) => ln.name).slice(0, 3).join(", ");
+  const validLines = lines.filter((ln) => ln.name.trim() && _parseBR(ln.qty_received) >= 0);
+  // Divergência não bloqueia mais o envio — só sugere observação em amarelo.
+  // `notesSuggested` é só pra UX visual (warn), não entra no `valid`.
   const hasNotes = notes.trim().length > 0;
-  const valid = validLines.length > 0 && (!needsNotes || hasNotes);
+  const notesSuggested = divergentCount > 0 && !hasNotes;
+  const valid = validLines.length > 0;
 
-  const submit = () => {
-    if (!valid) return;
-    onConfirm({
-      list_id: list.id,
-      supplier,
-      received_by: by.trim() || "—",
-      nf_number: nf.trim(),
-      notes: notes.trim(),
-      items: validLines.map((ln) => ({
-        list_item_id: ln.list_item_id,
-        name: ln.name.trim(),
-        unit: ln.unit,
-        qty_ordered: Number(ln.qty_ordered) || 0,
-        qty_received: Number(ln.qty_received) || 0,
-        unit_cost: Number(ln.unit_cost) || 0,
-        divergent: ln.divergent || lineWithDiverg(ln),
-        divergence_reason: ln.divergence_reason,
-      })),
-    });
+  const submit = async () => {
+    if (!valid || submitting) return;
+    setSubmitting(true);
+    try {
+      await onConfirm({
+        list_id: list.id,
+        supplier,
+        received_by: by.trim() || "—",
+        nf_number: nf.trim(),
+        notes: notes.trim(),
+        items: validLines.map((ln) => {
+          const qty = _parseBR(ln.qty_received);
+          const total = _parseBR(ln.line_total);
+          const unitCost = qty > 0 ? Number((total / qty).toFixed(4)) : 0;
+          return {
+            list_item_id: ln.list_item_id,
+            name: ln.name.trim(),
+            unit: ln.unit,
+            qty_ordered: _parseBR(ln.qty_ordered),
+            qty_received: qty,
+            unit_cost: unitCost,
+            divergent: ln.divergent || lineWithDiverg(ln),
+            divergence_reason: ln.divergence_reason,
+          };
+        }),
+      });
+    } finally {
+      // Em caso de sucesso o pai já fecha o modal (setReceiving(null)) — esse
+      // setState fica sem efeito. Em caso de erro/modal preservado, libera o botão.
+      setSubmitting(false);
+    }
   };
 
   const supInfo = MOCK.supplierByName ? MOCK.supplierByName(supplier) : null;
 
   return (
     <Modal
-      title={`Receber mercadoria · ${supplier}`}
-      subtitle={`${list.id} · ${list.title}${supInfo?.lead ? ` · lead ${supInfo.lead}` : ""}`}
+      title={singleMode
+        ? `Receber item · ${supItems[0]?.name || supplier}`
+        : `Receber mercadoria · ${supplier}`}
+      subtitle={singleMode
+        ? `${supplier} · ${list.id} · ${list.title}`
+        : `${list.id} · ${list.title}${supInfo?.lead ? ` · lead ${supInfo.lead}` : ""}`}
       onClose={onCancel}
-      width={760}
+      width={840}
       footer={
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 12 }}>
-          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: needsNotes && !hasNotes ? "var(--crit)" : divergentCount > 0 ? "var(--warn)" : "var(--fg-3)" }}>
-            {needsNotes && !hasNotes
-              ? `${divergentCount} divergência(s) · descreva nas observações`
-              : divergentCount > 0
-                ? `${divergentCount} divergência(s) será(ão) registrada(s)`
-                : "Sem divergências detectadas"}
+          <span style={{
+            fontFamily: "var(--mono)", fontSize: 11, lineHeight: 1.6,
+            color: (divergentCount > 0 || zeroCostCount > 0) ? "var(--warn)" : "var(--fg-3)",
+            display: "flex", flexDirection: "column",
+          }}>
+            <span>
+              {notesSuggested
+                ? `${divergentCount} divergência(s) · considere descrever nas observações`
+                : divergentCount > 0
+                  ? `${divergentCount} divergência(s) será(ão) registrada(s)`
+                  : "Sem divergências detectadas"}
+            </span>
+            {zeroCostCount > 0 && (
+              <span title={`Sem custo: ${zeroCostNames}${zeroCostCount > 3 ? "…" : ""}`}>
+                ⚠ {zeroCostCount} {zeroCostCount === 1 ? "item sem custo" : "itens sem custo"} · estoque não terá custo atualizado
+              </span>
+            )}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid}
-                    title={needsNotes && !hasNotes ? "Preencha as Observações para registrar as divergências" : ""}>
-              <I.Check size={11} />Confirmar recebimento
+            <button className="btn" data-size="sm" onClick={onCancel} disabled={submitting}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid || submitting}>
+              <I.Check size={11} />{submitting ? "Salvando…" : "Confirmar recebimento"}
             </button>
           </div>
         </div>
@@ -1130,7 +1327,7 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
         {/* Header da grade */}
         <div style={{
           display: "grid",
-          gridTemplateColumns: "1.6fr 90px 90px 60px 100px 32px",
+          gridTemplateColumns: "1.5fr 75px 75px 50px 100px 90px 32px",
           gap: 8, alignItems: "center",
           padding: "0 4px",
           fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)",
@@ -1140,6 +1337,7 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
           <span style={{ textAlign: "right" }}>Pedido</span>
           <span style={{ textAlign: "right" }}>Recebido</span>
           <span>Un.</span>
+          <span style={{ textAlign: "right" }}>Total (R$)</span>
           <span style={{ textAlign: "right" }}>Custo unit.</span>
           <span />
         </div>
@@ -1147,10 +1345,11 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
         {lines.map((ln, i) => {
           const isManual = !ln.list_item_id;
           const isDiverg = ln.divergent || lineWithDiverg(ln);
+          const calcUnit = unitCostOf(ln);
           return (
             <div key={i} style={{
               display: "grid",
-              gridTemplateColumns: "1.6fr 90px 90px 60px 100px 32px",
+              gridTemplateColumns: "1.5fr 75px 75px 50px 100px 90px 32px",
               gap: 8, alignItems: "center",
               padding: "4px 0",
             }}>
@@ -1164,58 +1363,99 @@ function GoodsReceiptModal({ list, supplier, receipts, onCancel, onConfirm }) {
               />
               <input
                 className="input mono" inputMode="decimal"
-                style={{ textAlign: "right" }}
                 value={ln.qty_ordered}
                 readOnly={!isManual}
+                tabIndex={!isManual ? -1 : undefined}
                 onChange={(e) => setLine(i, "qty_ordered", e.target.value)}
+                title={!isManual ? "Quantidade pedida (snapshot do pedido — não editável)" : ""}
+                style={{
+                  textAlign: "right",
+                  ...(!isManual ? {
+                    background: "var(--bg-2)", color: "var(--fg-2)",
+                    cursor: "default", borderColor: "var(--line-soft)",
+                  } : null),
+                }}
               />
               <input
                 className="input mono" inputMode="decimal"
                 style={{ textAlign: "right", color: isDiverg ? "var(--warn)" : "var(--fg-0)", fontWeight: 500 }}
                 value={ln.qty_received}
                 onChange={(e) => setLine(i, "qty_received", e.target.value)}
+                onFocus={() => onFocusClear(i, "qty_received", ln.qty_received)}
+                onBlur={() => onBlurRestore(i, "qty_received")}
               />
               <input
                 className="input mono"
-                style={{ textAlign: "center" }}
                 value={ln.unit}
                 onChange={(e) => setLine(i, "unit", e.target.value)}
                 readOnly={!isManual}
+                tabIndex={!isManual ? -1 : undefined}
+                style={{
+                  textAlign: "center",
+                  ...(!isManual ? {
+                    background: "var(--bg-2)", color: "var(--fg-2)",
+                    cursor: "default", borderColor: "var(--line-soft)",
+                  } : null),
+                }}
               />
-              <input
-                className="input mono" inputMode="decimal"
-                style={{ textAlign: "right" }}
-                value={ln.unit_cost}
-                onChange={(e) => setLine(i, "unit_cost", e.target.value)}
-                placeholder="0,00"
-              />
-              <button type="button" className="btn" data-variant="ghost" data-size="sm"
-                      onClick={() => removeLine(i)} title="Remover item" style={{ padding: "4px 6px" }}>
-                <I.X size={11} />
-              </button>
+              {(() => {
+                const isZeroCost = _parseBR(ln.qty_received) > 0 && _parseBR(ln.line_total) <= 0;
+                return (
+                  <input
+                    className="input mono" inputMode="decimal"
+                    style={{ textAlign: "right", ...(isZeroCost ? { borderColor: "var(--warn)" } : null) }}
+                    value={ln.line_total}
+                    onChange={(e) => setLine(i, "line_total", e.target.value)}
+                    onFocus={() => onFocusClear(i, "line_total", ln.line_total)}
+                    onBlur={() => onBlurRestore(i, "line_total")}
+                    placeholder="0,00"
+                    title={isZeroCost ? "Sem valor — o estoque não vai receber custo atualizado" : ""}
+                  />
+                );
+              })()}
+              <div
+                className="mono"
+                title="Calculado automaticamente: Total ÷ Recebido"
+                style={{
+                  textAlign: "right", padding: "6px 10px",
+                  background: "var(--bg-2)", border: "1px solid var(--line)",
+                  borderRadius: 4, fontSize: 12, color: "var(--fg-2)",
+                }}
+              >
+                {_fmtBRLp(calcUnit)}
+              </div>
+              {!singleMode && (
+                <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                        onClick={() => removeLine(i)} title="Remover item" style={{ padding: "4px 6px" }}>
+                  <I.X size={11} />
+                </button>
+              )}
+              {singleMode && <span />}
 
             </div>
           );
         })}
 
-        <button type="button" className="btn" data-variant="ghost" data-size="sm"
-                onClick={addManualLine}
-                style={{ alignSelf: "flex-start", marginTop: 6 }}>
-          <I.Plus size={11} />Adicionar item (manual)
-        </button>
+        {!singleMode && (
+          <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                  onClick={addManualLine}
+                  style={{ alignSelf: "flex-start", marginTop: 6 }}>
+            <I.Plus size={11} />Adicionar item (manual)
+          </button>
+        )}
       </div>
 
       <FormRow
-        label={needsNotes ? "Observações · obrigatório (descreva as divergências)" : "Observações"}
-        hint={needsNotes
-          ? "Há divergências de quantidade — informe o motivo antes de confirmar."
+        label={notesSuggested ? "Observações · recomendado (há divergências)" : "Observações"}
+        hint={notesSuggested
+          ? "Há divergências de quantidade — descreva o motivo se for relevante."
           : "Ex.: produto substituto, condição da entrega, atraso etc."}
       >
         <input className="input"
                value={notes}
                onChange={(e) => setNotes(e.target.value)}
-               style={needsNotes && !hasNotes ? { borderColor: "var(--crit)" } : null}
-               placeholder={needsNotes ? "Ex.: vieram 3 un em vez de 2 (cortesia do fornecedor)" : ""} />
+               style={notesSuggested ? { borderColor: "var(--warn)" } : null}
+               placeholder={notesSuggested ? "Ex.: vieram 3 un em vez de 2 (cortesia do fornecedor)" : ""} />
       </FormRow>
     </Modal>
   );

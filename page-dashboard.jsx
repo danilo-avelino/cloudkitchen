@@ -36,6 +36,7 @@ function Dashboard({ scope, setPage }) {
     cmvDaily: [],
     requests: [],
     cmvMovements: [], // saídas (kind=out) do mês até hoje, p/ CMV real por operação
+    periodMovements: [], // movimentações dentro do range do filtro de período (entradas/saídas KPIs)
     dreCategories: [],
     dreSubcategories: [],
     financeEntries: [], // do mês corrente, p/ KPI "Compras do mês"
@@ -68,7 +69,7 @@ function Dashboard({ scope, setPage }) {
       const cmvFromYMD  = _mtdFirst.toISOString().slice(0, 10);
       const currentPeriod = `${_mtdFirst.getFullYear()}-${String(_mtdFirst.getMonth() + 1).padStart(2, "0")}`;
 
-      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes, dreCatRes, dreSubRes, finRes] = await Promise.all([
+      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes, periodMovRes, dreCatRes, dreSubRes, finRes] = await Promise.all([
         dbGetCurrentContext?.(),
         dbListRevenueEntries(tid, fromISO, null),
         dbListRevenueEntries(tid, prevFromISO, prevToISO),
@@ -77,7 +78,10 @@ function Dashboard({ scope, setPage }) {
         dbTopConsumedItems(tid, startOfDay.toISOString(), endOfDay.toISOString(), 8),
         dbListCmvDaily(tid, cmvFromYMD, toYMD),
         dbListKitchenRequests(tid, { limit: 8 }),
+        // cmvMovements: fixo no MTD pra casar com cmvDaily nas tabelas de CMV.
         dbListStockMovements(tid, _mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 }),
+        // periodMovements: respeita o filtro de período do header (entradas/saídas KPIs).
+        dbListStockMovements(tid, fromISO, new Date().toISOString(), { limit: 5000 }),
         dbListDreCategories?.(tid) || { data: null },
         dbListDreSubcategories?.(tid) || { data: null },
         dbListFinanceEntries?.(tid, currentPeriod) || { data: null },
@@ -92,6 +96,7 @@ function Dashboard({ scope, setPage }) {
         cmvDaily:         cmvRes.data || [],
         requests:         reqRes.data || [],
         cmvMovements:     movRes.data || [],
+        periodMovements:  periodMovRes.data || [],
         dreCategories:    dreCatRes.data || [],
         dreSubcategories: dreSubRes.data || [],
         financeEntries:   finRes.data || [],
@@ -121,6 +126,9 @@ function Dashboard({ scope, setPage }) {
     };
   }, [dbStatus.state, dbStatus.isOnline, period]);
 
+  // Drill-down dos KPIs de entrada/saída — abre modal com o histórico filtrado.
+  const [flowDetail, setFlowDetail] = useState(null); // null | "in" | "out"
+
   // Computa KPI real a partir de dados do DB ou MOCK
   const k = useMemo(() => computeKpi(scope, dbData, period), [scope, dbData, period]);
 
@@ -144,10 +152,10 @@ function Dashboard({ scope, setPage }) {
       .reduce((acc, e) => acc + (Number(e.value) || 0), 0);
   }, [dbData.dreCategories, dbData.dreSubcategories, dbData.financeEntries]);
 
-  // Totais de entradas e saídas de estoque no mês (R$) · |qty| × custo unitário
+  // Totais de entradas e saídas de estoque no período selecionado (R$) · |qty| × custo unit.
   const stockFlows = useMemo(() => {
     let entradas = 0, saidas = 0;
-    for (const mv of (dbData.cmvMovements || [])) {
+    for (const mv of (dbData.periodMovements || [])) {
       const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
       if (mv.kind === "in")  entradas += value;
       else if (mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration") saidas += value;
@@ -158,7 +166,7 @@ function Dashboard({ scope, setPage }) {
       }
     }
     return { entradas, saidas };
-  }, [dbData.cmvMovements]);
+  }, [dbData.periodMovements]);
 
   if (pageLoading) return <PageLoading label="Carregando dashboard…" variant="dashboard" />;
 
@@ -197,8 +205,8 @@ function Dashboard({ scope, setPage }) {
 
       {/* Fluxos de estoque + KPIs operacionais — linha única compacta */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
-        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in" />
-        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" />
+        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("in")} />
+        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("out")} />
         <ModuleKpi label="Precisão de estoque"
           value={moduleMetrics.inv.accuracy ? `${moduleMetrics.inv.accuracy.toFixed(0)}%` : "—"}
           sub={moduleMetrics.inv.lastDate ? `último em ${moduleMetrics.inv.lastDate}` : "sem inventários"}
@@ -232,7 +240,109 @@ function Dashboard({ scope, setPage }) {
       <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
         <TodayConsumptionCard consumption={dbData.todayConsumption} dbOnline={dbStatus.isOnline} />
       </div>
+
+      {flowDetail && (
+        <StockFlowDetailModal
+          direction={flowDetail}
+          periodLabel={periodLabel}
+          movements={dbData.periodMovements || []}
+          onClose={() => setFlowDetail(null)}
+        />
+      )}
     </div>
+  );
+}
+
+// Modal · histórico de entradas ou saídas do período (drill-down dos FlowKpi).
+// `direction`: "in" (entradas) | "out" (saídas e perdas)
+function StockFlowDetailModal({ direction, periodLabel, movements, onClose }) {
+  const isIn = direction === "in";
+
+  const filtered = useMemo(() => {
+    const rows = [];
+    for (const mv of movements) {
+      const delta = Number(mv.delta || 0);
+      const isInbound  = mv.kind === "in" || (mv.kind === "adjust" && delta > 0);
+      const isOutbound = mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration"
+                       || (mv.kind === "adjust" && delta < 0);
+      if (isIn && !isInbound)   continue;
+      if (!isIn && !isOutbound) continue;
+      const qtyAbs = Math.abs(delta);
+      const value  = qtyAbs * Number(mv.unitCost || 0);
+      rows.push({
+        id: mv.id,
+        at: mv.at,
+        kind: mv.kind,
+        item: mv.item || "—",
+        unit: mv.unit || "",
+        qtyAbs,
+        unitCost: Number(mv.unitCost || 0),
+        value,
+        ref: mv.ref || "—",
+      });
+    }
+    return rows.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+  }, [movements, isIn]);
+
+  const total = filtered.reduce((s, r) => s + r.value, 0);
+  const kindLabel = {
+    in: "Entrada", out: "Saída", loss: "Perda", expiration: "Vencimento", adjust: "Ajuste",
+  };
+
+  return (
+    <Modal
+      title={`${isIn ? "Entradas" : "Saídas"} de estoque · ${periodLabel}`}
+      subtitle={`${filtered.length} ${filtered.length === 1 ? "movimentação" : "movimentações"} · total R$ ${total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+      onClose={onClose}
+      width={880}
+      footer={
+        <div style={{ display: "flex", justifyContent: "flex-end", width: "100%" }}>
+          <button className="btn" data-variant="primary" data-size="sm" onClick={onClose}>Fechar</button>
+        </div>
+      }
+    >
+      {filtered.length === 0 ? (
+        <div style={{ padding: 36, textAlign: "center", fontSize: 12.5, color: "var(--fg-3)" }}>
+          Sem {isIn ? "entradas" : "saídas"} no período.
+        </div>
+      ) : (
+        <table className="table" data-density="compact">
+          <thead>
+            <tr>
+              <th style={{ width: 130 }}>Data</th>
+              <th>Insumo</th>
+              <th style={{ width: 90 }}>Tipo</th>
+              <th className="num" style={{ width: 90 }}>Qtd</th>
+              <th className="num" style={{ width: 100 }}>Custo unit.</th>
+              <th className="num" style={{ width: 110 }}>Total</th>
+              <th>Referência</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r) => (
+              <tr key={r.id}>
+                <td className="mono" style={{ fontSize: 11, color: "var(--fg-2)" }}>
+                  {r.at
+                    ? `${new Date(r.at).toLocaleDateString("pt-BR")} ${new Date(r.at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`
+                    : "—"}
+                </td>
+                <td className="row-strong">{r.item}</td>
+                <td className="dim" style={{ fontSize: 11 }}>{kindLabel[r.kind] || r.kind}</td>
+                <td className="num">{Number(r.qtyAbs.toFixed(3))} {r.unit}</td>
+                <td className="num">R$ {r.unitCost.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                <td className="num" style={{ color: isIn ? "var(--ok)" : "var(--crit)", fontWeight: 500 }}>
+                  R$ {r.value.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </td>
+                <td className="dim" style={{ fontSize: 11, maxWidth: 200, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                    title={r.ref}>
+                  {r.ref}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Modal>
   );
 }
 
@@ -910,13 +1020,20 @@ function ConsolidatedAlertsCard({ setPage, stock = [], dbOnline = false }) {
 
 
 // FlowKpi · card minimalista com rótulo e valor total em R$ (sem delta nem sparkline)
-function FlowKpi({ label, value, tone }) {
+function FlowKpi({ label, value, tone, sub, onClick }) {
   const color = tone === "in" ? "var(--ok)" : tone === "out" ? "var(--crit)" : "var(--fg-0)";
   const fmt = Number(value || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return (
-    <div className="kpi">
+    <div className="kpi"
+         onClick={onClick}
+         role={onClick ? "button" : undefined}
+         tabIndex={onClick ? 0 : undefined}
+         onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+         style={onClick ? { cursor: "pointer" } : undefined}
+         title={onClick ? "Ver histórico do período" : undefined}>
       <div className="label">{label}</div>
       <div className="value" style={{ color }}>R$ {fmt}</div>
+      {sub && <div className="sub" style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6 }}>{sub}</div>}
     </div>
   );
 }

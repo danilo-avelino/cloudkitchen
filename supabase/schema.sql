@@ -576,16 +576,13 @@ begin
      set current_qty = current_qty + new.qty
    where id = new.stock_item_id;
 
-  -- Atualiza unit_cost por média ponderada apenas em entradas com custo informado
+  -- Sobrescreve unit_cost pelo custo da última compra (NÃO média ponderada).
+  -- Decisão de produto (2026-05-26): o estoque reflete o que foi pago no último
+  -- recebimento, sem cálculo extra. Espelhado em widgets.jsx `applyStockMovement`.
   if new.kind = 'in' and new.unit_cost is not null and new.unit_cost > 0 and new.qty > 0 then
     update public.stock_items si
-       set unit_cost = round(
-             ((coalesce(si.unit_cost, 0) * greatest(si.current_qty - new.qty, 0))
-              + (new.unit_cost * new.qty))
-             / nullif(si.current_qty, 0)
-           , 4)
-     where si.id = new.stock_item_id
-       and si.current_qty > 0;
+       set unit_cost = round(new.unit_cost, 4)
+     where si.id = new.stock_item_id;
   end if;
 
   return new;
