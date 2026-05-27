@@ -1202,7 +1202,18 @@ function GoodsReceiptModal({ list, supplier, itemId, receipts, onCancel, onConfi
     setLines((prev) => prev.map((ln, j) => {
       if (j !== i) return ln;
       const next = { ...ln, [key]: value };
-      if (key === "qty_received") next.divergent = lineWithDiverg(next);
+      if (key === "qty_received") {
+        next.divergent = lineWithDiverg(next);
+        // qty=0 num item do pedido = "esse item não veio do fornecedor".
+        // Zera o total (não faz sentido total>0 com qty=0) e auto-sugere a
+        // razão se ainda vazia, pra confirmar com 1 clique sem ambiguidade.
+        if (_parseBR(value) === 0 && next.list_item_id) {
+          next.line_total = 0;
+          if (!String(next.divergence_reason || "").trim()) {
+            next.divergence_reason = "Não veio do fornecedor";
+          }
+        }
+      }
       return next;
     }));
   };
@@ -1355,6 +1366,9 @@ function GoodsReceiptModal({ list, supplier, itemId, receipts, onCancel, onConfi
           const isManual = !ln.list_item_id;
           const isDiverg = ln.divergent || lineWithDiverg(ln);
           const calcUnit = unitCostOf(ln);
+          // qty=0 num item do pedido = "não veio do fornecedor" (cancela a linha
+          // pra fechar o recebimento sem virar entrada de estoque).
+          const isNotComing = !isManual && _parseBR(ln.qty_received) === 0;
           return (
             <div key={i} style={{
               display: "grid",
@@ -1362,14 +1376,30 @@ function GoodsReceiptModal({ list, supplier, itemId, receipts, onCancel, onConfi
               gap: 8, alignItems: "center",
               padding: "4px 0",
             }}>
-              <input
-                className="input"
-                value={ln.name}
-                placeholder={isManual ? "Insumo (manual)" : ""}
-                onChange={(e) => setLine(i, "name", e.target.value)}
-                readOnly={!isManual}
-                style={!isManual ? { background: "var(--bg-2)", color: "var(--fg-1)" } : null}
-              />
+              <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <input
+                  className="input"
+                  value={ln.name}
+                  placeholder={isManual ? "Insumo (manual)" : ""}
+                  onChange={(e) => setLine(i, "name", e.target.value)}
+                  readOnly={!isManual}
+                  style={{
+                    flex: 1, minWidth: 0,
+                    ...(!isManual ? { background: "var(--bg-2)", color: "var(--fg-1)" } : null),
+                    ...(isNotComing ? { textDecoration: "line-through", opacity: 0.7 } : null),
+                  }}
+                />
+                {isNotComing && (
+                  <span title="Item marcado como não enviado pelo fornecedor (qty 0)" style={{
+                    flexShrink: 0,
+                    fontFamily: "var(--mono)", fontSize: 9, fontWeight: 500,
+                    color: "var(--warn)", letterSpacing: "0.06em", textTransform: "uppercase",
+                    padding: "2px 6px",
+                    background: "var(--warn-soft)", border: "1px solid var(--warn-line)",
+                    borderRadius: 99, whiteSpace: "nowrap",
+                  }}>não veio</span>
+                )}
+              </div>
               <input
                 className="input mono" inputMode="decimal"
                 value={ln.qty_ordered}
