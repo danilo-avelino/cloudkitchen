@@ -1014,14 +1014,21 @@ function SupplierGroupCard({ supplier, items, total, status, receipts, canReceiv
         <tbody>
           {items.map((it) => {
             const recQty = receivedByItem[it.id] || 0;
-            // Divergência confirmada (op. acusou no recebimento) encerra o item,
-            // mesmo se a qty for menor que a pedida — não aparece mais como Parcial.
-            const closedByDiverg = !!divergentByItem[it.id] && recQty > 0;
-            const itemStatus = recQty <= 0 ? "pending"
-              : (recQty >= it.qty || closedByDiverg) ? "received"
-              : "partial";
+            // Divergência confirmada (operador acusou no recebimento) encerra o item,
+            // mesmo se qty < pedida ou qty = 0 ("não veio do fornecedor"). Bate com a
+            // regra de supplierStatusFor logo acima: presença do recebimento divergente
+            // = item fechado, não fica eternamente "A receber".
+            const closedByDiverg = !!divergentByItem[it.id];
+            const itemStatus = (recQty >= it.qty || closedByDiverg) ? "received"
+              : recQty > 0 ? "partial"
+              : "pending";
             const itemTone = { pending: "warn", partial: "info", received: "ok" }[itemStatus];
-            const itemLbl  = { pending: "A receber", partial: "Parcial", received: "OK" }[itemStatus];
+            // "Não veio" distingue cancelamento (qty=0 + diverg) de recebimento normal —
+            // mesmo status "received" no fluxo, mas label e cor diferentes pra o operador.
+            const isNotComing = itemStatus === "received" && closedByDiverg && recQty <= 0;
+            const itemLbl = isNotComing ? "Não veio"
+              : { pending: "A receber", partial: "Parcial", received: "OK" }[itemStatus];
+            const itemLblTone = isNotComing ? "warn" : itemTone;
             const canReceiveItem = itemStatus !== "received";
             // Quando já houve recebimento, exibe o custo efetivo (último unitário + soma
             // recebida); senão, mostra a estimativa original da lista em tom dim.
@@ -1043,7 +1050,7 @@ function SupplierGroupCard({ supplier, items, total, status, receipts, canReceiv
                     title={actual ? "Custo efetivo somando todos os recebimentos" : "Custo composto estimado"}>
                   {_fmtBRLp(displayTotal)}
                 </td>
-                <td><span className="badge" data-tone={itemTone}>{itemLbl}</span></td>
+                <td><span className="badge" data-tone={itemLblTone}>{itemLbl}</span></td>
                 <td style={{ textAlign: "right" }}>
                   {onReceiveItem && canReceiveItem && (
                     <button
