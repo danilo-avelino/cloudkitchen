@@ -1660,13 +1660,12 @@ function mapMemberFromDb(row) {
 
 async function dbListMembers(tenantId) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
-  const { data, error } = await _client
-    .from("tenant_member_profiles")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .order("joined_at", { ascending: true });
+  // Usa RPC SECURITY DEFINER em vez da view tenant_member_profiles — a view
+  // (security_invoker=true após auditoria 2026-05-27) não consegue ler auth.users
+  // com permissões de `authenticated`. A RPC valida membership internamente.
+  const { data, error } = await _client.rpc("list_tenant_members", { p_tenant: tenantId });
   if (error) return { data: null, source: "mock", error };
-  return { data: data.map(mapMemberFromDb), source: "db", error: null };
+  return { data: (data || []).map(mapMemberFromDb), source: "db", error: null };
 }
 
 async function dbInviteMember(tenantId, { email, password, role, ops, modules, name }) {
