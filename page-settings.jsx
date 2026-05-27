@@ -497,12 +497,18 @@ function UsersTab() {
     if (editing?.userId) {
       // Edit existing member · update atômico via edge function `update-member`
       if (dbStatus.isOnline && tenantId) {
-        const { error } = await dbUpdateMember?.(tenantId, editing.userId, {
+        const patch = {
           name: u.name,
           role: ROLE_TO_DB[u.role],
           ops: u.ops ? [u.ops] : [],
           modules: Array.isArray(u.modules) ? u.modules : null,
-        });
+        };
+        // Só envia password quando o toggle "Trocar senha" está ligado no modal —
+        // o UserModal só inclui u.password no payload nesse caso.
+        if (typeof u.password === "string" && u.password.length >= 6) {
+          patch.password = u.password;
+        }
+        const { error } = await dbUpdateMember?.(tenantId, editing.userId, patch);
         if (error) {
           window.showToast(`Erro ao atualizar: ${error.message}`, { tone: "crit", ttl: 4500 });
           return;
