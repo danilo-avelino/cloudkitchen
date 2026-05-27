@@ -33,10 +33,19 @@ const _isoTimeBR = (iso) => {
 const _dayKey = (iso) => (iso || "").slice(0, 10); // YYYY-MM-DD
 // Parser BR-safe: aceita "8,50", "1.234,56", "8.5" e devolve Number.
 // Sem isso, `Number("8,50")` vira NaN e o unit_cost some antes do stock_movements.
+// Parse "68,31" → 68.31, "68.31" → 68.31, "1.234,56" → 1234.56, "1,234.56" → 1234.56.
+// Bug anterior fazia replace(/\./g, "") cego achando que todo ponto era milhar;
+// quando o operador digitava "68.31" virava 6831 e estoque/CMV iam pro espaço.
+// Regra atual: o ÚLTIMO `.` ou `,` é o decimal; tudo antes dele são milhares.
 const _parseBR = (raw) => {
   if (raw === "" || raw === null || raw === undefined) return 0;
   if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
-  const s = String(raw).trim().replace(/\s+/g, "").replace(/\./g, "").replace(",", ".");
+  let s = String(raw).trim().replace(/\s+/g, "");
+  if (!s) return 0;
+  const decPos = Math.max(s.lastIndexOf(","), s.lastIndexOf("."));
+  if (decPos >= 0) {
+    s = s.slice(0, decPos).replace(/[.,]/g, "") + "." + s.slice(decPos + 1);
+  }
   const n = parseFloat(s);
   return Number.isFinite(n) ? n : 0;
 };

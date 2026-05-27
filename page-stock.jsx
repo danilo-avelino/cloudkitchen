@@ -1034,10 +1034,17 @@ function StockEntryModal({ items, onClose, onSave }) {
   useEffect(() => { setOpenSignals({ 0: 1 }); }, []);
 
   // Parser BR-safe: aceita "8,50", "1.234,56", "8.5" sem virar NaN.
+  // Parse "68,31"/"68.31"/"1.234,56"/"1,234.56" — o último `.` ou `,` é o decimal.
+  // Antes era replace(/\./g, "") cego e "68.31" do teclado físico virava 6831.
   const parseN = (raw) => {
     if (raw === "" || raw === null || raw === undefined) return 0;
     if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
-    const s = String(raw).trim().replace(/\s+/g, "").replace(/\./g, "").replace(",", ".");
+    let s = String(raw).trim().replace(/\s+/g, "");
+    if (!s) return 0;
+    const decPos = Math.max(s.lastIndexOf(","), s.lastIndexOf("."));
+    if (decPos >= 0) {
+      s = s.slice(0, decPos).replace(/[.,]/g, "") + "." + s.slice(decPos + 1);
+    }
     const n = parseFloat(s);
     return Number.isFinite(n) ? n : 0;
   };

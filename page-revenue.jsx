@@ -35,9 +35,18 @@ const _dayName = (iso) => {
   const d = new Date(iso + "T12:00:00");
   return ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"][d.getDay()];
 };
+// Parse "68,31" → 68.31, "68.31" → 68.31, "1.234,56" → 1234.56, "1,234.56" → 1234.56.
+// O ÚLTIMO `.` ou `,` é o decimal; o resto são milhares (descartados).
+// Antes era replace(/\./g, "") cego — virava bug quando o teclado físico mandava
+// ponto (ex.: "68.31" → 6831). Ver feedback_brl_number_parse.
 const _parseNum = (raw) => {
   if (raw === "" || raw === null || raw === undefined) return 0;
-  const s = String(raw).replace(/\s+/g, "").replace(/\./g, "").replace(",", ".");
+  let s = String(raw).replace(/\s+/g, "");
+  if (!s) return 0;
+  const decPos = Math.max(s.lastIndexOf(","), s.lastIndexOf("."));
+  if (decPos >= 0) {
+    s = s.slice(0, decPos).replace(/[.,]/g, "") + "." + s.slice(decPos + 1);
+  }
   const n = parseFloat(s);
   return Number.isFinite(n) ? n : 0;
 };

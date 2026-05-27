@@ -17,6 +17,23 @@
 
 const fmt = (v) => "R$ " + (v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtShort = (v) => "R$ " + (v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+// Parse robusto de números em formato BR ("1.234,56") OU internacional ("1234.56"):
+// o ÚLTIMO `.` ou `,` é o decimal; o resto são milhares. Substitui o antigo
+// parseFloat(...replace(/\./g, "")) que destruía decimais com ponto
+// (ex.: "68.31" do teclado físico virava 6831). Ver feedback_brl_number_parse.
+const _parseBR = (raw) => {
+  if (raw === "" || raw === null || raw === undefined) return 0;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+  let s = String(raw).trim().replace(/\s+/g, "");
+  if (!s) return 0;
+  const decPos = Math.max(s.lastIndexOf(","), s.lastIndexOf("."));
+  if (decPos >= 0) {
+    s = s.slice(0, decPos).replace(/[.,]/g, "") + "." + s.slice(decPos + 1);
+  }
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+};
 const fmtDate = (iso) => {
   if (!iso) return "—";
   const [y, m, d] = String(iso).slice(0, 10).split("-");
@@ -396,7 +413,7 @@ function ChecklistItemDraft({ categories, subcategories, onClose, onSave, onDele
     label: label.trim(), cat, recurrence,
     due: due ? Number(due) : null,
     owner: owner.trim() || "—",
-    expected: parseFloat(String(expected).replace(/\./g, "").replace(",", ".")) || 0,
+    expected: _parseBR(expected),
     required, source: source.trim() || "Manual",
   });
 
@@ -879,7 +896,7 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
   const sub = pickable.find((x) => x.id === cat);
   const parent = sub ? findCategory(categories, sub.category) : null;
 
-  const parsedValue = parseFloat(String(value).replace(/\./g, "").replace(",", "."));
+  const parsedValue = _parseBR(value);
   const errs = {
     desc:  !desc.trim(),
     value: !Number.isFinite(parsedValue) || parsedValue <= 0,
@@ -996,7 +1013,7 @@ function FillDraft({ item, categories, subcategories, period, onClose, onSave })
   const [status, setStatus] = useState("paid");
 
   const save = () => {
-    const v = parseFloat(String(value).replace(/\./g, "").replace(",", "."));
+    const v = _parseBR(value);
     if (!v) return;
     onSave({ item, value: v, comp, paid, status });
   };
