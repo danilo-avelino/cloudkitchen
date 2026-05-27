@@ -508,9 +508,10 @@ async function dbDeleteStockItem(id) {
   return { error };
 }
 
-// Aplica movimento de estoque (in/out/adjust) · INSERT em stock_movements
+// Aplica movimento de estoque (in/out/adjust/loss/expiration) · INSERT em stock_movements
 // O trigger no banco atualiza current_qty automaticamente.
-async function dbApplyStockMovement(tenantId, itemId, deltaQty, kind = "out", reason, unitCost) {
+// `opts.operationId` e `opts.lossReason` são opcionais — usados pela aba Desperdícios.
+async function dbApplyStockMovement(tenantId, itemId, deltaQty, kind = "out", reason, unitCost, opts = {}) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
   // Schema constraint: in ⇒ qty>0; out/loss/expiration ⇒ qty<0; adjust ⇒ qualquer.
   // Para adjust preservamos o sinal recebido (pode ser falta ou sobra do inventário).
@@ -530,6 +531,9 @@ async function dbApplyStockMovement(tenantId, itemId, deltaQty, kind = "out", re
     notes: reason || null,
   };
   if (unitCost != null && Number(unitCost) > 0) payload.unit_cost = Number(unitCost);
+  if (opts.operationId) payload.operation_id = opts.operationId;
+  if (opts.lossReason)  payload.loss_reason  = opts.lossReason;
+  if (opts.referenceType) payload.reference_type = opts.referenceType;
   const { error } = await _client.from("stock_movements").insert(payload);
   return { error };
 }
@@ -542,9 +546,9 @@ async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, sto
     .from("stock_movements")
     .select(`
       id, kind, qty, unit_cost, notes, performed_at,
-      reference_type, reference_id,
-      stock_item:stock_items(id, name, unit, compose_cmv),
-      operation:operations(id, slug, name)
+      reference_type, reference_id, loss_reason,
+      stock_item:stock_items(id, name, unit, compose_cmv, category:stock_categories(id, name)),
+      operation:operations(id, slug, name, short_label, color)
     `)
     .eq("tenant_id", tenantId)
     .order("performed_at", { ascending: false })
@@ -564,7 +568,16 @@ async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, sto
     item:  m.stock_item?.name || "—",
     unit:  m.stock_item?.unit || "",
     composeCmv: m.stock_item?.compose_cmv !== false,
+    categoryId:   m.stock_item?.category?.id   || null,
+    categoryName: m.stock_item?.category?.name || null,
     op:    m.operation?.slug || (m.kind === "in" ? "—" : "—"),
+    operationId:   m.operation?.id    || null,
+    operationName: m.operation?.name  || null,
+    operationShort: m.operation?.short_label || null,
+    operationColor: m.operation?.color || null,
+    lossReason: m.loss_reason || null,
+    referenceType: m.reference_type || null,
+    notes: m.notes || null,
     ref:   m.notes || m.reference_type || "—",
   }));
   return { data: mapped, source: "db", error: null };

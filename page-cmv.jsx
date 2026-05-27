@@ -70,7 +70,9 @@ function buildDailyRows(revenueEntries, movements) {
     acc[k].revenue += Number(re.revenue) || 0;
   }
   for (const mv of movements) {
-    if (mv.kind !== "out") continue;
+    // CMV inclui consumo (out) e desperdício com operação setada (loss/expiration).
+    // Desperdício compartilhado (sem op) é tratado fora, rateado pelo faturamento.
+    if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
     if (mv.composeCmv === false) continue; // respeita flag "não compõe CMV"
     const d = String(mv.at || "").slice(0, 10);
     const op = mv.op;
@@ -88,7 +90,8 @@ function excludedImpact(movements, fromDate, toDate) {
   const set = new Set();
   let total = 0;
   for (const mv of movements) {
-    if (mv.kind !== "out" || mv.composeCmv !== false) continue;
+    const isCogsKind = mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration";
+    if (!isCogsKind || mv.composeCmv !== false) continue;
     const d = String(mv.at || "").slice(0, 10);
     if (d < fromDate || d > toDate) continue;
     if (mv.itemId) set.add(mv.itemId);
@@ -174,22 +177,36 @@ function CMV({ setPage }) {
     return net;
   }, [movements]);
 
-  // Totais consolidados do período (consumo + ajustes como custo compartilhado)
+  // Desperdício compartilhado (loss/expiration sem operação) — rateado por faturamento.
+  // Desperdícios atribuídos a uma operação já entram em daily.cogs via buildDailyRows.
+  const wasteSharedCost = useMemo(() => {
+    let total = 0;
+    for (const mv of movements) {
+      if (mv.kind !== "loss" && mv.kind !== "expiration") continue;
+      if (mv.composeCmv === false) continue;
+      if (mv.op && mv.op !== "—") continue; // só os sem operação
+      total += Math.abs(Number(mv.delta) || 0) * Number(mv.unitCost || 0);
+    }
+    return total;
+  }, [movements]);
+
+  // Totais consolidados do período (consumo + ajustes + desperdício como custo compartilhado)
   const totals = useMemo(() => {
     const rev         = daily.reduce((s, r) => s + r.revenue, 0);
     const cogsConsumo = daily.reduce((s, r) => s + r.cogs, 0);
-    const cogs        = cogsConsumo + adjustNetCost;
+    const cogs        = cogsConsumo + adjustNetCost + wasteSharedCost;
     return {
       revenue: rev,
       cogs,
       cogsConsumo,
       cogsAdjust: adjustNetCost,
+      cogsWasteShared: wasteSharedCost,
       cmv:    rev > 0 ? (cogs / rev) * 100 : 0,
       margin: rev > 0 ? ((rev - cogs) / rev) * 100 : 0,
       days:   new Set(daily.map((r) => r.date)).size,
       opsCount: new Set(daily.map((r) => r.op)).size,
     };
-  }, [daily, adjustNetCost]);
+  }, [daily, adjustNetCost, wasteSharedCost]);
 
   const excluded = useMemo(() => {
     const { fromDate, toDate } = getDateRange(period);
@@ -205,9 +222,10 @@ function CMV({ setPage }) {
       m[r.op].cogs    += r.cogs;
     });
     const totalRev = Object.values(m).reduce((s, r) => s + r.revenue, 0);
-    if (totalRev > 0 && adjustNetCost !== 0) {
+    const sharedCost = adjustNetCost + wasteSharedCost;
+    if (totalRev > 0 && sharedCost !== 0) {
       for (const r of Object.values(m)) {
-        const share = adjustNetCost * (r.revenue / totalRev);
+        const share = sharedCost * (r.revenue / totalRev);
         r.cogs       += share;
         r.cogsAdjust += share;
       }
@@ -217,7 +235,7 @@ function CMV({ setPage }) {
       cmv:    o.revenue > 0 ? (o.cogs / o.revenue) * 100 : 0,
       margin: o.revenue > 0 ? ((o.revenue - o.cogs) / o.revenue) * 100 : 0,
     })).sort((a, b) => b.cmv - a.cmv);
-  }, [daily, adjustNetCost]);
+  }, [daily, adjustNetCost, wasteSharedCost]);
 
   // Heatmap · sempre últimos 7 dias, operações derivadas dos dados
   const heat = useMemo(() => {

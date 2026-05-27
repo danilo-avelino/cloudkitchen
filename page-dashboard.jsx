@@ -1042,4 +1042,5 @@ window.Dashboard               = Dashboard;
 window.KpiCard                 = KpiCard;
 window.FlowKpi                 = FlowKpi;
 window.ModuleKpi               = ModuleKpi;
+window.StockFlowDetailModal    = StockFlowDetailModal;
 window.computeDashboardMetrics = computeDashboardMetrics;

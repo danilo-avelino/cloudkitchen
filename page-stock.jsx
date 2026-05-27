@@ -32,6 +32,8 @@ function Stock({ scope }) {
   const [deletingCategory, setDeletingCategory] = useState(false);
   // KPIs operacionais (mês atual) — para estoquistas que não acessam o dashboard
   const [movements, setMovements] = useState([]);     // stock_movements MTD
+  // Drill-down dos KPIs de entrada/saída — clona o modal do dashboard
+  const [flowDetail, setFlowDetail] = useState(null); // null | "in" | "out"
 
   // Carrega tenant + items + categorias do DB quando online
   useEffect(() => {
@@ -500,8 +502,8 @@ function Stock({ scope }) {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* KPIs operacionais · espelham o dashboard p/ estoquistas */}
       <div style={{ padding: "16px 28px 4px", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
-        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in" />
-        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" />
+        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  onClick={() => setFlowDetail("in")} />
+        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" onClick={() => setFlowDetail("out")} />
         <FlowKpi label="Valor em estoque"    value={totalValue} />
         <ModuleKpi
           label="Alertas de estoque"
@@ -513,12 +515,13 @@ function Stock({ scope }) {
         />
       </div>
 
-      {/* Sub-tabs Insumos | Inventário */}
+      {/* Sub-tabs Insumos | Inventário | Fornecedores | Categorias | Desperdícios */}
       <div style={{ display: "flex", padding: "14px 28px 0", gap: 0, borderBottom: "1px solid var(--line)" }}>
         <StockSubTab active={view === "items"}     onClick={() => setView("items")}    >Insumos</StockSubTab>
         <StockSubTab active={view === "inventory"} onClick={() => setView("inventory")}>Inventário</StockSubTab>
         <StockSubTab active={view === "suppliers"} onClick={() => setView("suppliers")}>Fornecedores</StockSubTab>
         <StockSubTab active={view === "categories"} onClick={() => setView("categories")}>Categorias</StockSubTab>
+        <StockSubTab active={view === "wastes"}    onClick={() => setView("wastes")}    tone="crit">Desperdícios</StockSubTab>
       </div>
 
       {view === "inventory" ? (
@@ -537,6 +540,19 @@ function Stock({ scope }) {
             onCreate={createCategory}
             onRename={renameCategory}
             onDelete={deleteCategory}
+          />
+        </div>
+      ) : view === "wastes" ? (
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "20px 28px 32px" }}>
+          <WastesView
+            tenantId={tenantId}
+            items={items}
+            onApplied={async () => {
+              if (source === "db" && tenantId) {
+                const { data } = await dbListStockItems(tenantId);
+                if (data) setItems(data);
+              }
+            }}
           />
         </div>
       ) : (<>
@@ -667,6 +683,15 @@ function Stock({ scope }) {
         {selected && <AllocationPanel item={selected} onClose={() => setSelected(null)} />}
       </div>
       </>)}
+
+      {flowDetail && window.StockFlowDetailModal && (
+        <window.StockFlowDetailModal
+          direction={flowDetail}
+          periodLabel="Mês atual"
+          movements={movements}
+          onClose={() => setFlowDetail(null)}
+        />
+      )}
 
       {showEntry  && <StockEntryModal items={items} onClose={() => setShowEntry(false)} onSave={handleEntry} />}
       {showHistory && <StockHistoryModal onClose={() => setShowHistory(false)} />}
@@ -1947,15 +1972,19 @@ function ComposeCmvToggle({ on, onToggle }) {
   );
 }
 
-// Sub-tab que troca entre "Insumos" e "Inventário" no topo da página
-function StockSubTab({ active, onClick, children }) {
+// Sub-tab das vistas do Estoque (Insumos / Inventário / etc).
+// `tone="crit"` mantém a cor padrão do texto mas pinta o underline em vermelho
+// — sinaliza Desperdícios como área operacional de atenção sem destoar do menu.
+function StockSubTab({ active, onClick, tone, children }) {
+  const isCrit = tone === "crit";
   return (
     <button onClick={onClick} style={{
       background: "transparent", border: "none",
       padding: "10px 14px", fontSize: 12.5,
       color: active ? "var(--fg-0)" : "var(--fg-2)",
-      fontWeight: active ? 500 : 400, letterSpacing: "-0.005em",
-      borderBottom: `2px solid ${active ? "var(--accent-bright)" : "transparent"}`,
+      fontWeight: active ? 500 : 400,
+      letterSpacing: "-0.005em",
+      borderBottom: `2px solid ${active ? (isCrit ? "var(--crit)" : "var(--accent-bright)") : "transparent"}`,
       marginBottom: -1, display: "inline-flex", alignItems: "center",
       cursor: "pointer",
     }}>{children}</button>
@@ -2706,5 +2735,795 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
   );
 }
 
+// =====================================================================
+// Desperdícios — sub-aba do Estoque
+// =====================================================================
+// Saídas categorizadas (Vencido / Danificado / Estragado / Fora de uso) que
+// dão baixa no estoque e pesam no CMV. Toda movimentação aqui é gravada como
+// kind='loss' ou 'expiration' em stock_movements, com loss_reason setado.
+
+const WASTE_REASONS = [
+  { code: "vencido",      label: "Vencido",       kind: "expiration", color: "var(--crit)",  desc: "Insumo passou da validade" },
+  { code: "danificado",   label: "Danificado",    kind: "loss",       color: "var(--warn)",  desc: "Quebra, embalagem rompida, contaminação física" },
+  { code: "estragado",    label: "Estragado",     kind: "loss",       color: "var(--crit)",  desc: "Apodreceu / fermentou / mofou antes do vencimento" },
+  { code: "fora_de_uso",  label: "Fora de uso",   kind: "loss",       color: "var(--fg-2)",  desc: "Descarte por descontinuação, recall, troca de receita" },
+];
+
+function wasteReasonMeta(code) {
+  return WASTE_REASONS.find((r) => r.code === code) || { code, label: code || "—", kind: "loss", color: "var(--fg-2)" };
+}
+
+function WastesView({ tenantId, items, onApplied }) {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const [period, setPeriod] = useState("mtd"); // mtd | 7d | 30d | prev_month
+  const [showEntry, setShowEntry] = useState(false);
+  const [movements, setMovements] = useState([]);       // wastes do período
+  const [allMovements, setAllMovements] = useState([]); // todos os movimentos (p/ CMV)
+  const [prevWastes, setPrevWastes]   = useState([]);   // 7d anteriores (tendência)
+  const [operations, setOperations]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [reasonFilter, setReasonFilter] = useState("all");
+  const [opFilter, setOpFilter] = useState("all");
+
+  // Resolve janela de datas
+  const range = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now); startOfToday.setHours(0, 0, 0, 0);
+    if (period === "mtd") {
+      const from = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { from, to: null, label: "mês atual" };
+    }
+    if (period === "prev_month") {
+      const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const to   = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { from, to, label: "mês anterior" };
+    }
+    const days = period === "7d" ? 7 : 30;
+    const from = new Date(now); from.setDate(from.getDate() - days);
+    return { from, to: null, label: `últimos ${days} dias` };
+  }, [period]);
+
+  // Janela equivalente anterior (mesmo tamanho) — pra cálculo de tendência
+  const prevRange = useMemo(() => {
+    const ms = (range.to || new Date()) - range.from;
+    const prevTo   = new Date(range.from);
+    const prevFrom = new Date(range.from.getTime() - ms);
+    return { from: prevFrom, to: prevTo };
+  }, [range]);
+
+  // Carrega operações + movimentações
+  useEffect(() => {
+    if (!dbStatus.isOnline || !tenantId) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const fromIso = range.from.toISOString();
+        const toIso   = range.to ? range.to.toISOString() : null;
+        const prevFromIso = prevRange.from.toISOString();
+        const prevToIso   = prevRange.to.toISOString();
+
+        const [opsRes, movRes, prevRes] = await Promise.all([
+          dbListOperations(tenantId),
+          dbListStockMovements(tenantId, fromIso, toIso, { limit: 10000 }),
+          dbListStockMovements(tenantId, prevFromIso, prevToIso, { limit: 10000 }),
+        ]);
+        if (cancelled) return;
+        setOperations(opsRes.data || []);
+        const movs = movRes.data || [];
+        setAllMovements(movs);
+        setMovements(movs.filter((m) => m.kind === "loss" || m.kind === "expiration"));
+        setPrevWastes((prevRes.data || []).filter((m) => m.kind === "loss" || m.kind === "expiration"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline, tenantId, range.from, range.to]);
+
+  // Filtro aplicado (motivo + operação)
+  const filtered = useMemo(() => {
+    return movements.filter((m) => {
+      if (reasonFilter !== "all" && m.lossReason !== reasonFilter) return false;
+      if (opFilter !== "all") {
+        if (opFilter === "__shared__") {
+          if (m.operationId) return false;
+        } else if (m.operationId !== opFilter) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [movements, reasonFilter, opFilter]);
+
+  // Helpers de cálculo
+  const costOf = (m) => Math.abs(Number(m.delta) || 0) * Number(m.unitCost || 0);
+  const wasteCost = (list) => list.reduce((s, m) => s + costOf(m), 0);
+
+  const totals = useMemo(() => {
+    const total = wasteCost(movements);
+    const events = movements.length;
+    return { total, events };
+  }, [movements]);
+
+  // Total de CMV do período (consumo + ajustes + desperdício) p/ % CMV
+  const cmvTotal = useMemo(() => {
+    let cogsOut = 0, cogsWaste = 0, cogsAdjust = 0;
+    for (const mv of allMovements) {
+      if (mv.composeCmv === false) continue;
+      const c = Math.abs(Number(mv.delta) || 0) * Number(mv.unitCost || 0);
+      if (mv.kind === "out") cogsOut += c;
+      else if (mv.kind === "loss" || mv.kind === "expiration") cogsWaste += c;
+      else if (mv.kind === "adjust") cogsAdjust += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+    }
+    return cogsOut + cogsWaste + cogsAdjust;
+  }, [allMovements]);
+
+  const pctCmv = cmvTotal > 0 ? (totals.total / cmvTotal) * 100 : 0;
+
+  // Tendência: cost da janela atual vs anterior (mesmo tamanho)
+  const trend = useMemo(() => {
+    const cur  = wasteCost(movements);
+    const prev = wasteCost(prevWastes);
+    const delta = cur - prev;
+    const pct = prev > 0 ? (delta / prev) * 100 : (cur > 0 ? 100 : 0);
+    return { cur, prev, delta, pct, direction: delta > 0 ? "up" : delta < 0 ? "down" : "flat" };
+  }, [movements, prevWastes]);
+
+  // Por motivo (todos os 4)
+  const byReason = useMemo(() => {
+    const m = {};
+    for (const code of WASTE_REASONS.map((r) => r.code)) m[code] = { code, total: 0, count: 0 };
+    for (const mv of movements) {
+      const code = mv.lossReason || (mv.kind === "expiration" ? "vencido" : "danificado");
+      if (!m[code]) m[code] = { code, total: 0, count: 0 };
+      m[code].total += costOf(mv);
+      m[code].count += 1;
+    }
+    return Object.values(m).sort((a, b) => b.total - a.total);
+  }, [movements]);
+
+  const topReason = byReason[0] && byReason[0].total > 0 ? byReason[0] : null;
+
+  // Por operação (com "Compartilhado" pra movimentações sem op)
+  const byOperation = useMemo(() => {
+    const m = new Map();
+    const SHARED = "__shared__";
+    for (const op of operations) m.set(op.id, { opId: op.id, label: op.short_label || op.name, color: op.color, total: 0, count: 0 });
+    m.set(SHARED, { opId: SHARED, label: "Compartilhado", color: "var(--fg-3)", total: 0, count: 0 });
+    for (const mv of movements) {
+      const k = mv.operationId || SHARED;
+      if (!m.has(k)) m.set(k, { opId: k, label: "—", color: "var(--fg-3)", total: 0, count: 0 });
+      const entry = m.get(k);
+      entry.total += costOf(mv);
+      entry.count += 1;
+    }
+    return Array.from(m.values()).sort((a, b) => b.total - a.total);
+  }, [movements, operations]);
+
+  // Top categorias (R$)
+  const byCategory = useMemo(() => {
+    const m = new Map();
+    for (const mv of filtered) {
+      const k = mv.categoryName || "Sem categoria";
+      if (!m.has(k)) m.set(k, { name: k, total: 0, count: 0 });
+      const entry = m.get(k);
+      entry.total += costOf(mv);
+      entry.count += 1;
+    }
+    return Array.from(m.values()).sort((a, b) => b.total - a.total).slice(0, 8);
+  }, [filtered]);
+
+  // Top itens (R$)
+  const byItem = useMemo(() => {
+    const m = new Map();
+    for (const mv of filtered) {
+      const k = mv.itemId || mv.item;
+      if (!m.has(k)) m.set(k, { id: mv.itemId, name: mv.item, unit: mv.unit, total: 0, qty: 0, count: 0 });
+      const entry = m.get(k);
+      entry.total += costOf(mv);
+      entry.qty   += Math.abs(Number(mv.delta) || 0);
+      entry.count += 1;
+    }
+    return Array.from(m.values()).sort((a, b) => b.total - a.total).slice(0, 8);
+  }, [filtered]);
+
+  const fmtBR = (v) => Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtAt = (iso) => {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  const wasteCatalog = useMemo(
+    () => [...(items || [])].sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
+    [items],
+  );
+
+  const handleApplied = async () => {
+    setShowEntry(false);
+    if (typeof onApplied === "function") await onApplied();
+    // Recarrega movimentações do período
+    if (dbStatus.isOnline && tenantId) {
+      const fromIso = range.from.toISOString();
+      const toIso   = range.to ? range.to.toISOString() : null;
+      const movRes = await dbListStockMovements(tenantId, fromIso, toIso, { limit: 10000 });
+      const movs = movRes.data || [];
+      setAllMovements(movs);
+      setMovements(movs.filter((m) => m.kind === "loss" || m.kind === "expiration"));
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Header: título + período + botão */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <h2 className="h-title" style={{ margin: 0, color: "var(--fg-0)" }}>Desperdícios</h2>
+        <span style={{ fontSize: 12, color: "var(--fg-3)" }}>· {range.label}</span>
+        <Tabs value={period} onChange={setPeriod} options={[
+          { id: "mtd",        label: "Mês atual" },
+          { id: "prev_month", label: "Mês anterior" },
+          { id: "7d",         label: "7 dias" },
+          { id: "30d",        label: "30 dias" },
+        ]} />
+        <span style={{ flex: 1 }} />
+        <button className="btn" data-variant="danger" data-size="sm" onClick={() => setShowEntry(true)}
+                disabled={!dbStatus.isOnline || !tenantId}>
+          <I.Plus size={13} />Registrar desperdício
+        </button>
+      </div>
+
+      {!dbStatus.isOnline && (
+        <div style={{
+          padding: "10px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)",
+          borderRadius: 4, fontSize: 12, color: "var(--fg-1)",
+        }}>
+          Conecte ao Supabase pra registrar e consultar desperdícios.
+        </div>
+      )}
+
+      {/* 4 KPIs principais */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        <div className="kpi">
+          <div className="label">Total desperdiçado</div>
+          <div className="value" style={{ color: "var(--crit)" }}>R$ {fmtBR(totals.total)}</div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 6 }}>
+            {totals.events} {totals.events === 1 ? "ocorrência" : "ocorrências"} · {range.label}
+          </div>
+        </div>
+        <div className="kpi">
+          <div className="label">% sobre CMV</div>
+          <div className="value" style={{ color: pctCmv > 5 ? "var(--crit)" : pctCmv > 2 ? "var(--warn)" : "var(--fg-0)" }}>
+            {cmvTotal > 0 ? `${pctCmv.toFixed(1)}%` : "—"}
+          </div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 6 }}>
+            CMV do período: R$ {fmtBR(cmvTotal)}
+          </div>
+        </div>
+        <div className="kpi">
+          <div className="label">Tendência</div>
+          <div className="value" style={{
+            color: trend.direction === "up" ? "var(--crit)" : trend.direction === "down" ? "var(--ok)" : "var(--fg-0)",
+            display: "flex", alignItems: "center", gap: 6,
+          }}>
+            {trend.direction === "up" ? "▲" : trend.direction === "down" ? "▼" : "—"} {Math.abs(trend.pct).toFixed(0)}%
+          </div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 6 }}>
+            vs período anterior: R$ {fmtBR(trend.prev)}
+          </div>
+        </div>
+        <div className="kpi">
+          <div className="label">Top motivo</div>
+          <div className="value" style={{ color: topReason ? wasteReasonMeta(topReason.code).color : "var(--fg-3)", fontSize: 18 }}>
+            {topReason ? wasteReasonMeta(topReason.code).label : "—"}
+          </div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 6 }}>
+            {topReason ? `R$ ${fmtBR(topReason.total)} · ${topReason.count} ev.` : "Sem registros no período"}
+          </div>
+        </div>
+      </div>
+
+      {/* Por motivo (4 boxes) */}
+      <div className="card">
+        <div className="card-header">
+          <h3 className="card-title">Por motivo</h3>
+          <span className="card-sub">Distribuição em R$ no período</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0 }}>
+          {WASTE_REASONS.map((r, i) => {
+            const entry = byReason.find((b) => b.code === r.code) || { total: 0, count: 0 };
+            const pct   = totals.total > 0 ? (entry.total / totals.total) * 100 : 0;
+            return (
+              <button key={r.code} type="button"
+                onClick={() => setReasonFilter(reasonFilter === r.code ? "all" : r.code)}
+                style={{
+                  textAlign: "left", padding: "14px 16px",
+                  background: reasonFilter === r.code ? "var(--bg-2)" : "transparent",
+                  border: "none",
+                  borderLeft: i > 0 ? "1px solid var(--line-soft)" : "none",
+                  cursor: "pointer",
+                }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 50, background: r.color }} />
+                  <span style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>{r.label}</span>
+                </div>
+                <div className="mono" style={{ fontSize: 17, color: "var(--fg-0)", letterSpacing: "-0.01em" }}>
+                  R$ {fmtBR(entry.total)}
+                </div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 4 }}>
+                  {entry.count} ev. · {pct.toFixed(1)}%
+                </div>
+                <div className="bar" style={{ height: 3, marginTop: 8 }}>
+                  <i style={{ width: `${pct}%`, background: r.color }} />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Por operação */}
+      <div className="card">
+        <div className="card-header">
+          <h3 className="card-title">Desperdício por operação</h3>
+          <span className="card-sub">Clique pra filtrar a lista abaixo</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(Math.max(byOperation.length, 1), 5)}, 1fr)`, gap: 0 }}>
+          {byOperation.length === 0 ? (
+            <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+              Sem desperdícios no período
+            </div>
+          ) : byOperation.map((o, i) => {
+            const pct = totals.total > 0 ? (o.total / totals.total) * 100 : 0;
+            const active = opFilter === o.opId;
+            return (
+              <button key={o.opId} type="button"
+                onClick={() => setOpFilter(active ? "all" : o.opId)}
+                style={{
+                  textAlign: "left", padding: "14px 16px",
+                  background: active ? "var(--bg-2)" : "transparent",
+                  border: "none",
+                  borderLeft: i > 0 ? "1px solid var(--line-soft)" : "none",
+                  cursor: "pointer",
+                }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 50, background: o.color || "var(--fg-3)" }} />
+                  <span style={{ fontSize: 12, color: "var(--fg-0)", fontWeight: 500 }}>{o.label}</span>
+                </div>
+                <div className="mono" style={{ fontSize: 16, color: "var(--fg-0)" }}>
+                  R$ {fmtBR(o.total)}
+                </div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 4 }}>
+                  {o.count} ev. · {pct.toFixed(1)}%
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Rankings · Categoria + Item */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Top categorias</h3>
+            <span className="card-sub">Por valor desperdiçado</span>
+          </div>
+          {byCategory.length === 0 ? (
+            <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+              Sem registros
+            </div>
+          ) : (
+            <div style={{ padding: "10px 16px 16px" }}>
+              {byCategory.map((c, i) => {
+                const pct = byCategory[0].total > 0 ? (c.total / byCategory[0].total) * 100 : 0;
+                return (
+                  <div key={c.name} style={{ marginTop: i > 0 ? 12 : 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, color: "var(--fg-0)" }}>{c.name}</span>
+                      <span className="mono" style={{ fontSize: 11, color: "var(--fg-1)" }}>
+                        R$ {fmtBR(c.total)} <span style={{ color: "var(--fg-3)" }}>· {c.count} ev.</span>
+                      </span>
+                    </div>
+                    <div className="bar" style={{ height: 4 }}>
+                      <i style={{ width: `${pct}%`, background: "var(--crit)" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Top itens</h3>
+            <span className="card-sub">Por valor desperdiçado</span>
+          </div>
+          {byItem.length === 0 ? (
+            <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+              Sem registros
+            </div>
+          ) : (
+            <div style={{ padding: "10px 16px 16px" }}>
+              {byItem.map((it, i) => {
+                const pct = byItem[0].total > 0 ? (it.total / byItem[0].total) * 100 : 0;
+                return (
+                  <div key={it.id || it.name} style={{ marginTop: i > 0 ? 12 : 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, color: "var(--fg-0)" }}>{it.name}</span>
+                      <span className="mono" style={{ fontSize: 11, color: "var(--fg-1)" }}>
+                        R$ {fmtBR(it.total)} <span style={{ color: "var(--fg-3)" }}>· {it.qty.toLocaleString("pt-BR", { maximumFractionDigits: 2 })} {it.unit}</span>
+                      </span>
+                    </div>
+                    <div className="bar" style={{ height: 4 }}>
+                      <i style={{ width: `${pct}%`, background: "var(--crit)" }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Filtros + lista */}
+      <div className="card">
+        <div className="card-header">
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <h3 className="card-title">Lançamentos · {filtered.length}</h3>
+            {(reasonFilter !== "all" || opFilter !== "all") && (
+              <button className="btn" data-variant="ghost" data-size="sm"
+                      onClick={() => { setReasonFilter("all"); setOpFilter("all"); }}>
+                Limpar filtros
+              </button>
+            )}
+          </div>
+          <span className="card-sub">{range.label}</span>
+        </div>
+        <table className="table" data-density="compact">
+          <thead>
+            <tr>
+              <th>Quando</th>
+              <th>Insumo</th>
+              <th>Categoria</th>
+              <th>Motivo</th>
+              <th>Operação</th>
+              <th className="num">Qtd</th>
+              <th className="num">Custo unit.</th>
+              <th className="num">Total</th>
+              <th>Observação</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={9} className="dim" style={{ textAlign: "center", padding: 32 }}>Carregando…</td></tr>
+            ) : filtered.length === 0 ? (
+              <tr><td colSpan={9} className="dim" style={{ textAlign: "center", padding: 32 }}>
+                Sem desperdícios registrados {reasonFilter !== "all" || opFilter !== "all" ? "no filtro selecionado" : "no período"}.
+              </td></tr>
+            ) : filtered.map((m) => {
+              const rm = wasteReasonMeta(m.lossReason || (m.kind === "expiration" ? "vencido" : null));
+              const cost = costOf(m);
+              return (
+                <tr key={m.id}>
+                  <td className="mono dim" style={{ fontSize: 11 }}>{fmtAt(m.at)}</td>
+                  <td className="row-strong">{m.item}</td>
+                  <td className="dim">{m.categoryName || "—"}</td>
+                  <td>
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", gap: 5,
+                      padding: "2px 8px", borderRadius: 99,
+                      background: "var(--bg-2)", border: `1px solid ${rm.color}`,
+                      color: rm.color, fontFamily: "var(--mono)", fontSize: 10,
+                      letterSpacing: "0.04em", textTransform: "uppercase", fontWeight: 500,
+                    }}>
+                      <span style={{ width: 5, height: 5, borderRadius: 50, background: rm.color }} />
+                      {rm.label}
+                    </span>
+                  </td>
+                  <td className="dim mono" style={{ fontSize: 10.5 }}>
+                    {m.operationName ? (m.operationShort || m.operationName) : <span style={{ color: "var(--fg-3)" }}>compartilhado</span>}
+                  </td>
+                  <td className="num">{Math.abs(m.delta).toLocaleString("pt-BR", { maximumFractionDigits: 3 })} {m.unit}</td>
+                  <td className="num">R$ {fmtBR(m.unitCost)}</td>
+                  <td className="num" style={{ color: "var(--crit)" }}>R$ {fmtBR(cost)}</td>
+                  <td className="dim" style={{ fontSize: 11.5, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.notes || ""}>
+                    {m.notes || "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {showEntry && (
+        <WasteEntryModal
+          items={wasteCatalog}
+          operations={operations}
+          tenantId={tenantId}
+          onClose={() => setShowEntry(false)}
+          onApplied={handleApplied}
+        />
+      )}
+    </div>
+  );
+}
+
+// =====================================================================
+// Modal de registro de desperdício
+// =====================================================================
+function WasteEntryModal({ items, operations, tenantId, onClose, onApplied }) {
+  const StockItemPicker = window.StockItemPicker;
+  const catalog = useMemo(
+    () => [...(items || [])].sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
+    [items],
+  );
+
+  const [lines, setLines] = useState([{ stock_item_id: "", qty: "", cost: "" }]);
+  const [reason, setReason]   = useState("");      // vencido | danificado | estragado | fora_de_uso
+  const [opId, setOpId]       = useState("");      // uuid | "__shared__"
+  const [note, setNote]       = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [openSignals, setOpenSignals] = useState({});
+  useEffect(() => { setOpenSignals({ 0: 1 }); }, []);
+
+  const parseN = (raw) => parseFloat(String(raw ?? "").replace(",", ".")) || 0;
+  const setLine    = (i, k, v) => setLines((prev) => prev.map((ln, j) => {
+    if (j !== i) return ln;
+    if (k === "stock_item_id") {
+      // Quando muda o insumo, puxa o custo da última compra como default editável
+      const it = catalog.find((c) => c.id === v);
+      return { ...ln, stock_item_id: v, cost: it ? String(it.cost ?? "") : ln.cost };
+    }
+    return { ...ln, [k]: v };
+  }));
+  const removeLine = (i) => setLines((prev) => prev.filter((_, j) => j !== i));
+  const addLine    = () => {
+    const newIdx = lines.length;
+    setLines((prev) => [...prev, { stock_item_id: "", qty: "", cost: "" }]);
+    setOpenSignals((cur) => ({ ...cur, [newIdx]: (cur[newIdx] || 0) + 1 }));
+  };
+
+  const usedIds = (currentIdx) =>
+    new Set(lines.filter((_, j) => j !== currentIdx).map((ln) => ln.stock_item_id).filter(Boolean));
+
+  const validLines = lines.filter((ln) => ln.stock_item_id && parseN(ln.qty) > 0);
+  const total = validLines.reduce((s, ln) => s + parseN(ln.qty) * parseN(ln.cost), 0);
+
+  const errs = {
+    lines:  validLines.length === 0,
+    reason: !reason,
+    op:     !opId,
+    note:   !note.trim(),
+  };
+  const valid = !errs.lines && !errs.reason && !errs.op && !errs.note;
+  const errorMessages = [
+    errs.lines  && "Adicione ao menos um insumo com quantidade",
+    errs.reason && "Selecione o motivo do desperdício",
+    errs.op     && "Selecione a operação (ou marque compartilhado)",
+    errs.note   && "Descreva o que aconteceu na observação",
+  ].filter(Boolean);
+
+  const reasonMeta = reason ? wasteReasonMeta(reason) : null;
+
+  const submit = async () => {
+    if (!valid || submitting) return;
+    setSubmitting(true);
+    try {
+      const operationId = opId === "__shared__" ? null : opId;
+      const reasonLabel = wasteReasonMeta(reason).label.toUpperCase();
+      const fullNote = `[${reasonLabel}] ${note.trim()}`;
+      const kind = wasteReasonMeta(reason).kind; // expiration | loss
+
+      let okCount = 0;
+      const failures = [];
+      for (const ln of validLines) {
+        const qty = parseN(ln.qty);
+        const cost = parseN(ln.cost);
+        const { error } = await dbApplyStockMovement(
+          tenantId, ln.stock_item_id, qty, kind,
+          fullNote, cost > 0 ? cost : undefined,
+          { operationId, lossReason: reason, referenceType: "waste" },
+        );
+        if (error) failures.push({ itemId: ln.stock_item_id, error });
+        else okCount += 1;
+      }
+      if (failures.length > 0) {
+        window.showToast(`Erro em ${failures.length} item(ns): ${failures[0].error.message}`, { tone: "crit", ttl: 4500 });
+      }
+      if (okCount > 0) {
+        window.showToast(`${okCount} desperdício(s) registrado(s)`, { tone: "ok" });
+        if (typeof onApplied === "function") await onApplied();
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Registrar desperdício"
+      subtitle="Saída de estoque por perda · entra no CMV"
+      onClose={submitting ? undefined : onClose}
+      width={780}
+      footer={
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 12 }}>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-3)" }}>
+            {validLines.length} {validLines.length === 1 ? "item" : "itens"} · total R$ {total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onClose} disabled={submitting}>Cancelar</button>
+            <button className="btn" data-variant="danger" data-size="sm" onClick={submit} disabled={!valid || submitting}>
+              {submitting ? "Salvando…" : "Confirmar desperdício"}
+            </button>
+          </div>
+        </div>
+      }
+    >
+      {/* Motivo · radio cards */}
+      <div className="h-eyebrow" style={{ marginBottom: 8 }}>Motivo · obrigatório</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
+        {WASTE_REASONS.map((r) => {
+          const active = reason === r.code;
+          return (
+            <button key={r.code} type="button" onClick={() => setReason(r.code)} style={{
+              textAlign: "left", padding: "12px 12px",
+              borderRadius: 6,
+              border: `1px solid ${active ? r.color : "var(--line)"}`,
+              background: active ? "var(--bg-2)" : "transparent",
+              boxShadow: active ? `0 0 0 1px ${r.color}` : "none",
+              cursor: "pointer",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 50, background: r.color }} />
+                <span style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>{r.label}</span>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--fg-3)", lineHeight: 1.35 }}>{r.desc}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Operação + observação */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 12, marginBottom: 16 }}>
+        <FormRow label="Operação · obrigatório">
+          <select className="select" value={opId} onChange={(e) => setOpId(e.target.value)}
+                  style={errs.op ? { borderColor: "var(--crit)" } : null}>
+            <option value="">Selecione…</option>
+            <option value="__shared__">Compartilhado (rateado no CMV)</option>
+            {(operations || []).map((op) => (
+              <option key={op.id} value={op.id}>{op.name}</option>
+            ))}
+          </select>
+        </FormRow>
+        <FormRow label="Observação · obrigatório" hint="Descreva o que aconteceu (lote, fornecedor, falha, etc).">
+          <input className="input" value={note} onChange={(e) => setNote(e.target.value)}
+                 placeholder="Ex.: lote 2245 com odor azedo · descarte total"
+                 style={errs.note ? { borderColor: "var(--crit)" } : null} />
+        </FormRow>
+      </div>
+
+      {/* Itens */}
+      <div className="h-eyebrow" style={{ marginBottom: 8 }}>Itens · {lines.length}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 90px 110px 100px 32px",
+          gap: 10, alignItems: "center",
+          padding: "0 4px",
+          fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)",
+          letterSpacing: "0.08em", textTransform: "uppercase",
+        }}>
+          <span>Insumo</span>
+          <span style={{ textAlign: "right" }}>Qtd</span>
+          <span style={{ textAlign: "right" }}>Custo unit.</span>
+          <span style={{ textAlign: "right" }}>Subtotal</span>
+          <span />
+        </div>
+
+        {lines.map((ln, i) => {
+          const item = catalog.find((it) => it.id === ln.stock_item_id);
+          const qtyN = parseN(ln.qty);
+          const subtotal = qtyN * parseN(ln.cost);
+          const taken = usedIds(i);
+          return (
+            <div key={i} style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 90px 110px 100px 32px",
+              gap: 10, alignItems: "center",
+            }}>
+              {StockItemPicker ? (
+                <StockItemPicker
+                  items={catalog}
+                  value={ln.stock_item_id}
+                  onChange={(id) => setLine(i, "stock_item_id", id)}
+                  openSignal={openSignals[i]}
+                  disabledIds={Array.from(taken)}
+                />
+              ) : (
+                <select className="select" value={ln.stock_item_id}
+                        onChange={(e) => setLine(i, "stock_item_id", e.target.value)}>
+                  <option value="">Selecione…</option>
+                  {catalog.filter((it) => !taken.has(it.id)).map((it) =>
+                    <option key={it.id} value={it.id}>{it.name} ({it.unit})</option>
+                  )}
+                </select>
+              )}
+              <input className="input mono" inputMode="decimal"
+                     value={ln.qty} placeholder="0"
+                     onChange={(e) => setLine(i, "qty", e.target.value)}
+                     style={{ textAlign: "right" }}
+                     disabled={!item} />
+              <input className="input mono" inputMode="decimal"
+                     value={ln.cost} placeholder="0,00"
+                     onChange={(e) => setLine(i, "cost", e.target.value)}
+                     style={{ textAlign: "right" }}
+                     disabled={!item}
+                     title="Custo unitário · pré-preenchido com a última compra" />
+              <span className="mono" style={{
+                fontSize: 11.5,
+                color: subtotal > 0 ? "var(--crit)" : "var(--fg-3)",
+                textAlign: "right",
+              }}>
+                {subtotal > 0
+                  ? "R$ " + subtotal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                  : "—"}
+              </span>
+              <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                      onClick={() => removeLine(i)}
+                      disabled={lines.length === 1}
+                      style={{ padding: "4px 6px" }}
+                      title={lines.length === 1 ? "É preciso ao menos uma linha" : "Remover item"}>
+                <I.X size={11} />
+              </button>
+            </div>
+          );
+        })}
+
+        <button type="button" className="btn" data-variant="ghost" data-size="sm"
+                onClick={addLine}
+                style={{ alignSelf: "flex-start", marginTop: 4 }}>
+          <I.Plus size={11} />Adicionar item
+        </button>
+      </div>
+
+      {errorMessages.length > 0 && (
+        <div style={{
+          marginTop: 14,
+          padding: "8px 12px", background: "var(--crit-soft)",
+          border: "1px solid var(--crit-line)", borderRadius: 4,
+          fontSize: 11.5, color: "var(--crit)",
+        }}>
+          <strong>Preencha antes de salvar:</strong>
+          <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+            {errorMessages.map((m, i) => <li key={i}>{m}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {reasonMeta && (
+        <div style={{
+          marginTop: 14,
+          padding: "10px 12px",
+          background: "var(--bg-2)", border: "1px solid var(--line-soft)",
+          borderRadius: 4, fontSize: 11.5, color: "var(--fg-2)",
+        }}>
+          <strong style={{ color: reasonMeta.color }}>{reasonMeta.label}</strong> · será gravado
+          como <code className="mono" style={{ color: "var(--fg-1)" }}>{reasonMeta.kind === "expiration" ? "expiration" : "loss"}</code>{" "}
+          em stock_movements e descontado do saldo do insumo.
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 window.Stock = Stock;
 window.Tabs = Tabs;
+window.WastesView = WastesView;
+window.WasteEntryModal = WasteEntryModal;
