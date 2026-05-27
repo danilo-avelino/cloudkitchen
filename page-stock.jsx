@@ -3308,9 +3308,9 @@ function WasteEntryModal({ items, operations, tenantId, onClose, onApplied }) {
   const setLine    = (i, k, v) => setLines((prev) => prev.map((ln, j) => {
     if (j !== i) return ln;
     if (k === "stock_item_id") {
-      // Quando muda o insumo, puxa o custo da última compra como default editável
+      // Quando muda o insumo, fixa o custo da última compra (campo é read-only na UI)
       const it = catalog.find((c) => c.id === v);
-      return { ...ln, stock_item_id: v, cost: it ? String(it.cost ?? "") : ln.cost };
+      return { ...ln, stock_item_id: v, cost: it ? String(it.cost ?? "") : "" };
     }
     return { ...ln, [k]: v };
   }));
@@ -3493,10 +3493,11 @@ function WasteEntryModal({ items, operations, tenantId, onClose, onApplied }) {
                      disabled={!item} />
               <input className="input mono" inputMode="decimal"
                      value={ln.cost} placeholder="0,00"
-                     onChange={(e) => setLine(i, "cost", e.target.value)}
-                     style={{ textAlign: "right" }}
+                     readOnly
+                     tabIndex={-1}
+                     style={{ textAlign: "right", cursor: "default", background: "var(--bg-2)", color: "var(--fg-2)" }}
                      disabled={!item}
-                     title="Custo unitário · pré-preenchido com a última compra" />
+                     title="Custo unitário (não editável) · vem da última compra do insumo" />
               <span className="mono" style={{
                 fontSize: 11.5,
                 color: subtotal > 0 ? "var(--crit)" : "var(--fg-3)",
