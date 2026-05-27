@@ -760,6 +760,8 @@ function mapKitchenRequestFromDb(row) {
     by:        row.requested_by_name || "—",
     at:        row.requested_at ? new Date(row.requested_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : "",
     requestedAt: row.requested_at,
+    separatedAt: row.separated_at || null,
+    deliveredAt: row.delivered_at || null,
     items:     (row.items || []).map((it) => [
       it.display_name,
       `${Number(it.qty)} ${it.unit}`,
@@ -776,7 +778,7 @@ async function dbListKitchenRequests(tenantId, options = {}) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   let q = _client.from("kitchen_requests")
     .select(`
-      id, code, status, priority, requested_by_name, requested_at, notes,
+      id, code, status, priority, requested_by_name, requested_at, separated_at, delivered_at, notes,
       operation_id, is_shared, splits,
       operation:operations(id, slug, name, short_label),
       items:kitchen_request_items(id, display_name, qty, unit, unit_cost, line_cost, stock_item_id, sort_order)

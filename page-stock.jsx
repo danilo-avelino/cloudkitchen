@@ -34,6 +34,8 @@ function Stock({ scope }) {
   const [movements, setMovements] = useState([]);     // stock_movements MTD
   // Drill-down dos KPIs de entrada/saída — clona o modal do dashboard
   const [flowDetail, setFlowDetail] = useState(null); // null | "in" | "out"
+  // Drill-down do KPI "Valor em estoque" (mesmo modal do dashboard)
+  const [showStockValueModal, setShowStockValueModal] = useState(false);
 
   // Carrega tenant + items + categorias do DB quando online
   useEffect(() => {
@@ -504,7 +506,7 @@ function Stock({ scope }) {
       <div style={{ padding: "16px 28px 4px", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  onClick={() => setFlowDetail("in")} />
         <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" onClick={() => setFlowDetail("out")} />
-        <FlowKpi label="Valor em estoque"    value={totalValue} />
+        <FlowKpi label="Valor em estoque"    value={totalValue} onClick={() => setShowStockValueModal(true)} />
         <ModuleKpi
           label="Alertas de estoque"
           value={stockAlerts.total}
@@ -690,6 +692,13 @@ function Stock({ scope }) {
           periodLabel="Mês atual"
           movements={movements}
           onClose={() => setFlowDetail(null)}
+        />
+      )}
+
+      {showStockValueModal && (
+        <StockTopValueModal
+          items={items}
+          onClose={() => setShowStockValueModal(false)}
         />
       )}
 
@@ -1018,18 +1027,25 @@ function StockEntryModal({ items, onClose, onSave }) {
     [items],
   );
 
-  const [lines, setLines] = useState([{ stock_item_id: "", qty: "", cost: "" }]);
+  const [lines, setLines] = useState([{ stock_item_id: "", qty: "", total: "" }]);
   const [note,  setNote]  = useState("");
   const [openSignals, setOpenSignals] = useState({});
   // Abre o picker da primeira linha automaticamente quando o modal monta.
   useEffect(() => { setOpenSignals({ 0: 1 }); }, []);
 
-  const parseN = (raw) => parseFloat(String(raw ?? "").replace(",", ".")) || 0;
+  // Parser BR-safe: aceita "8,50", "1.234,56", "8.5" sem virar NaN.
+  const parseN = (raw) => {
+    if (raw === "" || raw === null || raw === undefined) return 0;
+    if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+    const s = String(raw).trim().replace(/\s+/g, "").replace(/\./g, "").replace(",", ".");
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : 0;
+  };
   const setLine    = (i, k, v) => setLines((prev) => prev.map((ln, j) => j === i ? { ...ln, [k]: v } : ln));
   const removeLine = (i) => setLines((prev) => prev.filter((_, j) => j !== i));
   const addLine    = () => {
     const newIdx = lines.length; // posição do item recém-criado (após o push)
-    setLines((prev) => [...prev, { stock_item_id: "", qty: "", cost: "" }]);
+    setLines((prev) => [...prev, { stock_item_id: "", qty: "", total: "" }]);
     setOpenSignals((cur) => ({ ...cur, [newIdx]: (cur[newIdx] || 0) + 1 }));
   };
 
@@ -1037,12 +1053,19 @@ function StockEntryModal({ items, onClose, onSave }) {
   const usedIds = (currentIdx) =>
     new Set(lines.filter((_, j) => j !== currentIdx).map((ln) => ln.stock_item_id).filter(Boolean));
 
+  // unit_cost derivado: total ÷ qty (mesma regra do recebimento).
+  const unitCostOf = (ln) => {
+    const q = parseN(ln.qty);
+    const t = parseN(ln.total);
+    return q > 0 ? t / q : 0;
+  };
+
   const validLines = lines.filter((ln) => ln.stock_item_id && parseN(ln.qty) > 0);
-  const total = validLines.reduce((s, ln) => s + parseN(ln.qty) * parseN(ln.cost), 0);
+  const total = validLines.reduce((s, ln) => s + parseN(ln.total), 0);
   const valid = validLines.length > 0;
 
-  // Enter no campo de custo da última linha vira "Adicionar item"
-  const onCostKeyDown = (e, i) => {
+  // Enter no campo de custo total da última linha vira "Adicionar item"
+  const onTotalKeyDown = (e, i) => {
     if (e.key !== "Enter") return;
     e.preventDefault();
     const ln = lines[i];
@@ -1057,11 +1080,16 @@ function StockEntryModal({ items, onClose, onSave }) {
     try {
       await onSave({
         note: note.trim(),
-        lines: validLines.map((ln) => ({
-          itemId: ln.stock_item_id,
-          qty:    parseN(ln.qty),
-          cost:   parseN(ln.cost),
-        })),
+        lines: validLines.map((ln) => {
+          const qty   = parseN(ln.qty);
+          const tot   = parseN(ln.total);
+          const unit  = qty > 0 ? Number((tot / qty).toFixed(4)) : 0;
+          return {
+            itemId: ln.stock_item_id,
+            qty,
+            cost: unit,
+          };
+        }),
       });
     } finally {
       setSubmitting(false);
@@ -1070,7 +1098,7 @@ function StockEntryModal({ items, onClose, onSave }) {
 
   return (
     <Modal title="Entrada manual de estoque"
-           subtitle="Selecione insumos do estoque · qty e custo unitário por linha."
+           subtitle="Selecione insumos do estoque · qty e custo total por linha (unitário calculado)."
            onClose={onClose}
            width={760}
       footer={
@@ -1099,15 +1127,14 @@ function StockEntryModal({ items, onClose, onSave }) {
         }}>
           <span>Insumo</span>
           <span style={{ textAlign: "right" }}>Qtd</span>
+          <span style={{ textAlign: "right" }}>Custo total</span>
           <span style={{ textAlign: "right" }}>Custo unit.</span>
-          <span style={{ textAlign: "right" }}>Subtotal</span>
           <span />
         </div>
 
         {lines.map((ln, i) => {
           const item = catalog.find((it) => it.id === ln.stock_item_id);
-          const qtyN = parseN(ln.qty);
-          const subtotal = qtyN * parseN(ln.cost);
+          const calcUnit = unitCostOf(ln);
           const taken = usedIds(i);
           return (
             <div key={i} style={{
@@ -1139,20 +1166,24 @@ function StockEntryModal({ items, onClose, onSave }) {
                      style={{ textAlign: "right" }}
                      disabled={!item} />
               <input className="input mono" inputMode="decimal"
-                     value={ln.cost} placeholder="0,00"
-                     onChange={(e) => setLine(i, "cost", e.target.value)}
-                     onKeyDown={(e) => onCostKeyDown(e, i)}
+                     value={ln.total} placeholder="0,00"
+                     onChange={(e) => setLine(i, "total", e.target.value)}
+                     onKeyDown={(e) => onTotalKeyDown(e, i)}
                      style={{ textAlign: "right" }}
-                     disabled={!item} />
-              <span className="mono" style={{
-                fontSize: 11.5,
-                color: subtotal > 0 ? "var(--fg-1)" : "var(--fg-3)",
-                textAlign: "right",
-              }}>
-                {subtotal > 0
-                  ? "R$ " + subtotal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                     disabled={!item}
+                     title="Custo total da linha (NF) · unitário é calculado" />
+              <div className="mono"
+                   title="Calculado automaticamente: Total ÷ Qtd"
+                   style={{
+                     textAlign: "right", padding: "6px 10px",
+                     background: "var(--bg-2)", border: "1px solid var(--line)",
+                     borderRadius: 4, fontSize: 11.5,
+                     color: calcUnit > 0 ? "var(--fg-2)" : "var(--fg-3)",
+                   }}>
+                {calcUnit > 0
+                  ? "R$ " + calcUnit.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                   : "—"}
-              </span>
+              </div>
               <button type="button" className="btn" data-variant="ghost" data-size="sm"
                       onClick={() => removeLine(i)}
                       disabled={lines.length === 1}
@@ -3523,7 +3554,128 @@ function WasteEntryModal({ items, operations, tenantId, onClose, onApplied }) {
   );
 }
 
+// =====================================================================
+// <StockTopValueModal> · top 25 itens mais caros (qty × cost desc)
+// =====================================================================
+// Acionado pelos cards "Valor em estoque" do Dashboard e da aba Estoque.
+// Lê de `items` (shape pós mapStockItemFromDb: cost, qty, cat, supplier, …),
+// não busca no DB — quem renderiza já tem a lista carregada.
+function StockTopValueModal({ items, onClose }) {
+  const top = useMemo(() => {
+    const list = Array.isArray(items) ? items : [];
+    return list
+      .map((it) => {
+        const qty  = Number(it.qty)  || 0;
+        const cost = Number(it.cost) || 0;
+        return { ...it, _value: qty * cost };
+      })
+      .filter((it) => it._value > 0)
+      .sort((a, b) => b._value - a._value)
+      .slice(0, 25);
+  }, [items]);
+
+  const totalTop = top.reduce((s, it) => s + it._value, 0);
+  const totalAll = (items || []).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.cost) || 0), 0);
+  const sharePct = totalAll > 0 ? (totalTop / totalAll) * 100 : 0;
+
+  const fmtBRL = (n) => "R$ " + Number(n || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtNum = (n, dec = 3) => Number(n || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: dec });
+  const fmtDate = (d) => {
+    if (!d || d === "—") return "—";
+    const dt = new Date(d);
+    if (Number.isNaN(dt.getTime())) return d;
+    return dt.toLocaleDateString("pt-BR");
+  };
+
+  const statusTone = (s) => s === "crit" ? "var(--crit)" : s === "warn" ? "var(--warn)" : "var(--ok)";
+  const statusLabel = (s) => s === "crit" ? "Crítico" : s === "warn" ? "Baixo" : "OK";
+
+  return (
+    <Modal
+      title="Top 25 — Valor em estoque"
+      subtitle={`${top.length} insumos representam ${fmtBRL(totalTop)} (${sharePct.toFixed(1)}% do total ${fmtBRL(totalAll)})`}
+      onClose={onClose}
+      width={1100}
+      footer={
+        <button className="btn" data-size="sm" onClick={onClose}>Fechar</button>
+      }
+    >
+      {top.length === 0 ? (
+        <div style={{ padding: "32px 0", textAlign: "center", color: "var(--fg-3)", fontSize: 13 }}>
+          Nenhum insumo com valor em estoque (qty × custo &gt; 0).
+        </div>
+      ) : (
+        <div style={{ overflow: "auto", maxHeight: "70vh" }}>
+          <table className="table-dense" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead style={{ position: "sticky", top: 0, background: "var(--bg-1)", zIndex: 1 }}>
+              <tr style={{ borderBottom: "1px solid var(--line-strong)", color: "var(--fg-3)", fontFamily: "var(--mono)", fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                <th style={{ textAlign: "right", padding: "10px 8px", width: 36 }}>#</th>
+                <th style={{ textAlign: "left",  padding: "10px 8px" }}>Insumo</th>
+                <th style={{ textAlign: "left",  padding: "10px 8px" }}>Categoria</th>
+                <th style={{ textAlign: "right", padding: "10px 8px" }}>Qtd</th>
+                <th style={{ textAlign: "left",  padding: "10px 8px" }}>Un</th>
+                <th style={{ textAlign: "right", padding: "10px 8px" }}>Custo un.</th>
+                <th style={{ textAlign: "right", padding: "10px 8px", color: "var(--fg-0)" }}>Valor total</th>
+                <th style={{ textAlign: "right", padding: "10px 8px" }}>Mín / Máx</th>
+                <th style={{ textAlign: "left",  padding: "10px 8px" }}>Status</th>
+                <th style={{ textAlign: "left",  padding: "10px 8px" }}>Fornecedor</th>
+                <th style={{ textAlign: "left",  padding: "10px 8px" }}>Validade</th>
+                <th style={{ textAlign: "center", padding: "10px 8px" }} title="Compõe CMV">CMV</th>
+                <th style={{ textAlign: "center", padding: "10px 8px" }} title="Mínimo automático ativo">Auto</th>
+              </tr>
+            </thead>
+            <tbody>
+              {top.map((it, idx) => (
+                <tr key={it.id || idx} style={{ borderBottom: "1px solid var(--line-soft)" }}>
+                  <td style={{ textAlign: "right", padding: "8px 8px", fontFamily: "var(--mono)", color: "var(--fg-3)", fontSize: 11 }}>{idx + 1}</td>
+                  <td style={{ padding: "8px 8px" }}>
+                    <div style={{ color: "var(--fg-0)", fontWeight: 500 }}>{it.name}</div>
+                    {it.code && (
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 1 }}>{it.code}</div>
+                    )}
+                    {it.notes && (
+                      <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 2, maxWidth: 260, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={it.notes}>
+                        {it.notes}
+                      </div>
+                    )}
+                  </td>
+                  <td style={{ padding: "8px 8px", color: "var(--fg-2)" }}>{it.cat || "—"}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--fg-1)" }}>{fmtNum(it.qty)}</td>
+                  <td style={{ padding: "8px 8px", color: "var(--fg-3)", fontSize: 11 }}>{it.unit || "—"}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--fg-1)" }}>{fmtBRL(it.cost)}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--fg-0)", fontWeight: 500 }}>{fmtBRL(it._value)}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--fg-2)", fontSize: 11 }}>
+                    {fmtNum(it.reorder, 1)} / {it.max != null ? fmtNum(it.max, 1) : "—"}
+                  </td>
+                  <td style={{ padding: "8px 8px" }}>
+                    <span style={{
+                      display: "inline-block", padding: "2px 7px", borderRadius: 99,
+                      fontFamily: "var(--mono)", fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase",
+                      color: statusTone(it.status),
+                      border: `1px solid ${statusTone(it.status)}`,
+                      background: "transparent",
+                    }}>{statusLabel(it.status)}</span>
+                  </td>
+                  <td style={{ padding: "8px 8px", color: "var(--fg-2)" }}>{it.supplier || "—"}</td>
+                  <td style={{ padding: "8px 8px", color: "var(--fg-2)", fontFamily: "var(--mono)", fontSize: 11 }}>{fmtDate(it.exp)}</td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", color: it.composeCmv ? "var(--ok)" : "var(--fg-3)" }}>
+                    {it.composeCmv ? "✓" : "—"}
+                  </td>
+                  <td style={{ padding: "8px 8px", textAlign: "center", color: it.autoMin ? "var(--ok)" : "var(--fg-3)" }}>
+                    {it.autoMin ? "✓" : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 window.Stock = Stock;
 window.Tabs = Tabs;
 window.WastesView = WastesView;
 window.WasteEntryModal = WasteEntryModal;
+window.StockTopValueModal = StockTopValueModal;

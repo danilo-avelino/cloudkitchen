@@ -1,4 +1,28 @@
 // Requests page — Kanban Pendente → Separada → Entregue
+
+// Formata timestamps (requested_at / separated_at / delivered_at) para a coluna da Lista.
+// Mesmo dia → "HH:mm". Outro dia → "dd/mm HH:mm". Sem valor → "—".
+function fmtReqStamp(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const today = new Date();
+  const sameDay = d.getFullYear() === today.getFullYear()
+               && d.getMonth()    === today.getMonth()
+               && d.getDate()     === today.getDate();
+  const hhmm = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return hhmm;
+  const ddmm = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return `${ddmm} ${hhmm}`;
+}
+// Tooltip: data + hora completas em pt-BR
+function fmtReqStampTitle(iso) {
+  if (!iso) return undefined;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 function Requests({ scope }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   // Lançamentos existentes com status "approved" são tratados como "pending" no novo fluxo
@@ -96,14 +120,18 @@ function Requests({ scope }) {
     const next = order[Math.min(order.indexOf(cur.status) + 1, order.length - 1)];
     if (next === cur.status) return;
 
-    setItems((prev) => prev.map((r) => r.id === id ? { ...r, status: next } : r));
+    const nowIso = new Date().toISOString();
+    const stampPatch = next === "separated" ? { separatedAt: nowIso }
+                     : next === "delivered" ? { deliveredAt: nowIso }
+                     : {};
+    setItems((prev) => prev.map((r) => r.id === id ? { ...r, status: next, ...stampPatch } : r));
 
     // Persiste status no DB se conectado
     if (source === "db") {
       const { error } = await dbUpdateKitchenRequestStatus(id, next);
       if (error) {
-        // Rollback
-        setItems((prev) => prev.map((r) => r.id === id ? { ...r, status: cur.status } : r));
+        // Rollback (status + timestamp otimista)
+        setItems((prev) => prev.map((r) => r.id === id ? { ...r, status: cur.status, separatedAt: cur.separatedAt, deliveredAt: cur.deliveredAt } : r));
         window.showToast(`Erro ao atualizar status: ${error.message}`, { tone: "crit", ttl: 4500 });
         return;
       }
@@ -363,6 +391,9 @@ function Requests({ scope }) {
                 <th className="num">Itens</th>
                 <th className="num">Total</th>
                 <th>Idade</th>
+                <th>Criada</th>
+                <th>Separada</th>
+                <th>Entregue</th>
                 <th>Status</th>
                 <th />
               </tr>
@@ -386,6 +417,9 @@ function Requests({ scope }) {
                     <td className="num">{r.itemsCount}</td>
                     <td className="num">{r.total}</td>
                     <td className="dim mono" style={{ fontSize: 11 }}>{r.age}</td>
+                    <td className="dim mono" style={{ fontSize: 11 }} title={fmtReqStampTitle(r.requestedAt)}>{fmtReqStamp(r.requestedAt)}</td>
+                    <td className="dim mono" style={{ fontSize: 11 }} title={fmtReqStampTitle(r.separatedAt)}>{fmtReqStamp(r.separatedAt)}</td>
+                    <td className="dim mono" style={{ fontSize: 11 }} title={fmtReqStampTitle(r.deliveredAt)}>{fmtReqStamp(r.deliveredAt)}</td>
                     <td><span className="badge" data-tone={tone}>{lbl}</span></td>
                     <td onClick={(e) => e.stopPropagation()}>
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>

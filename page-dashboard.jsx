@@ -128,6 +128,7 @@ function Dashboard({ scope, setPage }) {
 
   // Drill-down dos KPIs de entrada/saída — abre modal com o histórico filtrado.
   const [flowDetail, setFlowDetail] = useState(null); // null | "in" | "out"
+  const [showStockValueModal, setShowStockValueModal] = useState(false);
 
   // Computa KPI real a partir de dados do DB ou MOCK
   const k = useMemo(() => computeKpi(scope, dbData, period), [scope, dbData, period]);
@@ -194,7 +195,9 @@ function Dashboard({ scope, setPage }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         <KpiCard label={`Faturamento · ${periodLabel}`} data={(k[scope] || k.all).revenue} accent />
         <KpiCard label="CMV consolidado" data={(k[scope] || k.all).cmv} />
-        <KpiCard label="Valor em estoque" data={(k[scope] || k.all).stockValue} />
+        <KpiCard label="Valor em estoque" data={(k[scope] || k.all).stockValue}
+          onClick={() => setShowStockValueModal(true)}
+          title="Ver os 25 insumos mais caros" />
         <KpiCard label="Compras do mês" data={{
           v: `R$ ${(comprasMes / 1000).toFixed(1)}k`,
           d: new Date().toLocaleDateString("pt-BR", { month: "long" }),
@@ -247,6 +250,13 @@ function Dashboard({ scope, setPage }) {
           periodLabel={periodLabel}
           movements={dbData.periodMovements || []}
           onClose={() => setFlowDetail(null)}
+        />
+      )}
+
+      {showStockValueModal && window.StockTopValueModal && (
+        <window.StockTopValueModal
+          items={dbData.stock || []}
+          onClose={() => setShowStockValueModal(false)}
         />
       )}
     </div>
@@ -475,10 +485,22 @@ function computeDashboardMetrics(scope, period, dbData = {}, dbOnline = false) {
   return { inv, alerts };
 }
 
-function KpiCard({ label, data, accent }) {
+function KpiCard({ label, data, accent, onClick, title }) {
   const d = data || { v: "—", d: "", tone: "info", sub: "" };
+  const baseStyle = accent
+    ? { borderColor: "var(--accent-line)", background: "linear-gradient(180deg, rgba(45,140,102,0.04), transparent 60%)" }
+    : null;
+  const clickStyle = onClick ? { cursor: "pointer", ...(baseStyle || {}) } : baseStyle;
   return (
-    <div className="kpi" style={accent ? { borderColor: "var(--accent-line)", background: "linear-gradient(180deg, rgba(45,140,102,0.04), transparent 60%)" } : null}>
+    <div
+      className="kpi"
+      style={clickStyle}
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+      title={onClick ? (title || "Ver detalhes") : undefined}
+    >
       <div className="label">{label}</div>
       <div className="value">{d.v}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
