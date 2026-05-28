@@ -54,12 +54,30 @@ function Dashboard({ scope, setPage }) {
     let reloadTimer = null;
 
     const load = async () => {
-      const days = period === "1d" ? 1 : period === "7d" ? 7 : period === "30d" ? 30 : 31;
-      const fromDate = new Date(); fromDate.setDate(fromDate.getDate() - days);
+      // Range do período começa em 00:00 do dia inicial — evita vazar movimentações
+      // de "ontem 23:xx" no filtro "Hoje" e dá semântica de dia civil em todas as opções.
+      const fromDate = new Date();
+      if (period === "1d") {
+        fromDate.setHours(0, 0, 0, 0);
+      } else if (period === "7d") {
+        fromDate.setDate(fromDate.getDate() - 6); // 7 dias incluindo hoje
+        fromDate.setHours(0, 0, 0, 0);
+      } else if (period === "30d") {
+        fromDate.setDate(fromDate.getDate() - 29); // 30 dias incluindo hoje
+        fromDate.setHours(0, 0, 0, 0);
+      } else { // mtd: dia 1 do mês corrente até agora
+        fromDate.setDate(1);
+        fromDate.setHours(0, 0, 0, 0);
+      }
       const fromISO = fromDate.toISOString();
-      const prevFromDate = new Date(); prevFromDate.setDate(prevFromDate.getDate() - days * 2);
-      const prevFromISO = prevFromDate.toISOString();
+      // Período anterior: mesmo tamanho, terminando no início do período atual
       const prevToISO = fromDate.toISOString();
+      const prevFromDate = new Date(fromDate);
+      if (period === "1d")      prevFromDate.setDate(prevFromDate.getDate() - 1);
+      else if (period === "7d") prevFromDate.setDate(prevFromDate.getDate() - 7);
+      else if (period === "30d") prevFromDate.setDate(prevFromDate.getDate() - 30);
+      else                       prevFromDate.setMonth(prevFromDate.getMonth() - 1);
+      const prevFromISO = prevFromDate.toISOString();
 
       const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
       const endOfDay   = new Date(); endOfDay.setHours(23, 59, 59, 999);
