@@ -278,7 +278,9 @@ function Stock({ scope }) {
     crit: items.filter((i) => i.status === "crit").length,
   };
 
-  const totalValue = items.reduce((s, i) => s + i.qty * i.cost, 0);
+  // Valor em estoque trata saldo negativo como zero — qty<0 vem de
+  // ajustes/baixas antes de uma entrada e não deve abater o patrimônio.
+  const totalValue = items.reduce((s, i) => s + Math.max(0, i.qty) * i.cost, 0);
 
   // Recalcula status (ok / warn / crit) com base em qty x reorder
   const recomputeStatus = (it) => {
@@ -660,7 +662,7 @@ function Stock({ scope }) {
                     <td><span className="badge" data-tone={tone}>{lbl}</span></td>
                     <td className="num" style={{ color: it.qty === 0 ? "var(--crit)" : null }}>{it.qty} {it.unit}</td>
                     <td className="num">R$ {it.cost.toFixed(2)}</td>
-                    <td className="num">R$ {(it.qty * it.cost).toFixed(2)}</td>
+                    <td className="num">R$ {(Math.max(0, it.qty) * it.cost).toFixed(2)}</td>
                     <td className="num" style={{ color: "var(--fg-2)" }}>
                       {it.reorder} <span style={{ color: "var(--fg-4)" }}>/</span> {it.max ?? "—"} {it.unit}
                     </td>
@@ -3573,7 +3575,8 @@ function StockTopValueModal({ items, onClose }) {
     const list = Array.isArray(items) ? items : [];
     return list
       .map((it) => {
-        const qty  = Number(it.qty)  || 0;
+        // Saldo negativo conta como 0 — não deve abater o valor do estoque.
+        const qty  = Math.max(0, Number(it.qty)  || 0);
         const cost = Number(it.cost) || 0;
         return { ...it, _value: qty * cost };
       })
@@ -3583,7 +3586,7 @@ function StockTopValueModal({ items, onClose }) {
   }, [items]);
 
   const totalTop = top.reduce((s, it) => s + it._value, 0);
-  const totalAll = (items || []).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.cost) || 0), 0);
+  const totalAll = (items || []).reduce((s, it) => s + Math.max(0, Number(it.qty) || 0) * (Number(it.cost) || 0), 0);
   const sharePct = totalAll > 0 ? (totalTop / totalAll) * 100 : 0;
 
   const fmtBRL = (n) => "R$ " + Number(n || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

@@ -364,8 +364,10 @@ function estimateCmvFromData(revenue, stock) {
   if (totalRevenue <= 0) return 0;
 
   // Estimativa de COGS: média ponderada de % do valor em estoque
-  // (simplificação: assume que 40% do estoque virou venda)
-  const stockValue = stock.reduce((s, it) => s + ((it.qty || 0) * (it.cost || 0)), 0);
+  // (simplificação: assume que 40% do estoque virou venda).
+  // Saldos negativos contam como 0 — vêm de baixa antes de entrada e não
+  // devem reduzir o patrimônio em estoque.
+  const stockValue = stock.reduce((s, it) => s + (Math.max(0, it.qty || 0) * (it.cost || 0)), 0);
   const estimatedCogs = stockValue * 0.40; // proxy: 40% do estoque = COGS
 
   return Math.min(99, (estimatedCogs / totalRevenue) * 100);
@@ -403,8 +405,9 @@ function computeKpi(scope, dbData = {}, period = "7d") {
     revenueDeltaTone = "info";
   }
 
-  // Valor em estoque (sem snapshot histórico — sem delta %)
-  const stockValue = stockFiltered.reduce((s, it) => s + ((it.qty || 0) * (it.cost || 0)), 0);
+  // Valor em estoque (sem snapshot histórico — sem delta %).
+  // Saldos negativos contam como 0 — não devem abater o patrimônio.
+  const stockValue = stockFiltered.reduce((s, it) => s + (Math.max(0, it.qty || 0) * (it.cost || 0)), 0);
   const stockSub   = stockValue > 0 ? `${stockFiltered.length} SKUs em estoque` : "sem itens";
 
   // CMV real + meta da operação
@@ -760,7 +763,8 @@ function StockByCategoryCard({ stock = [], onClick }) {
     const byCat = {};
     let totalValue = 0;
     for (const it of stock) {
-      const v = (Number(it.qty) || 0) * (Number(it.cost) || 0);
+      // Saldo negativo conta como 0 — não deve abater o valor da categoria.
+      const v = Math.max(0, Number(it.qty) || 0) * (Number(it.cost) || 0);
       const k = it.cat || "Sem categoria";
       byCat[k] = (byCat[k] || 0) + v;
       totalValue += v;
