@@ -344,9 +344,9 @@ function Requests({ scope }) {
               const todayStr = new Date().toDateString();
               const colItems = filtered.filter((r) => {
                 if (r.status !== col.id) return false;
-                // Coluna "Entregue" mostra apenas as do dia corrente
+                // Coluna "Entregue" mostra apenas as entregues no dia corrente
                 if (col.id === "delivered") {
-                  const t = r.requestedAt || r.deliveredAt;
+                  const t = r.deliveredAt || r.requestedAt;
                   if (!t) return false;
                   return new Date(t).toDateString() === todayStr;
                 }
