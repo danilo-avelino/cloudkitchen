@@ -27,6 +27,9 @@ function Dashboard({ scope, setPage }) {
   // DB data
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   const [pageLoading, setPageLoading] = useState(true);
+  // periodLoading: re-fetch disparado por troca de filtro de período. Mantém os KPIs
+  // afetados em skeleton em vez de exibir o valor do filtro anterior.
+  const [periodLoading, setPeriodLoading] = useState(false);
   const [dbData, setDbData] = useState({
     revenue: [],
     revenuePrev: [],        // mesmo length de período, deslocado para o anterior
@@ -52,6 +55,8 @@ function Dashboard({ scope, setPage }) {
 
     let cancelled = false;
     let reloadTimer = null;
+    // Skeleton nos KPIs dependentes do período (sem afetar carga inicial coberta por PageLoading)
+    setPeriodLoading(true);
 
     const load = async () => {
       // Range do período começa em 00:00 do dia inicial — evita vazar movimentações
@@ -120,6 +125,7 @@ function Dashboard({ scope, setPage }) {
         financeEntries:   finRes.data || [],
       });
       setPageLoading(false);
+      setPeriodLoading(false);
     };
 
     // Debounce — várias mudanças em sequência viram um único reload
@@ -211,8 +217,8 @@ function Dashboard({ scope, setPage }) {
 
       {/* KPIs financeiros (linha 1) */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
-        <KpiCard label={`Faturamento · ${periodLabel}`} data={(k[scope] || k.all).revenue} accent />
-        <KpiCard label="CMV consolidado" data={(k[scope] || k.all).cmv} />
+        <KpiCard label={`Faturamento · ${periodLabel}`} data={(k[scope] || k.all).revenue} accent loading={periodLoading} />
+        <KpiCard label="CMV consolidado" data={(k[scope] || k.all).cmv} loading={periodLoading} />
         <KpiCard label="Valor em estoque" data={(k[scope] || k.all).stockValue}
           onClick={() => setShowStockValueModal(true)}
           title="Ver os 25 insumos mais caros" />
@@ -226,8 +232,8 @@ function Dashboard({ scope, setPage }) {
 
       {/* Fluxos de estoque + KPIs operacionais — linha única compacta */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
-        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("in")} />
-        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("out")} />
+        <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("in")} loading={periodLoading} />
+        <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("out")} loading={periodLoading} />
         <ModuleKpi label="Precisão de estoque"
           value={moduleMetrics.inv.accuracy ? `${moduleMetrics.inv.accuracy.toFixed(0)}%` : "—"}
           sub={moduleMetrics.inv.lastDate ? `último em ${moduleMetrics.inv.lastDate}` : "sem inventários"}
@@ -506,7 +512,7 @@ function computeDashboardMetrics(scope, period, dbData = {}, dbOnline = false) {
   return { inv, alerts };
 }
 
-function KpiCard({ label, data, accent, onClick, title }) {
+function KpiCard({ label, data, accent, onClick, title, loading }) {
   const d = data || { v: "—", d: "", tone: "info", sub: "" };
   const baseStyle = accent
     ? { borderColor: "var(--accent-line)", background: "linear-gradient(180deg, rgba(45,140,102,0.04), transparent 60%)" }
@@ -516,22 +522,31 @@ function KpiCard({ label, data, accent, onClick, title }) {
     <div
       className="kpi"
       style={clickStyle}
-      onClick={onClick}
-      role={onClick ? "button" : undefined}
-      tabIndex={onClick ? 0 : undefined}
-      onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
-      title={onClick ? (title || "Ver detalhes") : undefined}
+      onClick={loading ? undefined : onClick}
+      role={onClick && !loading ? "button" : undefined}
+      tabIndex={onClick && !loading ? 0 : undefined}
+      onKeyDown={onClick && !loading ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+      title={onClick && !loading ? (title || "Ver detalhes") : undefined}
     >
       <div className="label">{label}</div>
-      <div className="value">{d.v}</div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span className="delta" data-tone={d.tone === "up" ? "up" : d.tone === "down" ? "down" : "warn"}>
-          {d.tone === "up" && <I.ArrowUp size={11} />}
-          {d.tone === "down" && <I.ArrowDown size={11} />}
-          {d.d}
-        </span>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>{d.sub}</span>
-      </div>
+      {loading ? (
+        <>
+          <div className="skel" style={{ height: 30, width: "55%", marginTop: 4, marginBottom: 8 }} />
+          <div className="skel" style={{ height: 12, width: "40%" }} />
+        </>
+      ) : (
+        <>
+          <div className="value">{d.v}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="delta" data-tone={d.tone === "up" ? "up" : d.tone === "down" ? "down" : "warn"}>
+              {d.tone === "up" && <I.ArrowUp size={11} />}
+              {d.tone === "down" && <I.ArrowDown size={11} />}
+              {d.d}
+            </span>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>{d.sub}</span>
+          </div>
+        </>
+      )}
       <Spark accent={accent} />
     </div>
   );
@@ -1064,19 +1079,23 @@ function ConsolidatedAlertsCard({ setPage, stock = [], dbOnline = false }) {
 
 
 // FlowKpi · card minimalista com rótulo e valor total em R$ (sem delta nem sparkline)
-function FlowKpi({ label, value, tone, sub, onClick }) {
+function FlowKpi({ label, value, tone, sub, onClick, loading }) {
   const color = tone === "in" ? "var(--ok)" : tone === "out" ? "var(--crit)" : "var(--fg-0)";
   const fmt = Number(value || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return (
     <div className="kpi"
-         onClick={onClick}
-         role={onClick ? "button" : undefined}
-         tabIndex={onClick ? 0 : undefined}
-         onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
-         style={onClick ? { cursor: "pointer" } : undefined}
-         title={onClick ? "Ver histórico do período" : undefined}>
+         onClick={loading ? undefined : onClick}
+         role={onClick && !loading ? "button" : undefined}
+         tabIndex={onClick && !loading ? 0 : undefined}
+         onKeyDown={onClick && !loading ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+         style={onClick && !loading ? { cursor: "pointer" } : undefined}
+         title={onClick && !loading ? "Ver histórico do período" : undefined}>
       <div className="label">{label}</div>
-      <div className="value" style={{ color }}>R$ {fmt}</div>
+      {loading ? (
+        <div className="skel" style={{ height: 30, width: "60%", marginTop: 4 }} />
+      ) : (
+        <div className="value" style={{ color }}>R$ {fmt}</div>
+      )}
       {sub && <div className="sub" style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6 }}>{sub}</div>}
     </div>
   );
