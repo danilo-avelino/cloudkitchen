@@ -1,132 +1,117 @@
-# CLAUDE.md — StockKitchen
+# CLAUDE.md
 
-Diretrizes para qualquer mudança neste repo. Foco em **segurança Supabase multi-tenant** (lições da auditoria de 2026-05-27 que reduziu 130 advisor lints → 3 WARNs).
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
----
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-## Checklist obrigatório por tipo de objeto
+## 1. Think Before Coding
 
-### 🆕 Nova tabela em `public`
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
 
-- [ ] `ENABLE ROW LEVEL SECURITY` na criação (não deixe pra depois)
-- [ ] Pelo menos uma policy por operação: `SELECT`, `INSERT`, `UPDATE`, `DELETE`
-- [ ] **Toda tabela operacional precisa ter `tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE`**
-- [ ] Policies filtram por `tenant_id IN (SELECT tenant_id FROM tenant_members WHERE user_id = auth.uid())` ou helper equivalente
-- [ ] Se há FK cross-tabela (ex: `supplier_id` → `suppliers.id`), criar trigger `tg_check_*_tenant` em `app` para impedir mistura de tenants
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+## 5. Supabase (StockKitchen)
+
+**Regras obrigatórias para qualquer migration/edge function. Validar antes de `apply_migration`.**
+
+### 5.1 Segurança (views, funções, RPCs)
+
+- **Views em `public`** → sempre `WITH (security_invoker = true)`. Sem isso o PostgREST executa com privilégios do owner (postgres) e bypassa a RLS das tabelas-base. Views que tocam `auth.users`/`auth.identities` → também `REVOKE SELECT FROM anon`.
+- **Funções / triggers** → sempre `SET search_path = 'app','public','pg_temp'` (nessa ordem; `pg_temp` no fim como defesa). Sem isso, atacante com CREATE em qualquer schema do search_path pode interpor objetos maliciosos.
+- **RPCs `SECURITY DEFINER` expostos via PostgREST** → obrigatório, em ordem:
+  1. `auth.uid() IS NULL` check no início.
+  2. Validar `tenant_members.role` para qualquer parâmetro `p_tenant uuid` (bypass apenas via `auth.role() = 'service_role'`).
+  3. Se não for signup público → `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` e expor via edge function com service_role.
+
+O linter do Supabase **não lê o corpo das funções** — validações internas não silenciam o advisor, mas são a única defesa contra tenant escape. Rodar `mcp__supabase__get_advisors` após qualquer mudança estrutural e confirmar que o advisor não regrediu.
+
+### 5.2 GRANTs no schema `app`
+
+Toda função/utilitário criado em `app.*` (ou qualquer schema fora de `public`) precisa de:
 
 ```sql
-ALTER TABLE public.minha_tabela ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "tenant_isolation_select" ON public.minha_tabela
-  FOR SELECT TO authenticated
-  USING (tenant_id IN (SELECT tenant_id FROM public.tenant_members WHERE user_id = auth.uid()));
--- + INSERT / UPDATE / DELETE análogas (UPDATE/DELETE com WITH CHECK também)
+grant usage on schema app to authenticated, anon, service_role;
+grant execute on all functions in schema app to authenticated, anon, service_role;
+alter default privileges in schema app
+  grant execute on functions to authenticated, anon, service_role;
 ```
 
-### 🆕 Nova VIEW em `public`
+RLS policies chamam `app.has_tenant_role(...)`/`app.is_tenant_member(...)`. Mesmo sendo `SECURITY DEFINER`, a resolução do nome `app.foo()` exige USAGE no schema pelo role que está chamando. Sem isso, **todo** INSERT/UPDATE/SELECT em tabela com RLS falha com `permission denied for schema app`. Se um tenant reportar esse erro, rodar a migration `grant_usage_on_app_schema` (idempotente) antes de investigar qualquer outra coisa.
 
-- [ ] **Sempre** `WITH (security_invoker = true)`. Sem isso a view roda com privilégios do owner (postgres) e **bypassa RLS** das tabelas-base.
-- [ ] Se a view toca `auth.users`, `auth.identities` ou qualquer coluna sensível: `REVOKE SELECT FROM anon` explicitamente.
-- [ ] Não usar `SECURITY DEFINER` em views (advisor flagga).
+### 5.3 GRANTs no schema `public` para `service_role`
+
+Toda edge function que usa `SERVICE_ROLE_KEY` precisa que `service_role` tenha:
 
 ```sql
-CREATE VIEW public.v_minha_view
-  WITH (security_invoker = true) AS
-  SELECT ...;
-
-REVOKE SELECT ON public.v_minha_view FROM anon;  -- se houver dado sensível
+GRANT USAGE ON SCHEMA public TO service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO service_role;
 ```
 
-### 🆕 Nova função / trigger
+Sem USAGE em `public`, edge functions caem em 500 com `permission denied for schema public` — inclusive no lookup inicial de `tenant_members` para validar role. Diagnosticar via `has_schema_privilege('service_role', 'public', 'USAGE')`. Toda migration que mexe com edge function deve incluir esses GRANTs por garantia.
 
-- [ ] **Sempre** `SET search_path = 'app', 'public', 'pg_temp'` (nessa ordem; `pg_temp` no fim como defesa contra temp-schema hijack)
-- [ ] Default = `SECURITY INVOKER`. Só use `SECURITY DEFINER` se houver razão concreta.
-- [ ] Triggers de integridade tenant (verificar FK cross-tabela) vão em schema `app`, não `public`.
+## 6. Deploy e Commit
 
-```sql
-CREATE OR REPLACE FUNCTION app.tg_check_xxx_tenant()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY INVOKER                                -- ← default explícito
-SET search_path = 'app', 'public', 'pg_temp'    -- ← obrigatório
-AS $$ ... $$;
-```
+**Nunca fazer deploy nem commit sem pedido explícito do usuário.**
 
-### 🆕 Nova RPC `SECURITY DEFINER` exposta via PostgREST
-
-Toda RPC `SECURITY DEFINER` chamável por `authenticated` é potencial **tenant escape** — o linter NÃO lê o corpo, só você protege:
-
-1. [ ] `SET search_path = 'app', 'public', 'pg_temp'` (obrigatório)
-2. [ ] Primeira linha do corpo: validar `auth.uid() IS NOT NULL`
-3. [ ] Para qualquer parâmetro `p_tenant uuid`, validar que `auth.uid()` é membro com role apropriado:
-   ```sql
-   IF auth.role() <> 'service_role' THEN
-     IF NOT EXISTS (
-       SELECT 1 FROM public.tenant_members
-        WHERE tenant_id = p_tenant
-          AND user_id   = auth.uid()
-          AND role IN ('owner','admin')  -- ajustar conforme escopo
-     ) THEN
-       RAISE EXCEPTION 'forbidden' USING ERRCODE = '42501';
-     END IF;
-   END IF;
-   ```
-4. [ ] Se a RPC não deveria ser chamável do frontend: `REVOKE EXECUTE FROM PUBLIC, anon, authenticated` e implemente via edge function com `SERVICE_ROLE_KEY`.
-
-### 🆕 Nova extensão
-
-- [ ] **Nunca** criar em `public`. Use `CREATE EXTENSION foo WITH SCHEMA extensions`.
-- [ ] Se for extensão que precisa de search_path implícito (`citext`, `pg_trgm`), confirme que `extensions` está no `search_path` dos roles `anon`/`authenticated`/`service_role`.
-
-### 🆕 Nova edge function
-
-- [ ] Use `SUPABASE_SERVICE_ROLE_KEY` apenas no servidor (nunca commit, nunca no JS do browser).
-- [ ] **Toda função que recebe `tenant_id` do cliente** valida que o `auth.uid()` (extraído do JWT) pertence ao tenant antes de operar — não confie em parâmetros.
-- [ ] Schemas `app` e `public` ambos precisam de `USAGE` + `ALL`/`EXECUTE` para o service_role (ver memórias [feedback_supabase_app_schema_grants](memory/feedback_supabase_app_schema_grants.md) e [feedback_supabase_service_role_public_grants](memory/feedback_supabase_service_role_public_grants.md)).
+- Não rodar `git commit`, `git push`, `apply_migration` em produção, `deploy_edge_function` ou qualquer ação equivalente por iniciativa própria — mesmo que pareça o "próximo passo natural" depois de uma mudança.
+- Terminar a tarefa, mostrar o que mudou e esperar o usuário pedir o commit/deploy.
+- Vale também para criar PR, push de branch, merge, e qualquer ação visível fora do working tree local.
 
 ---
 
-## Anti-padrões que JÁ apareceram aqui
-
-- ❌ View `tenant_member_profiles` sem `security_invoker=true` expondo `auth.users.email` pra `anon` → corrigido 2026-05-27
-- ❌ `recompute_all_costs(p_tenant uuid)` SECURITY DEFINER aceitando UUID arbitrário sem validar membership → tenant escape, corrigido 2026-05-27
-- ❌ 31 triggers/funções sem `SET search_path` → vetor de privilege escalation, corrigido 2026-05-27
-- ❌ Extensões em `public` (`pg_net`, `pg_trgm`, `citext`) → `pg_trgm`/`citext` movidos; `pg_net` é dívida (não suporta SET SCHEMA)
-- ❌ Tabelas legadas (sistema Prisma anterior em PascalCase) sem RLS coexistindo no banco do StockKitchen → 79 renomeadas pra `_legacy_*` em 2026-05-27
-
----
-
-## Após qualquer DDL: rodar advisor
-
-Antes de considerar a migration concluída:
-
-```
-mcp__supabase__get_advisors → type: "security"
-```
-
-Se aparecer **qualquer ERROR novo** ou **WARN diferente dos 3 conhecidos** (`pg_net in public`, `recompute_all_costs DEFINER`, `auth_leaked_password_protection`), **não feche a task — trate antes**.
-
----
-
-## Estado atual dos schemas
-
-- `public` — tabelas operacionais com RLS, views `v_*` com `security_invoker=true`, RPCs (`create_tenant_with_owner`, `recompute_all_costs`, `seed_default_dre`, `snapshot_stock_value`, `run_stock_value_snapshots`, `compute_auto_min_max`)
-- `app` — triggers de integridade tenant (`tg_check_*`) e triggers de side-effect (`tg_*_apply_*` em estoque/CMV)
-- `extensions` — `pg_trgm`, `citext`, `uuid-ossp`, `pgcrypto`, `pg_stat_statements`
-- `_legacy_*` (em public) — 79 tabelas do sistema Prisma antigo, sem grants pra anon/authenticated; podem ser dropadas quando confirmado que ninguém mais usa
-- `net` — tabelas internas do `pg_net` (a extensão em si ainda está em `public` por limitação)
-
----
-
-## Frontend (não-segurança, mas crítico)
-
-- Stack: **React + JSX + Vite** (não Flutter). Ver [project_vite_runtime](memory/project_vite_runtime.md).
-- Componentes JSX cross-arquivo precisam expor via `window.X` — ver [feedback_cross_file_jsx_components](memory/feedback_cross_file_jsx_components.md).
-- Babel standalone: nunca use `...rest` em spread de props — ver [feedback_babel_standalone_excluded_collision](memory/feedback_babel_standalone_excluded_collision.md).
-- Inputs BRL: `Number("8,50")` retorna `NaN`. Use `_parseBR` / `_parseNum` — ver [feedback_brl_number_parse](memory/feedback_brl_number_parse.md).
-
----
-
-## Ordem de truncamento ao adicionar memórias
-
-Memórias detalhadas vivem em [memory/](C:\Users\danil\.claude\projects\d--Estoque-MobyDick\memory\). Este arquivo é a versão "sempre carregada" — mantenha enxuto. Detalhes técnicos longos → memória dedicada + link.
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

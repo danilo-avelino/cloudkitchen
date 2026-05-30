@@ -372,19 +372,49 @@ function Dre() {
   };
 
   // CRUD da estrutura DRE
-  const createCategory = (data) => {
+  // Caminho DB (online) persiste em dre_categories/dre_subcategories e refaz
+  // a lista a partir do Supabase pra manter o front em sync com o mapping
+  // (group→kind/groupSlug/order) feito em dbListDre*. Caminho mock mantém o
+  // comportamento antigo só em memória.
+  const dbOn = dbStatus.isOnline && !!tenantId;
+  const refreshCategories = async () => {
+    if (!tenantId) return;
+    const { data } = await dbListDreCategories(tenantId);
+    if (data) setCategories(data);
+  };
+  const refreshSubcategories = async () => {
+    if (!tenantId) return;
+    const { data } = await dbListDreSubcategories(tenantId);
+    if (data) setSubcategories(data);
+  };
+
+  const createCategory = async (data) => {
+    if (dbOn && typeof dbInsertDreCategory === "function") {
+      const order = categories.length > 0 ? Math.max(...categories.map((c) => c.order || 0)) + 1 : 1;
+      const { error } = await dbInsertDreCategory(tenantId, { name: data.name, kind: data.kind, sort_order: order });
+      if (error) { window.showToast(`Erro ao criar categoria: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      await refreshCategories();
+      window.showToast(`Categoria "${data.name}" criada`, { tone: "ok" });
+      return;
+    }
     const slug = String(data.name || "")
       .toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
       .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     const id = `usr-${slug}-${Date.now().toString(36).slice(-4)}`;
     const order = categories.length > 0 ? Math.max(...categories.map((c) => c.order)) + 1 : 1;
     setCategories([...categories, { id, name: data.name.trim(), kind: data.kind, order, locked: false }]);
-    window.showToast(`Categoria "${data.name}" criada`, { tone: "ok" });
+    window.showToast(`Categoria "${data.name}" criada (offline)`, { tone: "warn" });
   };
-  const renameCategory = (id, newName) => {
+  const renameCategory = async (id, newName) => {
+    if (dbOn && typeof dbUpdateDreCategory === "function") {
+      const { error } = await dbUpdateDreCategory(id, { name: newName });
+      if (error) { window.showToast(`Erro ao renomear: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      await refreshCategories();
+      return;
+    }
     setCategories(categories.map((c) => c.id === id ? { ...c, name: newName.trim() } : c));
   };
-  const deleteCategory = (id) => {
+  const deleteCategory = async (id) => {
     const cat = categories.find((c) => c.id === id);
     if (!cat || cat.locked) return;
     const subsCount = subcategories.filter((s) => s.category === id).length;
@@ -392,35 +422,80 @@ function Dre() {
       window.showToast(`Mova as ${subsCount} subcategoria(s) antes de excluir`, { tone: "warn", ttl: 4500 });
       return;
     }
+    if (dbOn && typeof dbDeleteDreCategory === "function") {
+      const { error } = await dbDeleteDreCategory(id);
+      if (error) { window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      await refreshCategories();
+      window.showToast(`Categoria "${cat.name}" excluída`, { tone: "warn" });
+      return;
+    }
     setCategories(categories.filter((c) => c.id !== id));
-    window.showToast(`Categoria "${cat.name}" excluída`, { tone: "warn" });
+    window.showToast(`Categoria "${cat.name}" excluída (offline)`, { tone: "warn" });
   };
-  const moveCategory = (id, dir) => {
-    const idx = categories.findIndex((c) => c.id === id);
+  const moveCategory = async (id, dir) => {
+    const sorted = [...categories].sort((a, b) => (a.order ?? 99) - (b.order ?? 99));
+    const idx = sorted.findIndex((c) => c.id === id);
     if (idx < 0) return;
     const target = dir === "up" ? idx - 1 : idx + 1;
-    if (target < 0 || target >= categories.length) return;
+    if (target < 0 || target >= sorted.length) return;
+    const a = sorted[idx], b = sorted[target];
+    if (dbOn && typeof dbUpdateDreCategory === "function") {
+      const [resA, resB] = await Promise.all([
+        dbUpdateDreCategory(a.id, { sort_order: b.order ?? 99 }),
+        dbUpdateDreCategory(b.id, { sort_order: a.order ?? 99 }),
+      ]);
+      if (resA.error || resB.error) {
+        window.showToast(`Erro ao reordenar: ${(resA.error || resB.error).message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+      await refreshCategories();
+      return;
+    }
     const next = [...categories];
-    [next[idx], next[target]] = [next[target], next[idx]];
-    next.forEach((c, i) => c.order = i + 1);
+    const ai = next.findIndex((c) => c.id === a.id);
+    const bi = next.findIndex((c) => c.id === b.id);
+    [next[ai].order, next[bi].order] = [next[bi].order, next[ai].order];
     setCategories(next);
   };
-  const createSubcategory = (data) => {
+  const createSubcategory = async (data) => {
+    const color = data.color || DRE_SUB_COLORS[(subcategories.length) % DRE_SUB_COLORS.length];
+    if (dbOn && typeof dbInsertDreSubcategory === "function") {
+      const siblings = subcategories.filter((s) => s.category === data.category);
+      const order = siblings.length > 0 ? Math.max(...siblings.map((s) => s.order || 0)) + 1 : 1;
+      const { error } = await dbInsertDreSubcategory(tenantId, {
+        categoryId: data.category, name: data.name, color, sort_order: order,
+      });
+      if (error) { window.showToast(`Erro ao criar subcategoria: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      await refreshSubcategories();
+      window.showToast(`Subcategoria "${data.name}" criada`, { tone: "ok" });
+      return;
+    }
     const slug = String(data.name || "")
       .toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
       .replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     const id = `usr-sub-${slug}-${Date.now().toString(36).slice(-4)}`;
-    const color = data.color || DRE_SUB_COLORS[(subcategories.length) % DRE_SUB_COLORS.length];
     setSubcategories([...subcategories, { id, name: data.name.trim(), category: data.category, color, locked: false }]);
-    window.showToast(`Subcategoria "${data.name}" criada`, { tone: "ok" });
+    window.showToast(`Subcategoria "${data.name}" criada (offline)`, { tone: "warn" });
   };
-  const renameSubcategory = (id, newName) => {
+  const renameSubcategory = async (id, newName) => {
+    if (dbOn && typeof dbUpdateDreSubcategory === "function") {
+      const { error } = await dbUpdateDreSubcategory(id, { name: newName });
+      if (error) { window.showToast(`Erro ao renomear: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      await refreshSubcategories();
+      return;
+    }
     setSubcategories(subcategories.map((s) => s.id === id ? { ...s, name: newName.trim() } : s));
   };
-  const recolorSubcategory = (id, color) => {
+  const recolorSubcategory = async (id, color) => {
+    if (dbOn && typeof dbUpdateDreSubcategory === "function") {
+      const { error } = await dbUpdateDreSubcategory(id, { color });
+      if (error) { window.showToast(`Erro ao trocar cor: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      await refreshSubcategories();
+      return;
+    }
     setSubcategories(subcategories.map((s) => s.id === id ? { ...s, color } : s));
   };
-  const deleteSubcategory = (id) => {
+  const deleteSubcategory = async (id) => {
     const sub = subcategories.find((s) => s.id === id);
     if (!sub || sub.locked) return;
     const usage = entries.filter((e) => e.cat === id).length;
@@ -428,8 +503,15 @@ function Dre() {
       window.showToast(`Há ${usage} lançamento(s) nessa subcategoria · migre antes`, { tone: "warn", ttl: 4500 });
       return;
     }
+    if (dbOn && typeof dbDeleteDreSubcategory === "function") {
+      const { error } = await dbDeleteDreSubcategory(id);
+      if (error) { window.showToast(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      await refreshSubcategories();
+      window.showToast(`Subcategoria "${sub.name}" excluída`, { tone: "warn" });
+      return;
+    }
     setSubcategories(subcategories.filter((s) => s.id !== id));
-    window.showToast(`Subcategoria "${sub.name}" excluída`, { tone: "warn" });
+    window.showToast(`Subcategoria "${sub.name}" excluída (offline)`, { tone: "warn" });
   };
 
   if (pageLoading) return <PageLoading label="Carregando DRE…" variant="table" />;

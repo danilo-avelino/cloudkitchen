@@ -112,6 +112,7 @@ function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, set
           {page === "cmv"       && <CMV setPage={setPage} />}
           {page === "finance"   && <Finance />}
           {page === "dre"       && <Dre />}
+          {page === "analise-mercado" && <AnaliseMercado />}
           {page === "settings"  && <Settings />}
         </div>
 
