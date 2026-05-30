@@ -1019,6 +1019,8 @@ function ConsolidatedAlertsCard({ setPage, stock = [], dbOnline = false }) {
   const alerts = useMemo(() => {
     const source = dbOnline ? stock : (MOCK.STOCK_ITEMS || []);
     return source
+      // Respeita flag de categoria · esconde itens cuja categoria tem alertas desligados
+      .filter((i) => i.catAlertsEnabled !== false)
       .filter((i) => (i.qty || 0) < (i.reorder || 0))
       .sort((a, b) => {
         // rupturas (qty=0) primeiro, depois mais críticos por % do reorder

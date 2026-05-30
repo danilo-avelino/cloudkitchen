@@ -185,10 +185,22 @@ function Stock({ scope }) {
     return v;
   };
 
-  const renameCategory = (oldName, newName) => {
+  const renameCategory = async (oldName, newName) => {
     const target = String(newName || "").trim();
     if (!target || target === oldName) return;
     const wasMerge = allCats.includes(target);
+    // Persiste no DB se a categoria existir lá (sem ID, é mock-only).
+    if (source === "db" && typeof dbRenameStockCategory === "function") {
+      const dbCat = dbCategories.find((c) => c.name === oldName);
+      if (dbCat?.id) {
+        const { data, error } = await dbRenameStockCategory(dbCat.id, target);
+        if (error) {
+          window.showToast(`Erro ao renomear: ${error.message}`, { tone: "crit", ttl: 4500 });
+          return;
+        }
+        setDbCategories((prev) => prev.map((c) => c.id === dbCat.id ? data : c));
+      }
+    }
     setCategories((prev) => {
       const without = prev.filter((c) => c !== oldName);
       return without.includes(target) ? without : [...without, target].sort();
@@ -200,6 +212,56 @@ function Stock({ scope }) {
         : `Categoria renomeada para "${target}"`,
       { tone: "ok" },
     );
+  };
+
+  // Atualiza flags (alerts_enabled / auto_shopping_enabled) de uma categoria existente.
+  // auto_min_max_enabled é tratado à parte via RPC (cascateia em todos os itens).
+  const updateCategoryFlags = async (catName, patch) => {
+    if (source !== "db" || typeof dbUpdateStockCategory !== "function") {
+      window.showToast("Conecte ao Supabase pra ajustar flags da categoria", { tone: "warn" });
+      return false;
+    }
+    const dbCat = dbCategories.find((c) => c.name === catName);
+    if (!dbCat?.id) {
+      window.showToast(`Categoria "${catName}" precisa ser salva primeiro`, { tone: "warn" });
+      return false;
+    }
+    const { data, error } = await dbUpdateStockCategory(dbCat.id, patch);
+    if (error) {
+      window.showToast(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
+      return false;
+    }
+    setDbCategories((prev) => prev.map((c) => c.id === dbCat.id ? data : c));
+    // Sincroniza items pra UI refletir alertas/shopping na hora
+    setItems((prev) => prev.map((it) => it.catId === dbCat.id ? {
+      ...it,
+      catAlertsEnabled:       data.alerts_enabled !== false,
+      catAutoShoppingEnabled: data.auto_shopping_enabled !== false,
+    } : it));
+    return true;
+  };
+
+  // Liga/desliga auto min/max em massa via RPC (cascateia em todos os itens).
+  const setCategoryAutoMinMax = async (catName, enabled) => {
+    if (source !== "db" || typeof dbSetCategoryAutoMinMax !== "function") {
+      window.showToast("Conecte ao Supabase pra alterar auto min/max", { tone: "warn" });
+      return false;
+    }
+    const dbCat = dbCategories.find((c) => c.name === catName);
+    if (!dbCat?.id) {
+      window.showToast(`Categoria "${catName}" precisa ser salva primeiro`, { tone: "warn" });
+      return false;
+    }
+    const { error } = await dbSetCategoryAutoMinMax(dbCat.id, enabled);
+    if (error) {
+      window.showToast(`Erro ao aplicar auto min/max: ${error.message}`, { tone: "crit", ttl: 4500 });
+      return false;
+    }
+    setDbCategories((prev) => prev.map((c) => c.id === dbCat.id ? { ...c, auto_min_max_enabled: !!enabled } : c));
+    // Refetch dos items pra refletir o cascade (min/max recalculados pelo trigger)
+    const { data: refreshed } = await dbListStockItems(tenantId);
+    if (refreshed) setItems(refreshed);
+    return true;
   };
 
   const deleteCategory = (name) => {
@@ -490,6 +552,8 @@ function Stock({ scope }) {
   const stockAlerts = useMemo(() => {
     let ruptura = 0, baixo = 0, acimaMax = 0;
     for (const i of items) {
+      // Categoria pode desligar alertas pra esses itens (ex.: descartáveis sem giro)
+      if (i.catAlertsEnabled === false) continue;
       const qty = Number(i.qty) || 0;
       const reorder = Number(i.reorder) || 0;
       const max = Number(i.max) || 0;
@@ -540,9 +604,13 @@ function Stock({ scope }) {
         <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "20px 28px 32px" }}>
           <CategoriesView
             categories={allCats}
+            dbCategories={dbCategories}
             items={items}
+            isDb={source === "db"}
             onCreate={createCategory}
             onRename={renameCategory}
+            onUpdateFlags={updateCategoryFlags}
+            onSetAutoMinMax={setCategoryAutoMinMax}
             onDelete={deleteCategory}
           />
         </div>
@@ -2032,15 +2100,24 @@ function StockSubTab({ active, onClick, tone, children }) {
 }
 
 // ============= Categorias (sub-aba do Estoque) =============
-function CategoriesView({ categories, items, onCreate, onRename, onDelete }) {
+function CategoriesView({
+  categories, dbCategories = [], items, isDb,
+  onCreate, onRename, onUpdateFlags, onSetAutoMinMax, onDelete,
+}) {
   const [newName, setNewName] = useState("");
-  const [editing, setEditing] = useState(null); // { oldName, value }
+  const [editing, setEditing] = useState(null); // { name } — abre modal
 
   const counts = useMemo(() => {
     const m = {};
     items.forEach((it) => { m[it.cat] = (m[it.cat] || 0) + 1; });
     return m;
   }, [items]);
+
+  const dbCatByName = useMemo(() => {
+    const m = new Map();
+    (dbCategories || []).forEach((c) => m.set(c.name, c));
+    return m;
+  }, [dbCategories]);
 
   const submitNew = () => {
     const v = newName.trim();
@@ -2053,13 +2130,7 @@ function CategoriesView({ categories, items, onCreate, onRename, onDelete }) {
     setNewName("");
   };
 
-  const saveEdit = () => {
-    if (!editing) return;
-    const target = editing.value.trim();
-    if (!target || target === editing.oldName) { setEditing(null); return; }
-    onRename(editing.oldName, target);
-    setEditing(null);
-  };
+  const editingDbCat = editing ? dbCatByName.get(editing.name) : null;
 
   return (
     <div className="card">
@@ -2079,57 +2150,51 @@ function CategoriesView({ categories, items, onCreate, onRename, onDelete }) {
       </div>
       <table className="table">
         <thead>
-          <tr><th>Categoria</th><th className="num">Itens</th><th /></tr>
+          <tr>
+            <th>Categoria</th>
+            <th className="num">Itens</th>
+            <th style={{ textAlign: "center" }}>Alertas</th>
+            <th style={{ textAlign: "center" }}>Min/Máx auto</th>
+            <th style={{ textAlign: "center" }}>Lista compras</th>
+            <th />
+          </tr>
         </thead>
         <tbody>
           {categories.length === 0 ? (
-            <tr><td colSpan={3} className="dim" style={{ textAlign: "center", padding: 24 }}>
+            <tr><td colSpan={6} className="dim" style={{ textAlign: "center", padding: 24 }}>
               Nenhuma categoria cadastrada
             </td></tr>
           ) : categories.map((c) => {
-            const isEd = editing?.oldName === c;
             const count = counts[c] || 0;
             const canDelete = count === 0;
+            const dbCat = dbCatByName.get(c);
+            const flag = (key, def) => dbCat ? (dbCat[key] !== false && (def || dbCat[key] === true)) : def;
+            const alertsOn = dbCat ? dbCat.alerts_enabled !== false : true;
+            const autoMmOn = dbCat ? dbCat.auto_min_max_enabled === true : false;
+            const autoSpOn = dbCat ? dbCat.auto_shopping_enabled !== false : true;
             return (
               <tr key={c}>
-                <td className="row-strong">
-                  {isEd ? (
-                    <input className="input" autoFocus value={editing.value}
-                           onChange={(e) => setEditing({ ...editing, value: e.target.value })}
-                           onKeyDown={(e) => {
-                             if (e.key === "Enter")  saveEdit();
-                             if (e.key === "Escape") setEditing(null);
-                           }}
-                           style={{ maxWidth: 280 }} />
-                  ) : c}
-                </td>
+                <td className="row-strong">{c}</td>
                 <td className="num">{count}</td>
+                <td style={{ textAlign: "center" }}><CategoryFlagBadge on={alertsOn} /></td>
+                <td style={{ textAlign: "center" }}><CategoryFlagBadge on={autoMmOn} /></td>
+                <td style={{ textAlign: "center" }}><CategoryFlagBadge on={autoSpOn} /></td>
                 <td style={{ width: 1, whiteSpace: "nowrap" }}>
                   <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                    {isEd ? (
-                      <>
-                        <button className="btn" data-size="sm" onClick={() => setEditing(null)}>Cancelar</button>
-                        <button className="btn" data-variant="primary" data-size="sm" onClick={saveEdit}
-                                disabled={!editing.value.trim()}>Salvar</button>
-                      </>
-                    ) : (
-                      <>
-                        <button className="btn" data-variant="ghost" data-size="sm"
-                                onClick={() => setEditing({ oldName: c, value: c })}
-                                title="Renomear (digite um nome existente para mesclar)">
-                          <I.Edit size={11} />Renomear
-                        </button>
-                        <button className="btn" data-variant="ghost" data-size="sm"
-                                onClick={() => onDelete(c)}
-                                disabled={!canDelete}
-                                title={canDelete
-                                  ? "Excluir categoria"
-                                  : `Migre os ${count} insumo${count === 1 ? "" : "s"} antes de excluir`}
-                                style={{ color: canDelete ? "var(--crit)" : "var(--fg-3)" }}>
-                          <I.Trash size={11} />
-                        </button>
-                      </>
-                    )}
+                    <button className="btn" data-variant="ghost" data-size="sm"
+                            onClick={() => setEditing({ name: c })}
+                            title="Editar categoria · nome, alertas, min/máx auto, lista de compras">
+                      <I.Edit size={11} />Editar categoria
+                    </button>
+                    <button className="btn" data-variant="ghost" data-size="sm"
+                            onClick={() => onDelete(c)}
+                            disabled={!canDelete}
+                            title={canDelete
+                              ? "Excluir categoria"
+                              : `Migre os ${count} insumo${count === 1 ? "" : "s"} antes de excluir`}
+                            style={{ color: canDelete ? "var(--crit)" : "var(--fg-3)" }}>
+                      <I.Trash size={11} />
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -2137,7 +2202,220 @@ function CategoriesView({ categories, items, onCreate, onRename, onDelete }) {
           })}
         </tbody>
       </table>
+
+      {editing && (
+        <EditCategoryModal
+          name={editing.name}
+          dbCat={editingDbCat}
+          itemCount={counts[editing.name] || 0}
+          isDb={isDb}
+          allCats={categories}
+          onClose={() => setEditing(null)}
+          onRename={onRename}
+          onUpdateFlags={onUpdateFlags}
+          onSetAutoMinMax={onSetAutoMinMax}
+        />
+      )}
     </div>
+  );
+}
+
+// Badge minimalista "Ligado / Desligado" pra coluna da tabela
+function CategoryFlagBadge({ on }) {
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5,
+      padding: "2px 8px", borderRadius: 99,
+      background: on ? "var(--ok-soft)" : "var(--bg-2)",
+      border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
+      color: on ? "var(--ok)" : "var(--fg-3)",
+      fontFamily: "var(--mono)", fontSize: 9.5,
+      letterSpacing: "0.06em", textTransform: "uppercase",
+    }}>
+      <span style={{
+        width: 5, height: 5, borderRadius: 50,
+        background: on ? "var(--ok)" : "var(--fg-3)",
+      }} />
+      {on ? "Ligado" : "Desligado"}
+    </span>
+  );
+}
+
+// Modal de edição completa da categoria · nome + 3 toggles de comportamento.
+// Toggles só ficam disponíveis quando a categoria já existe no DB (precisa de ID
+// pra persistir). Em modo MOCK ficam desabilitados com tooltip explicando.
+function EditCategoryModal({
+  name, dbCat, itemCount, isDb, allCats,
+  onClose, onRename, onUpdateFlags, onSetAutoMinMax,
+}) {
+  const [draftName,  setDraftName]  = useState(name);
+  const [alerts,     setAlerts]     = useState(dbCat?.alerts_enabled        !== false);
+  const [autoMinMax, setAutoMinMax] = useState(dbCat?.auto_min_max_enabled  === true);
+  const [autoShop,   setAutoShop]   = useState(dbCat?.auto_shopping_enabled !== false);
+  const [saving,     setSaving]     = useState(false);
+
+  const flagsAvailable = isDb && !!dbCat?.id;
+  const nameTrim = draftName.trim();
+  const nameChanged = nameTrim !== name && nameTrim.length > 0;
+  const willMerge   = nameChanged && allCats.includes(nameTrim);
+
+  const initialAlerts     = dbCat?.alerts_enabled        !== false;
+  const initialAutoMm     = dbCat?.auto_min_max_enabled  === true;
+  const initialAutoShop   = dbCat?.auto_shopping_enabled !== false;
+  const flagsChanged = flagsAvailable && (
+    alerts !== initialAlerts ||
+    autoMinMax !== initialAutoMm ||
+    autoShop !== initialAutoShop
+  );
+  const canSave = !saving && (nameChanged || flagsChanged);
+
+  const submit = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    try {
+      // 1. Rename · só se mudou nome (faz isso primeiro porque os updates posteriores
+      //    usam o nome novo)
+      if (nameChanged) {
+        await onRename(name, nameTrim);
+      }
+      const targetName = nameChanged ? nameTrim : name;
+
+      // 2. Flags simples · alerts + auto_shopping vão num único UPDATE
+      if (flagsAvailable && (alerts !== initialAlerts || autoShop !== initialAutoShop)) {
+        const ok = await onUpdateFlags(targetName, {
+          alerts_enabled: alerts,
+          auto_shopping_enabled: autoShop,
+        });
+        if (!ok) return;
+      }
+      // 3. Auto min/max · RPC à parte (cascateia em todos os items)
+      if (flagsAvailable && autoMinMax !== initialAutoMm) {
+        const ok = await onSetAutoMinMax(targetName, autoMinMax);
+        if (!ok) return;
+      }
+      window.showToast(`Categoria "${targetName}" atualizada`, { tone: "ok" });
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Editar categoria"
+      subtitle={`${itemCount} ${itemCount === 1 ? "insumo" : "insumos"} nesta categoria`}
+      onClose={saving ? undefined : onClose}
+      width={560}
+      footer={
+        <>
+          <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+          <button className="btn" data-variant="primary" data-size="sm"
+                  onClick={submit} disabled={!canSave}>
+            {saving ? "Salvando…" : "Salvar alterações"}
+          </button>
+        </>
+      }
+    >
+      <FormRow label="Nome da categoria" hint={willMerge
+        ? `⚠ "${nameTrim}" já existe — os insumos serão mesclados nessa categoria`
+        : "Renomeia a categoria e move os insumos atrelados"}>
+        <input className="input" autoFocus value={draftName}
+               onChange={(e) => setDraftName(e.target.value)} />
+      </FormRow>
+
+      <div style={{ marginTop: 18 }}>
+        <div className="h-eyebrow" style={{ marginBottom: 8 }}>Comportamentos</div>
+
+        {!flagsAvailable && (
+          <div style={{
+            padding: "8px 12px", marginBottom: 10,
+            background: "var(--warn-soft)", border: "1px solid var(--warn-line)",
+            borderRadius: 4, fontSize: 11.5, color: "var(--fg-1)",
+          }}>
+            Os toggles abaixo só ficam disponíveis quando a categoria está sincronizada com o Supabase.
+            {!isDb && " Conecte ao banco pra ajustar."}
+          </div>
+        )}
+
+        <CategoryToggleRow
+          on={alerts}
+          disabled={!flagsAvailable || saving}
+          onChange={setAlerts}
+          title="Alertas de estoque"
+          desc="Quando desligado, os insumos desta categoria NÃO aparecem nos alertas de ruptura, baixo ou acima do máximo (na barra de KPIs do Estoque e no card Alertas consolidados do Dashboard)."
+        />
+        <CategoryToggleRow
+          on={autoMinMax}
+          disabled={!flagsAvailable || saving}
+          onChange={setAutoMinMax}
+          title="Estoque mín/máx automático"
+          desc={`Ao ligar, todos os ${itemCount} ${itemCount === 1 ? "item" : "itens"} desta categoria passam a recalcular mínimo e máximo sozinhos com base no consumo médio. Ao desligar, o cálculo automático é removido (os valores atuais ficam).`}
+          warnOnEnable={autoMinMax !== initialAutoMm && autoMinMax === true && itemCount > 0}
+          warnText={`Vai marcar ${itemCount} ${itemCount === 1 ? "item" : "itens"} como auto · trigger recalcula min/max imediatamente.`}
+        />
+        <CategoryToggleRow
+          on={autoShop}
+          disabled={!flagsAvailable || saving}
+          onChange={setAutoShop}
+          title="Entrar nas listas de compras automáticas"
+          desc="Quando desligado, insumos desta categoria não entram na sugestão automática de lista de compras (mesmo abaixo do mínimo). Útil pra itens sazonais ou comprados sob demanda."
+        />
+      </div>
+    </Modal>
+  );
+}
+
+// Linha de toggle estilo "settings" — rótulo + descrição + switch à direita.
+function CategoryToggleRow({ on, disabled, onChange, title, desc, warnOnEnable, warnText }) {
+  return (
+    <label style={{
+      display: "grid", gridTemplateColumns: "1fr auto", gap: 12,
+      padding: "12px 14px", marginBottom: 8,
+      background: on ? "var(--ok-soft)" : "var(--bg-2)",
+      border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
+      borderRadius: 6, cursor: disabled ? "not-allowed" : "pointer",
+      opacity: disabled ? 0.55 : 1,
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 500, color: "var(--fg-0)", marginBottom: 4 }}>{title}</div>
+        <div style={{ fontSize: 11.5, color: "var(--fg-2)", lineHeight: 1.45 }}>{desc}</div>
+        {warnOnEnable && warnText && (
+          <div style={{
+            marginTop: 8, padding: "6px 10px",
+            background: "var(--warn-soft)", border: "1px solid var(--warn-line)",
+            borderRadius: 4, fontSize: 11, color: "var(--warn)",
+          }}>⚠ {warnText}</div>
+        )}
+      </div>
+      <CategorySwitch on={on} disabled={disabled} onChange={onChange} />
+    </label>
+  );
+}
+
+// Switch pequeno (track + thumb) — usa o checkbox visualmente escondido pra acessibilidade.
+function CategorySwitch({ on, disabled, onChange }) {
+  return (
+    <span style={{
+      position: "relative", display: "inline-block",
+      width: 38, height: 22, flexShrink: 0,
+      alignSelf: "center",
+    }}>
+      <input type="checkbox" checked={on} disabled={disabled}
+             onChange={(e) => !disabled && onChange(e.target.checked)}
+             style={{ position: "absolute", inset: 0, opacity: 0, margin: 0, cursor: disabled ? "not-allowed" : "pointer" }} />
+      <span style={{
+        position: "absolute", inset: 0, borderRadius: 999,
+        background: on ? "var(--ok)" : "var(--bg-3)",
+        border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
+        transition: "background 140ms",
+      }} />
+      <span style={{
+        position: "absolute", top: 3, left: on ? 18 : 3,
+        width: 14, height: 14, borderRadius: 50,
+        background: "var(--fg-0)", boxShadow: "0 1px 2px rgba(0,0,0,0.4)",
+        transition: "left 140ms",
+      }} />
+    </span>
   );
 }
 

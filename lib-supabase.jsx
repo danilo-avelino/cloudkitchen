@@ -299,10 +299,13 @@ async function dbDeleteOperationShift(id) {
 // =====================================================================
 // STOCK CATEGORIES · CRUD
 // =====================================================================
+// Campos completos da categoria · inclui as flags de comportamento
+const _STOCK_CATEGORY_FIELDS = "id, name, color, sort_order, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled";
+
 async function dbListStockCategories(tenantId) {
   return dbOrMock(
     (sb) => sb.from("stock_categories")
-      .select("id, name, color, sort_order")
+      .select(_STOCK_CATEGORY_FIELDS)
       .eq("tenant_id", tenantId)
       .order("sort_order", { ascending: true })
       .order("name", { ascending: true }),
@@ -314,15 +317,40 @@ async function dbInsertStockCategory(tenantId, name, color = "#8a9098") {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   const { data, error } = await _client.from("stock_categories")
     .insert({ tenant_id: tenantId, name, color, sort_order: 99 })
-    .select().single();
+    .select(_STOCK_CATEGORY_FIELDS).single();
   return { data, error };
 }
 
 async function dbRenameStockCategory(id, newName) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   const { data, error } = await _client.from("stock_categories")
-    .update({ name: newName }).eq("id", id).select().single();
+    .update({ name: newName }).eq("id", id).select(_STOCK_CATEGORY_FIELDS).single();
   return { data, error };
+}
+
+// Atualiza um conjunto de campos da categoria — usado pelo modal "Editar categoria".
+// `patch` pode conter: name, color, alerts_enabled, auto_shopping_enabled.
+// Para auto_min_max_enabled use `dbSetCategoryAutoMinMax` que cascateia nos itens.
+async function dbUpdateStockCategory(id, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const allowed = ["name", "color", "alerts_enabled", "auto_shopping_enabled", "sort_order"];
+  const body = {};
+  for (const k of allowed) if (patch[k] !== undefined) body[k] = patch[k];
+  if (Object.keys(body).length === 0) return { data: null, error: new Error("nada a atualizar") };
+  const { data, error } = await _client.from("stock_categories")
+    .update(body).eq("id", id).select(_STOCK_CATEGORY_FIELDS).single();
+  return { data, error };
+}
+
+// Liga/desliga auto min/max em todos os itens ativos da categoria via RPC.
+// O RPC valida tenant_members.role (owner/admin/manager) e cascateia.
+async function dbSetCategoryAutoMinMax(categoryId, enabled) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.rpc("set_category_auto_min_max", {
+    p_category_id: categoryId,
+    p_enabled: !!enabled,
+  });
+  return { error };
 }
 
 async function dbDeleteStockCategory(id) {
@@ -401,6 +429,12 @@ function mapStockItemFromDb(row) {
     name:      row.name,
     cat:       row.category?.name || "Sem categoria",
     catId:     row.category_id,
+    // Flags da categoria — filtros de alerta/lista de compras leem daqui
+    // sem precisar fazer JOIN no JS. Default true pra alerts/shopping
+    // garante que itens sem categoria não somem do app por engano.
+    catAlertsEnabled:       row.category?.alerts_enabled        !== false,
+    catAutoShoppingEnabled: row.category?.auto_shopping_enabled !== false,
+    catAutoMinMaxEnabled:   row.category?.auto_min_max_enabled  === true,
     unit:      row.unit,
     cost:      Number(row.unit_cost) || 0,
     qty:       Number(row.current_qty) || 0,
@@ -433,7 +467,7 @@ async function dbListStockItems(tenantId) {
         id, code, name, unit, unit_cost, current_qty, reorder_point,
         max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
         category_id, supplier_id,
-        category:stock_categories(id, name, color),
+        category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled),
         supplier:suppliers(id, name),
         allocations:stock_allocations(qty, operation:operations(id, slug))
       `)
@@ -467,7 +501,7 @@ async function dbInsertStockItem(tenantId, item) {
     id, code, name, unit, unit_cost, current_qty, reorder_point,
     max_qty, expiration_date, compose_cmv, notes, status,
     category_id, supplier_id,
-    category:stock_categories(id, name, color),
+    category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled),
     supplier:suppliers(id, name),
     allocations:stock_allocations(qty, operation:operations(id, slug))
   `).single();
@@ -494,7 +528,7 @@ async function dbUpdateStockItem(id, patch) {
     id, code, name, unit, unit_cost, current_qty, reorder_point,
     max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
     category_id, supplier_id,
-    category:stock_categories(id, name, color),
+    category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled),
     supplier:suppliers(id, name),
     allocations:stock_allocations(qty, operation:operations(id, slug))
   `).single();
@@ -2036,24 +2070,76 @@ async function dbReopenPeriod(tenantId, period) {
   return { error };
 }
 
-async function dbInsertDreCategory(tenantId, { name, color }) {
+// Mapeia `kind` do front (revenue/deduction/cogs/expense/financial) para o
+// slug do dre_groups. `expense` é ambíguo (5 grupos do DRE são despesas) —
+// default em "fixed_expenses" pra novas categorias criadas pelo usuário.
+const DRE_KIND_TO_GROUP_SLUG = {
+  revenue:   "revenue",
+  deduction: "deductions",
+  cogs:      "cmv",
+  expense:   "fixed_expenses",
+  financial: "financial",
+};
+
+async function dbInsertDreCategory(tenantId, { name, kind, color, sort_order }) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const slug = DRE_KIND_TO_GROUP_SLUG[kind] || "fixed_expenses";
+  const { data: group, error: gErr } = await _client.from("dre_groups")
+    .select("id").eq("tenant_id", tenantId).eq("slug", slug).maybeSingle();
+  if (gErr)    return { data: null, error: gErr };
+  if (!group)  return { data: null, error: new Error(`Grupo DRE "${slug}" não encontrado pro tenant`) };
   const { data, error } = await _client
     .from("dre_categories")
-    .insert({ tenant_id: tenantId, name, color })
+    .insert({
+      tenant_id:  tenantId,
+      group_id:   group.id,
+      name:       String(name || "").trim(),
+      color:      color || null,
+      sort_order: sort_order ?? 99,
+    })
     .select()
     .single();
   return { data, error };
 }
 
-async function dbInsertDreSubcategory(tenantId, { categoryId, name, color, autofeed }) {
+async function dbUpdateDreCategory(id, patch) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const update = {};
+  if (patch.name       !== undefined) update.name       = String(patch.name).trim();
+  if (patch.color      !== undefined) update.color      = patch.color;
+  if (patch.sort_order !== undefined) update.sort_order = Number(patch.sort_order);
+  if (Object.keys(update).length === 0) return { error: null };
+  const { error } = await _client.from("dre_categories").update(update).eq("id", id);
+  return { error };
+}
+
+async function dbInsertDreSubcategory(tenantId, { categoryId, name, color, autofeed, sort_order }) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const insert = {
+    tenant_id:   tenantId,
+    category_id: categoryId,
+    name:        String(name || "").trim(),
+    color:       color || "#8a9098",
+  };
+  if (autofeed   != null) insert.autofeed   = autofeed;
+  if (sort_order != null) insert.sort_order = Number(sort_order);
   const { data, error } = await _client
     .from("dre_subcategories")
-    .insert({ tenant_id: tenantId, category_id: categoryId, name, color, autofeed })
+    .insert(insert)
     .select()
     .single();
   return { data, error };
+}
+
+async function dbUpdateDreSubcategory(id, patch) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const update = {};
+  if (patch.name       !== undefined) update.name       = String(patch.name).trim();
+  if (patch.color      !== undefined) update.color      = patch.color;
+  if (patch.sort_order !== undefined) update.sort_order = Number(patch.sort_order);
+  if (Object.keys(update).length === 0) return { error: null };
+  const { error } = await _client.from("dre_subcategories").update(update).eq("id", id);
+  return { error };
 }
 
 async function dbDeleteDreCategory(id) {
@@ -2316,6 +2402,7 @@ Object.assign(window, {
   dbListOperationShifts, dbInsertOperationShift, dbUpdateOperationShift, dbDeleteOperationShift,
   dbListRecipeCategories, dbInsertRecipeCategory,
   dbListStockCategories, dbInsertStockCategory, dbRenameStockCategory, dbDeleteStockCategory,
+  dbUpdateStockCategory, dbSetCategoryAutoMinMax,
   dbListSuppliers, dbInsertSupplier, dbUpdateSupplier, dbDeleteSupplier,
   dbListStockItems, dbInsertStockItem, dbUpdateStockItem, dbDeleteStockItem, dbApplyStockMovement, dbListStockMovements,
   dbSetStockItemAutoMin,
@@ -2337,7 +2424,8 @@ Object.assign(window, {
   dbGetStockValueSnapshots,
   dbListClosingChecklist, dbUpdateClosingChecklistItem, dbInsertClosingChecklistItem, dbDeleteClosingChecklistItem,
   dbListClosedPeriods, dbClosePeriod, dbReopenPeriod,
-  dbInsertDreCategory, dbInsertDreSubcategory, dbDeleteDreCategory, dbDeleteDreSubcategory,
+  dbInsertDreCategory, dbUpdateDreCategory, dbDeleteDreCategory,
+  dbInsertDreSubcategory, dbUpdateDreSubcategory, dbDeleteDreSubcategory,
   dbListCmvDaily, dbTopConsumedItems,
   dbUploadEvidence, dbGetSignedUrl,
   dbSubscribeTable,

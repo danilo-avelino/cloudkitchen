@@ -29,8 +29,11 @@ function Shopping({ embedded = false, onSave = null, stockItems: stockItemsProp 
   }, [dbStatus.state, dbStatus.isOnline, stockItemsProp]);
 
   // Computa todos os itens abaixo do mínimo a partir do estoque.
+  // Respeita flag da categoria · "auto_shopping_enabled = false" exclui da lista
+  // (ex.: insumos sazonais, comprados sob demanda fora do fluxo automático).
   const baseSuggestions = useMemo(() => {
     return (stockItems || [])
+      .filter((it) => it.catAutoShoppingEnabled !== false)
       .filter((it) => it.qty < it.reorder)
       .map((it) => {
         const target = it.max && it.max > it.reorder ? it.max : it.reorder * 2;
