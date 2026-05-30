@@ -107,6 +107,15 @@ function Requests({ scope }) {
         (r.splits && r.splits.some((s) => s.op === scope))
       );
 
+  // Contagem de hoje · só requisições com timestamp do dia civil corrente
+  const todayCount = useMemo(() => {
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    return filtered.filter((r) => {
+      const iso = r.requestedAt || r.requested_at || r.created_at;
+      return iso && new Date(iso) >= startOfToday;
+    }).length;
+  }, [filtered]);
+
   const cols = [
     { id: "pending",   label: "Pendente",   tone: "warn", desc: "aguardando separação" },
     { id: "separated", label: "Separada",   tone: "info", desc: "aguarda retirada/entrega" },
@@ -308,7 +317,7 @@ function Requests({ scope }) {
       <div style={{ padding: "20px 28px 14px", display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
         <div>
           <div className="h-eyebrow" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 10 }}>
-            {filtered.filter((r) => r.status === "pending").length} pendentes · {filtered.length} hoje
+            {filtered.filter((r) => r.status === "pending").length} pendentes · {todayCount} hoje
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 4,
               fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
