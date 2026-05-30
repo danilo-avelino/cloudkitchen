@@ -314,13 +314,18 @@ function Stock({ scope }) {
     !it.cost || Number(it.cost) <= 0
   ).length, [items]);
 
-  // Lista principal omite itens cuja categoria está com alertas desligados.
-  // Decisão de produto (2026-05-30): a aba Insumos é "o que preciso acompanhar";
-  // categoria sem alerta = "não me incomode" — fica fora da listagem, dos
-  // contadores de status e do badge do sidebar. Pra ver/editar esses itens o
-  // operador re-liga a flag em Estoque > Categorias.
+  // Lista principal separa itens por flag da categoria:
+  //   visibleItems · entram nas abas Todos/Em estoque/Baixo/Ruptura e nos
+  //                  contadores · "o que preciso acompanhar"
+  //   hiddenItems  · só aparecem quando o filtro "Ocultos" é selecionado —
+  //                  itens em categoria com alerts_enabled=false
+  // Pra trazer um item oculto pra rotina basta re-ligar alertas na categoria.
   const visibleItems = useMemo(
     () => items.filter((i) => i.catAlertsEnabled !== false),
+    [items]
+  );
+  const hiddenItems = useMemo(
+    () => items.filter((i) => i.catAlertsEnabled === false),
     [items]
   );
 
@@ -328,9 +333,12 @@ function Stock({ scope }) {
   const STATUS_ORDER = { crit: 0, warn: 1, ok: 2 };
   const filtered = useMemo(() => {
     const q = normalizeSearch(search.trim());
-    return visibleItems
+    // Filtro "hidden" troca a fonte; nesse modo ignora status e mostra todos
+    // os itens das categorias silenciadas — o ponto é justamente revisá-los.
+    const source = filter === "hidden" ? hiddenItems : visibleItems;
+    return source
       .filter((i) => {
-        if (filter !== "all" && i.status !== filter) return false;
+        if (filter !== "all" && filter !== "hidden" && i.status !== filter) return false;
         if (cats.length > 0 && !cats.includes(i.cat)) return false;
         if (scope !== "all" && i.alloc[scope] === 0) return false;
         if (q && !normalizeSearch(i.name).includes(q) && !normalizeSearch(i.id).includes(q)) return false;
@@ -342,14 +350,13 @@ function Stock({ scope }) {
         if (sa !== sb) return sa - sb;
         return a.name.localeCompare(b.name, "pt-BR");
       });
-  }, [visibleItems, filter, cats, search, scope]);
+  }, [visibleItems, hiddenItems, filter, cats, search, scope]);
 
   const totals = {
     ok:   visibleItems.filter((i) => i.status === "ok").length,
     warn: visibleItems.filter((i) => i.status === "warn").length,
     crit: visibleItems.filter((i) => i.status === "crit").length,
   };
-  const hiddenItemsCount = items.length - visibleItems.length;
 
   // Valor em estoque trata saldo negativo como zero — qty<0 vem de
   // ajustes/baixas antes de uma entrada e não deve abater o patrimônio.
@@ -643,25 +650,17 @@ function Stock({ scope }) {
       <div style={{ padding: "16px 28px 14px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
         <h1 className="h-title" style={{ margin: 0 }}>Estoque</h1>
         <Tabs value={filter} onChange={setFilter} options={[
-          { id: "all",  label: "Todos",     count: visibleItems.length },
-          { id: "ok",   label: "Em estoque", count: totals.ok,    tone: "ok" },
-          { id: "warn", label: "Baixo",      count: totals.warn,  tone: "warn" },
-          { id: "crit", label: "Ruptura",    count: totals.crit,  tone: "crit" },
+          { id: "all",    label: "Todos",      count: visibleItems.length },
+          { id: "ok",     label: "Em estoque", count: totals.ok,    tone: "ok" },
+          { id: "warn",   label: "Baixo",      count: totals.warn,  tone: "warn" },
+          { id: "crit",   label: "Ruptura",    count: totals.crit,  tone: "crit" },
+          // "Ocultos" só aparece quando há algo pra mostrar — filtrar uma aba vazia
+          // confunde, e a aba também não precisa ocupar espaço quando todas as
+          // categorias têm alertas ligados.
+          ...(hiddenItems.length > 0
+            ? [{ id: "hidden", label: "Ocultos", count: hiddenItems.length, tone: "muted" }]
+            : []),
         ]} />
-        {hiddenItemsCount > 0 && (
-          <span
-            title="Itens em categorias com alertas desligados não aparecem aqui · ajuste em Estoque › Categorias"
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)",
-              letterSpacing: "0.06em", textTransform: "uppercase",
-              padding: "3px 8px", borderRadius: 99,
-              background: "var(--bg-2)", border: "1px solid var(--line)",
-              cursor: "help",
-            }}>
-            {hiddenItemsCount} oculto{hiddenItemsCount === 1 ? "" : "s"}
-          </span>
-        )}
         <span style={{ flex: 1 }} />
         <StockSearchInput value={search} onChange={setSearch} />
         <CategoryFilter allCats={allCats} selected={cats} onChange={setCats} />
