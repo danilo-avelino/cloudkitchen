@@ -314,11 +314,21 @@ function Stock({ scope }) {
     !it.cost || Number(it.cost) <= 0
   ).length, [items]);
 
+  // Lista principal omite itens cuja categoria está com alertas desligados.
+  // Decisão de produto (2026-05-30): a aba Insumos é "o que preciso acompanhar";
+  // categoria sem alerta = "não me incomode" — fica fora da listagem, dos
+  // contadores de status e do badge do sidebar. Pra ver/editar esses itens o
+  // operador re-liga a flag em Estoque > Categorias.
+  const visibleItems = useMemo(
+    () => items.filter((i) => i.catAlertsEnabled !== false),
+    [items]
+  );
+
   // Ordem fixa por urgência: ruptura → baixo → ok. Empate: nome alfabético.
   const STATUS_ORDER = { crit: 0, warn: 1, ok: 2 };
   const filtered = useMemo(() => {
     const q = normalizeSearch(search.trim());
-    return items
+    return visibleItems
       .filter((i) => {
         if (filter !== "all" && i.status !== filter) return false;
         if (cats.length > 0 && !cats.includes(i.cat)) return false;
@@ -332,13 +342,14 @@ function Stock({ scope }) {
         if (sa !== sb) return sa - sb;
         return a.name.localeCompare(b.name, "pt-BR");
       });
-  }, [items, filter, cats, search, scope]);
+  }, [visibleItems, filter, cats, search, scope]);
 
   const totals = {
-    ok:   items.filter((i) => i.status === "ok").length,
-    warn: items.filter((i) => i.status === "warn").length,
-    crit: items.filter((i) => i.status === "crit").length,
+    ok:   visibleItems.filter((i) => i.status === "ok").length,
+    warn: visibleItems.filter((i) => i.status === "warn").length,
+    crit: visibleItems.filter((i) => i.status === "crit").length,
   };
+  const hiddenItemsCount = items.length - visibleItems.length;
 
   // Valor em estoque trata saldo negativo como zero — qty<0 vem de
   // ajustes/baixas antes de uma entrada e não deve abater o patrimônio.
@@ -632,11 +643,25 @@ function Stock({ scope }) {
       <div style={{ padding: "16px 28px 14px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid var(--line)", flexWrap: "wrap" }}>
         <h1 className="h-title" style={{ margin: 0 }}>Estoque</h1>
         <Tabs value={filter} onChange={setFilter} options={[
-          { id: "all",  label: "Todos",     count: items.length },
+          { id: "all",  label: "Todos",     count: visibleItems.length },
           { id: "ok",   label: "Em estoque", count: totals.ok,    tone: "ok" },
           { id: "warn", label: "Baixo",      count: totals.warn,  tone: "warn" },
           { id: "crit", label: "Ruptura",    count: totals.crit,  tone: "crit" },
         ]} />
+        {hiddenItemsCount > 0 && (
+          <span
+            title="Itens em categorias com alertas desligados não aparecem aqui · ajuste em Estoque › Categorias"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 4,
+              fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)",
+              letterSpacing: "0.06em", textTransform: "uppercase",
+              padding: "3px 8px", borderRadius: 99,
+              background: "var(--bg-2)", border: "1px solid var(--line)",
+              cursor: "help",
+            }}>
+            {hiddenItemsCount} oculto{hiddenItemsCount === 1 ? "" : "s"}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         <StockSearchInput value={search} onChange={setSearch} />
         <CategoryFilter allCats={allCats} selected={cats} onChange={setCats} />
