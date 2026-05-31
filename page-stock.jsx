@@ -1634,22 +1634,30 @@ function AllocationPanel({ item, onClose }) {
   const [movements, setMovements] = useState(null);
   const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
   const [consumption7d, setConsumption7d] = useState(null);
-  const [autoMin, setAutoMin] = useState(item.autoMin === true);
+  // Modo de auto min/max: 'off' | 'weekly' | 'monthly'
+  const [autoMinMode, setAutoMinMode] = useState(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
   const [savingAutoMin, setSavingAutoMin] = useState(false);
 
-  useEffect(() => { setAutoMin(item.autoMin === true); }, [item.id, item.autoMin]);
+  useEffect(() => {
+    setAutoMinMode(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
+  }, [item.id, item.autoMinMode, item.autoMin]);
 
-  const toggleAutoMin = async (next) => {
-    setAutoMin(next);
-    if (typeof dbSetStockItemAutoMin === "function") {
+  const changeAutoMinMode = async (next) => {
+    if (next === autoMinMode) return;
+    const prev = autoMinMode;
+    setAutoMinMode(next);
+    if (typeof dbSetStockItemAutoMinMode === "function") {
       setSavingAutoMin(true);
       try {
-        const { error } = await dbSetStockItemAutoMin(item.id, next);
+        const { error } = await dbSetStockItemAutoMinMode(item.id, next);
         if (error) {
-          setAutoMin(!next);
+          setAutoMinMode(prev);
           window.showToast(`Erro: ${error.message}`, { tone: "crit" });
         } else {
-          window.showToast(next ? "Auto-cálculo ativado · min/max recalculados" : "Auto-cálculo desativado", { tone: "ok" });
+          const msg = next === "off"
+            ? "Auto-cálculo desativado"
+            : `Reposição ${next === "monthly" ? "mensal" : "semanal"} ativada · min/max recalculados`;
+          window.showToast(msg, { tone: "ok" });
         }
       } finally {
         setSavingAutoMin(false);
@@ -1691,8 +1699,15 @@ function AllocationPanel({ item, onClose }) {
     return () => { cancelled = true; };
   }, [dbStatus.isOnline, item.id]);
 
-  const suggestedMin = consumption7d?.hasData ? Math.ceil(consumption7d.daily * 3) : null;
-  const suggestedMax = suggestedMin != null ? suggestedMin * 2 : null;
+  // Fórmulas espelham o trigger compute_auto_min_max no banco. Têm que bater
+  // com o que o Postgres grava ao ligar o modo, senão a UI promete um valor e
+  // o banco grava outro.
+  //   min (ambos modos) = ceil(daily * 7)   · 1 semana de buffer
+  //   max semanal        = ceil(min * 1.3)   · min + 30% de margem
+  //   max mensal         = ceil(daily * 35)  · 5 semanas de estoque
+  const suggestedMin        = consumption7d?.hasData ? Math.ceil(consumption7d.daily * 7) : null;
+  const suggestedMaxWeekly  = suggestedMin != null ? Math.ceil(suggestedMin * 1.3) : null;
+  const suggestedMaxMonthly = consumption7d?.hasData ? Math.ceil(consumption7d.daily * 35) : null;
 
   const fmtTime = (iso) => {
     if (!iso) return "—";
@@ -1846,23 +1861,50 @@ function AllocationPanel({ item, onClose }) {
               <span>Total: <strong className="mono">{consumption7d.qty.toFixed(2)} {item.unit}</strong></span>
               <span>Média/dia: <strong className="mono">{consumption7d.daily.toFixed(2)} {item.unit}</strong></span>
             </div>
-            <label style={{
-              display: "flex", alignItems: "center", gap: 8,
-              marginTop: 10, padding: "8px 10px",
-              background: autoMin ? "var(--ok-soft)" : "var(--bg-2)",
-              border: `1px solid ${autoMin ? "var(--ok-line)" : "var(--line)"}`,
-              borderRadius: 4, fontSize: 11.5, color: "var(--fg-1)", cursor: "pointer",
-            }}>
-              <input type="checkbox" checked={autoMin} disabled={savingAutoMin}
-                     onChange={(e) => toggleAutoMin(e.target.checked)} />
-              <span style={{ flex: 1 }}>
-                Auto-calcular min/max ({suggestedMin ?? "—"} / {suggestedMax ?? "—"} {item.unit})
-              </span>
-              {savingAutoMin && <span style={{ fontSize: 10, color: "var(--fg-3)" }}>…</span>}
-            </label>
-            {autoMin && (
+            {/* Seletor de modo de auto min/max · Off / Semanal / Mensal */}
+            <div style={{ marginTop: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                  Cálculo automático de min/máx
+                </span>
+                {savingAutoMin && <span style={{ fontSize: 10, color: "var(--fg-3)" }}>salvando…</span>}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+                {[
+                  { mode: "off",     label: "Desligado", min: null,         max: null },
+                  { mode: "weekly",  label: "Semanal",   min: suggestedMin, max: suggestedMaxWeekly },
+                  { mode: "monthly", label: "Mensal",    min: suggestedMin, max: suggestedMaxMonthly },
+                ].map((opt) => {
+                  const on = autoMinMode === opt.mode;
+                  return (
+                    <button key={opt.mode} type="button"
+                            disabled={savingAutoMin}
+                            onClick={() => changeAutoMinMode(opt.mode)}
+                            style={{
+                              display: "flex", flexDirection: "column", gap: 2,
+                              padding: "8px 6px", borderRadius: 4, textAlign: "center",
+                              background: on ? "var(--ok-soft)" : "var(--bg-2)",
+                              border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
+                              color: on ? "var(--fg-0)" : "var(--fg-2)",
+                              cursor: savingAutoMin ? "wait" : "pointer",
+                              transition: "all 120ms ease",
+                            }}>
+                      <span style={{ fontSize: 11.5, fontWeight: on ? 600 : 400 }}>{opt.label}</span>
+                      {opt.mode !== "off" && (
+                        <span className="mono" style={{ fontSize: 9.5, color: on ? "var(--ok)" : "var(--fg-3)" }}>
+                          {opt.min != null ? `${opt.min} / ${opt.max}` : "—"}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {autoMinMode !== "off" && (
               <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6, lineHeight: 1.4 }}>
-                Sistema atualiza min/max sozinho a cada nova movimentação (média 7d × 3 dias).
+                {autoMinMode === "monthly"
+                  ? "Reposição mensal · mín = consumo de 7 dias · máx = 5 semanas de estoque. Recalculado a cada movimentação."
+                  : "Reposição semanal · mín = consumo de 7 dias · máx = mín + 30%. Recalculado a cada movimentação."}
               </div>
             )}
           </>

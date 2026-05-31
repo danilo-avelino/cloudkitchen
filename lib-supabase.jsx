@@ -447,17 +447,28 @@ function mapStockItemFromDb(row) {
     supplier:  row.supplier?.name || null,
     supplierId: row.supplier_id,
     autoMin:   row.auto_min_enabled === true,
+    // Modo do auto min/max: 'off' | 'weekly' | 'monthly'. Fallback p/ rows antigas
+    // que só têm o boolean: enabled vira 'weekly'.
+    autoMinMode: row.auto_min_mode || (row.auto_min_enabled === true ? "weekly" : "off"),
     alloc,
     notes:     row.notes,
   };
 }
 
-async function dbSetStockItemAutoMin(itemId, enabled) {
+// Define o modo de auto min/max do item ('off' | 'weekly' | 'monthly').
+// Mantém auto_min_enabled em sync; o trigger no banco recalcula reorder/max.
+async function dbSetStockItemAutoMinMode(itemId, mode) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const m = ["off", "weekly", "monthly"].includes(mode) ? mode : "off";
   const { error } = await _client.from("stock_items")
-    .update({ auto_min_enabled: !!enabled })
+    .update({ auto_min_mode: m, auto_min_enabled: m !== "off" })
     .eq("id", itemId);
   return { error };
+}
+
+// Compat: liga/desliga (true = weekly). Mantido p/ chamadas antigas (Assistente).
+async function dbSetStockItemAutoMin(itemId, enabled) {
+  return dbSetStockItemAutoMinMode(itemId, enabled ? "weekly" : "off");
 }
 
 async function dbListStockItems(tenantId) {
@@ -466,7 +477,7 @@ async function dbListStockItems(tenantId) {
     const { data, error } = await _client.from("stock_items")
       .select(`
         id, code, name, unit, unit_cost, current_qty, reorder_point,
-        max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
+        max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
         category_id, supplier_id,
         category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
         supplier:suppliers(id, name),
@@ -527,7 +538,7 @@ async function dbUpdateStockItem(id, patch) {
   if (patch.notes       !== undefined) update.notes = patch.notes;
   const { data, error } = await _client.from("stock_items").update(update).eq("id", id).select(`
     id, code, name, unit, unit_cost, current_qty, reorder_point,
-    max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
+    max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
     category_id, supplier_id,
     category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
     supplier:suppliers(id, name),
@@ -2406,7 +2417,7 @@ Object.assign(window, {
   dbUpdateStockCategory, dbSetCategoryAutoMinMax,
   dbListSuppliers, dbInsertSupplier, dbUpdateSupplier, dbDeleteSupplier,
   dbListStockItems, dbInsertStockItem, dbUpdateStockItem, dbDeleteStockItem, dbApplyStockMovement, dbListStockMovements,
-  dbSetStockItemAutoMin,
+  dbSetStockItemAutoMin, dbSetStockItemAutoMinMode,
   dbListPaymentMethods,
   dbListRevenueEntries, dbInsertRevenueEntry, dbUpdateRevenueEntry, dbDeleteRevenueEntry,
   dbListKitchenRequests, dbInsertKitchenRequest, dbUpdateKitchenRequestStatus, dbDeleteKitchenRequest,
