@@ -46,6 +46,11 @@ export default defineConfig({
   // raiz (Vercel, Netlify, domínio customizado), mantém "/". O workflow do GH
   // Pages exporta BASE_PATH=/cloudkitchen/ antes do build.
   base: process.env.BASE_PATH || "/",
+  // O diretório padrão (node_modules/.vite) ficou com arquivos deps_temp_* órfãos,
+  // criados por um contexto privilegiado e sem permissão de exclusão para o usuário
+  // atual. Toda re-otimização tentava limpá-los e abortava com EPERM, derrubando o
+  // dev server. Apontar o cache para uma pasta própria evita o conflito.
+  cacheDir: "node_modules/.vite-cache",
   plugins: [react(), injectLegacyGlobals()],
   esbuild: {
     loader: "jsx",

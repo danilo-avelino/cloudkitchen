@@ -31,14 +31,29 @@ function Requests({ scope }) {
   );
   const [stockItems, setStockItems] = useState(MOCK.STOCK_ITEMS || []);
   const [tenantId, setTenantId] = useState(null);
+  // Nome do tenant para o cabeçalho do cupom · começa pela sessão salva e é
+  // atualizado com o valor ao vivo do DB no carregamento.
+  const [tenantName, setTenantName] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("stockkitchen.session.v1"))?.tenantName || ""; }
+    catch { return ""; }
+  });
   const [source, setSource]     = useState("mock");
   const [pageLoading, setPageLoading] = useState(true);
   const [view, setView] = useState("kanban"); // kanban | list
   const [creating, setCreating] = useState(false);
   const [editingReq, setEditingReq] = useState(null);
   const [printingReq, setPrintingReq] = useState(null);
-  const [printedIds, setPrintedIds] = useState(() => new Set());
+  const [printedIds, setPrintedIds] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("stockkitchen.requests.printed.v1")) || []); }
+    catch { return new Set(); }
+  });
   const [showHistory, setShowHistory] = useState(false);
+
+  // Persiste o conjunto de impressas para que o ✅ sobreviva ao reload da página.
+  useEffect(() => {
+    try { localStorage.setItem("stockkitchen.requests.printed.v1", JSON.stringify([...printedIds])); }
+    catch {}
+  }, [printedIds]);
 
   // Carrega do DB quando online
   useEffect(() => {
@@ -51,6 +66,7 @@ function Requests({ scope }) {
         if (cancelled) return;
         const tid = ctx?.tenant?.id;
         setTenantId(tid || null);
+        if (ctx?.tenant?.name) setTenantName(ctx.tenant.name);
         if (!tid) return;
         const [reqRes, stockRes] = await Promise.all([
           dbListKitchenRequests(tid, { limit: 100 }),
@@ -475,7 +491,7 @@ function Requests({ scope }) {
         />
       )}
 
-      {printingReq && <PrintTicket request={printingReq} />}
+      {printingReq && <PrintTicket request={printingReq} tenantName={tenantName} />}
 
       {showHistory && (
         <RequestsHistoryModal
@@ -778,19 +794,19 @@ function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint, printed }) {
 // ===== Cupom térmico para impressão (visível apenas em @media print) =====
 // Renderizado via portal direto no <body> para escapar de containers posicionados
 // do AppShell (que estavam empurrando o cupom para fora da área imprimível na ELGIN).
-function PrintTicket({ request }) {
+function PrintTicket({ request, tenantName }) {
   const isShared = !!(request.isShared || (request.splits && request.splits.length > 1));
   const op = MOCK.opById(request.op);
+  const headerName = (tenantName || "Cloud Kitchen").toUpperCase();
 
   const content = (
     <div className="print-area">
       <div className="rule-double" />
-      <div className="center bold">COZINHA CENTRAL SP</div>
+      <div className="center bold">{headerName}</div>
       <div className="center">Requisição interna</div>
       <div className="rule-double" />
 
       <div className="row">
-        <span className="bold">{request.id}</span>
         <span>{request.at}</span>
       </div>
       <div className="row">

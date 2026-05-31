@@ -1520,6 +1520,7 @@ async function dbDeleteTechSheetItem(itemId) {
 function mapInventoryFromDb(row) {
   return {
     id:           row.id,
+    name:         row.name || "",
     started_at:   row.started_at,
     finished_at:  row.finished_at,
     responsible:  row.responsible_name || "—",
@@ -1544,7 +1545,7 @@ async function dbListInventories(tenantId) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const { data, error } = await _client.from("inventory_sessions")
     .select(`
-      id, started_at, finished_at, status, score, financial_impact,
+      id, name, started_at, finished_at, status, score, financial_impact,
       scope_categories, responsible_name, responsible_role,
       items:inventory_session_items(*)
     `)
@@ -1559,6 +1560,7 @@ async function dbInsertInventory(tenantId, draft) {
   const { items = [], ...header } = draft;
   const { data: row, error } = await _client.from("inventory_sessions").insert({
     tenant_id:        tenantId,
+    name:             header.name || null,
     started_at:       header.started_at || new Date().toISOString(),
     finished_at:      header.finished_at || null,
     status:           header.status || "in_progress",
@@ -1627,6 +1629,7 @@ async function dbUpdateInventory(tenantId, sessionId, draft) {
   const { items = [], ...header } = draft;
 
   const { data: row, error } = await _client.from("inventory_sessions").update({
+    name:             header.name || null,
     finished_at:      header.finished_at || null,
     status:           header.status || "in_progress",
     score:            header.score ?? null,
@@ -1685,6 +1688,16 @@ async function dbUpdateInventory(tenantId, sessionId, draft) {
   }
 
   return { data: row, error: null };
+}
+
+// Remove uma sessão de inventário · os itens são apagados em cascata (FK ON DELETE
+// CASCADE). Os stock_movements de ajuste (de inventários finalizados) NÃO são FK e
+// permanecem como histórico — deletar o registro não reverte o estoque.
+async function dbDeleteInventory(tenantId, sessionId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("inventory_sessions")
+    .delete().eq("id", sessionId).eq("tenant_id", tenantId);
+  return { error };
 }
 
 // =====================================================================
@@ -2429,7 +2442,7 @@ Object.assign(window, {
   dbListPreparations, dbInsertPreparation, dbUpdatePreparation, dbDeletePreparation, dbRecomputeAllCosts,
   dbInsertPreparationItem, dbUpdatePreparationItem, dbDeletePreparationItem,
   dbInsertTechSheetItem, dbUpdateTechSheetItem, dbDeleteTechSheetItem,
-  dbListInventories, dbInsertInventory, dbUpdateInventory,
+  dbListInventories, dbInsertInventory, dbUpdateInventory, dbDeleteInventory,
   dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
   dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin,
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,

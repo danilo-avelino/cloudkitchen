@@ -471,6 +471,7 @@ input, select, textarea { font-family: inherit; }
     font-family: "Courier New", Courier, monospace !important;
     font-size: 11pt !important;
     line-height: 1.32 !important;
+    font-weight: bold !important;
   }
   .print-area .center { text-align: center; }
   .print-area .bold   { font-weight: bold; }

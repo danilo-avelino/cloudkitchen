@@ -101,6 +101,9 @@ function Inventory() {
   const [resuming, setResuming] = useState(null); // inventário in_progress a continuar
   const [viewing,  setViewing]  = useState(null);
   const [pageLoading, setPageLoading] = useState(true);
+  // Só o owner pode excluir inventários.
+  const sess = (typeof useSession === "function") ? useSession() : null;
+  const isOwner = sess?.role === "owner";
 
   // Carrega inventários + insumos do DB (se schema aplicado)
   useEffect(() => {
@@ -188,6 +191,7 @@ function Inventory() {
     const id = existing?.id || `INV-${today.slice(0, 10)}`;
     const newInv = {
       id,
+      name:        draft.name || existing?.name || "",
       started_at:  existing?.started_at || today,
       finished_at: draft.status === "finalized" ? today : null,
       responsible: draft.responsible || "—",
@@ -211,20 +215,23 @@ function Inventory() {
     if (source === "db" && tenantId) {
       const m = computeInvMetrics(draft.items);
       const payload = { ...newInv, score: m.accuracy, financialImpact: m.financialImpact };
-      const { error } = existing
+      const { data: savedRow, error } = existing
         ? await dbUpdateInventory(tenantId, existing.id, payload)
         : await dbInsertInventory(tenantId, payload);
       if (error) {
         window.showToast(`Erro ao salvar inventário: ${error.message}`, { tone: "crit", ttl: 4500 });
         return;
       }
+      // O id real é o uuid retornado pelo banco · o `id` local (INV-AAAA-MM-DD) é só
+      // placeholder do MOCK e quebra qualquer dbUpdateInventory subsequente (coluna uuid).
+      const realId = savedRow?.id || existing?.id || id;
       const [{ data: refreshed }, { data: refreshedItems }] = await Promise.all([
         dbListInventories(tenantId),
         dbListStockItems(tenantId),
       ]);
       if (refreshed) setInventories(refreshed);
       if (refreshedItems) setStockItems(refreshedItems);
-      const savedInv = (refreshed && refreshed.find((x) => x.id === id)) || newInv;
+      const savedInv = (refreshed && refreshed.find((x) => x.id === realId)) || { ...newInv, id: realId };
       closeOrResume(savedInv);
       const finalized = draft.status === "finalized";
       if (!opts.silent) {
@@ -251,6 +258,25 @@ function Inventory() {
     } else {
       window.showToast(`Inventário ${id} salvo parcialmente · finalize quando terminar`, { tone: "info", ttl: 4500 });
     }
+  };
+
+  // Exclusão · restrita ao owner e a inventários NÃO finalizados, para não mexer
+  // com os ajustes de estoque já aplicados por um inventário finalizado.
+  const handleDeleteInventory = async (inv) => {
+    if (!isOwner || inv.status === "finalized") return;
+    const label = inv.name || _isoDateBRi(inv.started_at);
+    if (!window.confirm(`Excluir o inventário "${label}"? Esta ação não pode ser desfeita.`)) return;
+    if (source === "db" && tenantId) {
+      const { error } = await dbDeleteInventory(tenantId, inv.id);
+      if (error) {
+        window.showToast(`Erro ao excluir inventário: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+    }
+    setInventories((prev) => prev.filter((x) => x.id !== inv.id));
+    if (viewing?.id === inv.id) setViewing(null);
+    if (resuming?.id === inv.id) setResuming(null);
+    window.showToast("Inventário excluído", { tone: "ok" });
   };
 
   if (pageLoading) return <PageLoading label="Carregando inventário…" variant="dashboard" />;
@@ -349,6 +375,7 @@ function Inventory() {
           inventories={inventories}
           onView={(inv) => setViewing(inv)}
           onResume={(inv) => setResuming(inv)}
+          onDelete={isOwner ? handleDeleteInventory : null}
         />
       </div>
 
@@ -709,7 +736,7 @@ function AccuracyChart({ data }) {
 }
 
 // ===================== Lista de inventários =====================
-function InventoriesList({ inventories, onView, onResume }) {
+function InventoriesList({ inventories, onView, onResume, onDelete }) {
   const sorted = [...inventories].sort((a, b) =>
     (b.started_at || "").localeCompare(a.started_at || "")
   );
@@ -751,10 +778,10 @@ function InventoriesList({ inventories, onView, onResume }) {
                 <td>
                   <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                     <span style={{ color: "var(--fg-0)", fontSize: 12.5, fontWeight: 500 }}>
-                      {_isoDateBRi(inv.started_at)}
+                      {inv.name || _isoDateBRi(inv.started_at)}
                     </span>
                     <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
-                      {inv.id} · {_isoTimeBRi(inv.started_at)}
+                      {_isoDateBRi(inv.started_at)} · {_isoTimeBRi(inv.started_at)}
                       {inv.finished_at ? ` → ${_isoTimeBRi(inv.finished_at)}` : ""}
                     </span>
                   </div>
@@ -811,6 +838,14 @@ function InventoriesList({ inventories, onView, onResume }) {
                             onClick={() => printInventorySheet(inv)}>
                       Imprimir ficha
                     </button>
+                    {onDelete && !isFinalized && (
+                      <button className="btn" data-size="sm" data-variant="ghost"
+                              title="Excluir inventário"
+                              style={{ color: "var(--crit)" }}
+                              onClick={() => onDelete(inv)}>
+                        <I.Trash size={12} />
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -832,7 +867,7 @@ function InventoryDetailModal({ inventory, onClose }) {
   return (
     <Modal
       title={isOpen ? "Inventário em andamento" : isCanceled ? "Inventário cancelado" : "Detalhes do inventário"}
-      subtitle={`${inventory.id} · ${_isoDateBRi(inventory.started_at)} ${_isoTimeBRi(inventory.started_at)} · ${inventory.responsible}`}
+      subtitle={`${inventory.name ? inventory.name + " · " : ""}${_isoDateBRi(inventory.started_at)} ${_isoTimeBRi(inventory.started_at)} · ${inventory.responsible}`}
       onClose={onClose}
       width={860}
       footer={
@@ -1025,6 +1060,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
   // Em modo "continuar", pula direto pra etapa de contagem e pré-carrega cats/responsável/contagens.
   const [step, setStep] = useState(isResume ? 2 : 1);
   const [selectedCats, setSelectedCats] = useState(() => initial?.categories || defaultCats);
+  const [name,         setName]         = useState(() => initial?.name || "");
   const [responsible,  setResponsible]  = useState(() => initial?.responsible || "");
   const [counts, setCounts] = useState(() => {
     if (!initial) return {};
@@ -1103,6 +1139,10 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
       window.showToast("Informe o responsável pela contagem", { tone: "warn" });
       return;
     }
+    if (step === 1 && !name.trim()) {
+      window.showToast("Informe o nome do inventário", { tone: "warn" });
+      return;
+    }
     setStep((s) => Math.min(3, s + 1));
   };
   const back = () => setStep((s) => Math.max(1, s - 1));
@@ -1115,6 +1155,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
     try {
       await onSave({
         categories: selectedCats,
+        name: name.trim(),
         responsible: responsible.trim() || "—",
         role: "Estoquista",
         status: "in_progress",
@@ -1131,6 +1172,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
     try {
       await onSave({
         categories: selectedCats,
+        name: name.trim(),
         responsible: responsible.trim() || "—",
         role: "Estoquista",
         status: "finalized",
@@ -1174,7 +1216,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
               // o parent transicionar pro modo "continuar", que abre na Etapa 2.
               <button className="btn" data-variant="primary" data-size="sm"
                       onClick={() => savePartial({ keepOpen: true })}
-                      disabled={saving || selectedCats.length === 0 || !responsible.trim()}>
+                      disabled={saving || selectedCats.length === 0 || !responsible.trim() || !name.trim()}>
                 {saving ? "Criando…" : "Criar"}<I.ChevronR size={11} />
               </button>
             ) : step < 3 ? (
@@ -1205,7 +1247,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
 
       {step === 1 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {(!responsible.trim() || selectedCats.length === 0) && (
+          {(!name.trim() || !responsible.trim() || selectedCats.length === 0) && (
             <div style={{
               padding: "8px 12px", background: "var(--crit-soft)",
               border: "1px solid var(--crit-line)", borderRadius: 4,
@@ -1213,14 +1255,21 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
             }}>
               <strong>Para avançar, preencha:</strong>
               <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                {!name.trim()              && <li>Nome do inventário</li>}
                 {!responsible.trim()       && <li>Responsável pela contagem</li>}
                 {selectedCats.length === 0 && <li>Selecione ao menos 1 categoria</li>}
               </ul>
             </div>
           )}
+          <FormRow label="Nome do inventário">
+            <input className="input" autoFocus value={name}
+                   onChange={(e) => setName(e.target.value)}
+                   placeholder="Ex.: Inventário mensal · maio/2026"
+                   style={!name.trim() ? { borderColor: "var(--crit)" } : null} />
+          </FormRow>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <FormRow label="Responsável pela contagem">
-              <input className="input" autoFocus value={responsible}
+              <input className="input" value={responsible}
                      onChange={(e) => setResponsible(e.target.value)}
                      placeholder="Quem vai conduzir o inventário"
                      style={!responsible.trim() ? { borderColor: "var(--crit)" } : null} />
