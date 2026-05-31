@@ -181,7 +181,7 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
 
       {/* User */}
       <button
-        style={{ ...sb.user, width: "100%", background: "transparent", textAlign: "left", cursor: has("settings") ? "pointer" : "default" }}
+        style={{ ...sb.user, border: "none", borderTop: "1px solid var(--line-soft)", width: "100%", background: "transparent", textAlign: "left", cursor: has("settings") ? "pointer" : "default" }}
         onClick={() => { if (has("settings")) setPage("settings"); }}
         title={has("settings") ? "Abrir configurações" : user?.name || "Usuário"}
       >
