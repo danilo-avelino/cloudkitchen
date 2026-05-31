@@ -1667,6 +1667,9 @@ function AllocationPanel({ item, onClose }) {
 
   useEffect(() => {
     if (!dbStatus.isOnline || !item.id) { setMovements([]); setMovements30([]); setConsumption7d({ qty: 0, daily: 0, window: 30, hasData: false }); return; }
+    // Zera os dados do insumo anterior pra exibir o estado de carregamento
+    // enquanto busca os reais — senão o painel mostra dados do item antigo.
+    setMovements(null); setMovements30(null); setConsumption7d(null);
     let cancelled = false;
     (async () => {
       const ctx = await dbGetCurrentContext();
