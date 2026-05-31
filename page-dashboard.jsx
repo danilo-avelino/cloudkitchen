@@ -3,7 +3,7 @@ function Dashboard({ scope, setPage }) {
   const op = MOCK.opById(scope);
   const isConsolidated = scope === "all";
   const [period, setPeriod] = useState("mtd");
-  const periodLabel = { "1d": "Hoje", "7d": "Últimos 7 dias", "30d": "Últimos 30 dias", "mtd": "Mês atual" }[period];
+  const periodLabel = { "1d": "Hoje", "yesterday": "Ontem", "7d": "Últimos 7 dias", "30d": "Últimos 30 dias", "mtd": "Mês atual" }[period];
   const sess = (typeof useSession === "function") ? useSession() : null;
   const [tenantNameLive, setTenantNameLive] = useState(sess?.tenantName || null);
   useEffect(() => {
@@ -62,8 +62,17 @@ function Dashboard({ scope, setPage }) {
       // Range do período começa em 00:00 do dia inicial — evita vazar movimentações
       // de "ontem 23:xx" no filtro "Hoje" e dá semântica de dia civil em todas as opções.
       const fromDate = new Date();
+      // toDate limita o range superior (null = sem limite = até agora).
+      // "Ontem" é o único período que tem limite superior explícito (23:59:59 de ontem).
+      let toDate = null;
       if (period === "1d") {
         fromDate.setHours(0, 0, 0, 0);
+      } else if (period === "yesterday") {
+        // De 00:00 a 23:59:59 do dia anterior — dia civil completo
+        fromDate.setDate(fromDate.getDate() - 1);
+        fromDate.setHours(0, 0, 0, 0);
+        toDate = new Date(fromDate);
+        toDate.setHours(23, 59, 59, 999);
       } else if (period === "7d") {
         fromDate.setDate(fromDate.getDate() - 6); // 7 dias incluindo hoje
         fromDate.setHours(0, 0, 0, 0);
@@ -75,13 +84,15 @@ function Dashboard({ scope, setPage }) {
         fromDate.setHours(0, 0, 0, 0);
       }
       const fromISO = fromDate.toISOString();
+      const toISO   = toDate ? toDate.toISOString() : new Date().toISOString();
       // Período anterior: mesmo tamanho, terminando no início do período atual
       const prevToISO = fromDate.toISOString();
       const prevFromDate = new Date(fromDate);
-      if (period === "1d")      prevFromDate.setDate(prevFromDate.getDate() - 1);
-      else if (period === "7d") prevFromDate.setDate(prevFromDate.getDate() - 7);
-      else if (period === "30d") prevFromDate.setDate(prevFromDate.getDate() - 30);
-      else                       prevFromDate.setMonth(prevFromDate.getMonth() - 1);
+      if (period === "1d")          prevFromDate.setDate(prevFromDate.getDate() - 1);
+      else if (period === "yesterday") prevFromDate.setDate(prevFromDate.getDate() - 1);
+      else if (period === "7d")     prevFromDate.setDate(prevFromDate.getDate() - 7);
+      else if (period === "30d")    prevFromDate.setDate(prevFromDate.getDate() - 30);
+      else                          prevFromDate.setMonth(prevFromDate.getMonth() - 1);
       const prevFromISO = prevFromDate.toISOString();
 
       const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
@@ -94,7 +105,7 @@ function Dashboard({ scope, setPage }) {
 
       const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes, periodMovRes, dreCatRes, dreSubRes, finRes] = await Promise.all([
         dbGetCurrentContext?.(),
-        dbListRevenueEntries(tid, fromISO, null),
+        dbListRevenueEntries(tid, fromISO, toDate ? toISO : null),
         dbListRevenueEntries(tid, prevFromISO, prevToISO),
         dbListStockItems(tid),
         dbListInventories(tid),
@@ -104,7 +115,7 @@ function Dashboard({ scope, setPage }) {
         // cmvMovements: fixo no MTD pra casar com cmvDaily nas tabelas de CMV.
         dbListStockMovements(tid, _mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 }),
         // periodMovements: respeita o filtro de período do header (entradas/saídas KPIs).
-        dbListStockMovements(tid, fromISO, new Date().toISOString(), { limit: 5000 }),
+        dbListStockMovements(tid, fromISO, toISO, { limit: 5000 }),
         dbListDreCategories?.(tid) || { data: null },
         dbListDreSubcategories?.(tid) || { data: null },
         dbListFinanceEntries?.(tid, currentPeriod) || { data: null },
@@ -401,10 +412,11 @@ function estimateCmvFromData(revenue, stock) {
 function computeKpi(scope, dbData = {}, period = "7d") {
   const { revenue = [], revenuePrev = [], stock = [] } = dbData;
   const periodComparisonLabel = {
-    "1d":  "vs ontem",
-    "7d":  "vs semana anterior",
-    "30d": "vs 30 dias anteriores",
-    "mtd": "vs mês anterior",
+    "1d":        "vs ontem",
+    "yesterday": "vs anteontem",
+    "7d":        "vs semana anterior",
+    "30d":       "vs 30 dias anteriores",
+    "mtd":       "vs mês anterior",
   }[period] || "vs período anterior";
 
   // Filtra por operação se não for consolidado
@@ -466,7 +478,7 @@ function computeKpi(scope, dbData = {}, period = "7d") {
 
 // Computa métricas dos novos módulos consolidando dados de DB/MOCK
 function computeDashboardMetrics(scope, period, dbData = {}, dbOnline = false) {
-  const days = period === "1d" ? 1 : period === "7d" ? 7 : period === "30d" ? 30 : 31;
+  const days = period === "1d" ? 1 : period === "yesterday" ? 1 : period === "7d" ? 7 : period === "30d" ? 30 : 31;
   const cutoff = new Date(); cutoff.setHours(0, 0, 0, 0); cutoff.setDate(cutoff.getDate() - days);
   const today = new Date(); today.setHours(0, 0, 0, 0);
 
@@ -948,10 +960,11 @@ function RecentRequestsCard({ setPage, requests = [], dbOnline = false }) {
 function PeriodPicker({ value, onChange, label }) {
   const [open, setOpen] = useState(false);
   const opts = [
-    { id: "1d",  label: "Hoje" },
-    { id: "7d",  label: "Últimos 7 dias" },
-    { id: "30d", label: "Últimos 30 dias" },
-    { id: "mtd", label: "Mês atual" },
+    { id: "1d",        label: "Hoje" },
+    { id: "yesterday", label: "Ontem" },
+    { id: "7d",        label: "Últimos 7 dias" },
+    { id: "30d",       label: "Últimos 30 dias" },
+    { id: "mtd",       label: "Mês atual" },
   ];
   useEffect(() => {
     if (!open) return;
