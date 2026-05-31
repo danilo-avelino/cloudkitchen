@@ -1630,10 +1630,9 @@ function Tabs({ value, onChange, options }) {
 }
 
 function AllocationPanel({ item, onClose }) {
-  const allocs = Object.entries(item.alloc).filter(([, v]) => v > 0);
-  const total = item.qty;
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
   const [movements, setMovements] = useState(null);
+  const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
   const [consumption7d, setConsumption7d] = useState(null);
   const [autoMin, setAutoMin] = useState(item.autoMin === true);
   const [savingAutoMin, setSavingAutoMin] = useState(false);
@@ -1659,7 +1658,7 @@ function AllocationPanel({ item, onClose }) {
   };
 
   useEffect(() => {
-    if (!dbStatus.isOnline || !item.id) { setMovements([]); setConsumption7d({ qty: 0, daily: 0, hasData: false }); return; }
+    if (!dbStatus.isOnline || !item.id) { setMovements([]); setMovements30([]); setConsumption7d({ qty: 0, daily: 0, window: 30, hasData: false }); return; }
     let cancelled = false;
     (async () => {
       const ctx = await dbGetCurrentContext();
@@ -1681,6 +1680,7 @@ function AllocationPanel({ item, onClose }) {
       const total7  = outs7.reduce((s, m) => s + Math.abs(Number(m.delta) || 0), 0);
       const useMonthly = total30 > 0;
       const daily = useMonthly ? (total30 / 30) : (total7 / 7);
+      setMovements30(outs30);
       setConsumption7d({
         qty: useMonthly ? total30 : total7,
         daily,
@@ -1743,64 +1743,96 @@ function AllocationPanel({ item, onClose }) {
         }
       </div>
 
-      {/* Consumo dos últimos 30 dias + média semanal */}
+      {/* Consumo dos últimos 30 dias + média semanal — dados reais de stock_movements */}
       <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--line-soft)" }}>
-        <div className="h-eyebrow" style={{ marginBottom: 10 }}>Consumo · últimos 30 dias</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>30 dias</div>
-            <div className="mono" style={{ fontSize: 22, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.018em" }}>
-              {(item.usage30d || 0).toLocaleString("pt-BR")} {item.unit}
-            </div>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
-              R$ {((item.usage30d || 0) * item.cost).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </div>
-          </div>
-          <div>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>Média semanal</div>
-            <div className="mono" style={{ fontSize: 22, fontWeight: 500, color: "var(--accent-bright)", letterSpacing: "-0.018em" }}>
-              {((item.usage30d || 0) / 4).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} {item.unit}
-            </div>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
-              30 dias ÷ 4
-            </div>
-          </div>
+        <div className="h-eyebrow" style={{ marginBottom: 10 }}>
+          Consumo · {consumption7d == null ? "carregando…" : `últimos ${consumption7d.window} dias`}
         </div>
-        {item.usage30d > 0 && item.qty > 0 && (
-          <div style={{ marginTop: 10, fontSize: 11, color: "var(--fg-2)" }}>
-            Cobertura estimada: <span className="mono" style={{ color: "var(--fg-0)" }}>
-              {Math.round((item.qty / item.usage30d) * 30)} dias
-            </span> com saldo atual.
-          </div>
+        {consumption7d == null ? (
+          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-3)" }}>Carregando…</div>
+        ) : (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                  {consumption7d.window} dias
+                </div>
+                <div className="mono" style={{ fontSize: 22, fontWeight: 500, color: consumption7d.hasData ? "var(--fg-0)" : "var(--fg-3)", letterSpacing: "-0.018em" }}>
+                  {consumption7d.qty.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 3 })} {item.unit}
+                </div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
+                  R$ {(consumption7d.qty * item.cost).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>Média semanal</div>
+                <div className="mono" style={{ fontSize: 22, fontWeight: 500, color: consumption7d.hasData ? "var(--accent-bright)" : "var(--fg-3)", letterSpacing: "-0.018em" }}>
+                  {(consumption7d.daily * 7).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} {item.unit}
+                </div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
+                  média/dia × 7
+                </div>
+              </div>
+            </div>
+            {consumption7d.hasData && item.qty > 0 && (
+              <div style={{ marginTop: 10, fontSize: 11, color: "var(--fg-2)" }}>
+                Cobertura estimada: <span className="mono" style={{ color: "var(--fg-0)" }}>
+                  {consumption7d.daily > 0 ? Math.round(Math.max(0, item.qty) / consumption7d.daily) : "∞"} dias
+                </span> com saldo atual.
+              </div>
+            )}
+            {!consumption7d.hasData && (
+              <div style={{ marginTop: 8, fontSize: 11, color: "var(--fg-3)" }}>
+                Sem saídas registradas nos últimos {consumption7d.window} dias.
+              </div>
+            )}
+          </>
         )}
       </div>
 
       <div style={{ padding: "16px 18px" }}>
-        <div className="h-eyebrow" style={{ marginBottom: 12 }}>Alocação por operação</div>
-        {allocs.length === 0 ? (
-          <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Nenhum consumo nas últimas 24h.</div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {allocs.map(([opId, qty]) => {
-              const op = MOCK.opById(opId);
-              const pct = (qty / total) * 100;
-              return (
-                <div key={opId}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                    <span style={{ width: 6, height: 6, borderRadius: 50, background: op.color }} />
-                    <span style={{ fontSize: 12, color: "var(--fg-0)" }}>{op.name}</span>
-                    <span style={{ flex: 1 }} />
-                    <span className="mono" style={{ fontSize: 11, color: "var(--fg-2)" }}>{qty} {item.unit}</span>
-                    <span className="mono" style={{ fontSize: 11, color: "var(--fg-0)", width: 44, textAlign: "right" }}>{pct.toFixed(1)}%</span>
+        <div className="h-eyebrow" style={{ marginBottom: 12 }}>Consumo por operação · 30 dias</div>
+        {movements30 == null ? (
+          <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Carregando…</div>
+        ) : (() => {
+          // Agrupa saídas dos últimos 30d por operação com dados reais
+          const byOp = new Map();
+          for (const m of movements30) {
+            const key   = m.operationId  || "__shared__";
+            const label = m.operationName || (m.op && m.op !== "—" ? m.op : "Compartilhado");
+            const color = m.operationColor || "var(--fg-3)";
+            if (!byOp.has(key)) byOp.set(key, { label, color, qty: 0 });
+            byOp.get(key).qty += Math.abs(Number(m.delta) || 0);
+          }
+          const entries = Array.from(byOp.values()).filter((e) => e.qty > 0).sort((a, b) => b.qty - a.qty);
+          const totalQty = entries.reduce((s, e) => s + e.qty, 0);
+          if (entries.length === 0) {
+            return <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Sem saídas registradas nos últimos 30 dias.</div>;
+          }
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {entries.map((e) => {
+                const pct = totalQty > 0 ? (e.qty / totalQty) * 100 : 0;
+                return (
+                  <div key={e.label}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <span style={{ width: 6, height: 6, borderRadius: 50, background: e.color }} />
+                      <span style={{ fontSize: 12, color: "var(--fg-0)" }}>{e.label}</span>
+                      <span style={{ flex: 1 }} />
+                      <span className="mono" style={{ fontSize: 11, color: "var(--fg-2)" }}>
+                        {e.qty.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 3 })} {item.unit}
+                      </span>
+                      <span className="mono" style={{ fontSize: 11, color: "var(--fg-0)", width: 44, textAlign: "right" }}>{pct.toFixed(1)}%</span>
+                    </div>
+                    <div className="bar" style={{ height: 3 }}>
+                      <i style={{ width: `${pct}%`, background: e.color }} />
+                    </div>
                   </div>
-                  <div className="bar" style={{ height: 3 }}>
-                    <i style={{ width: `${pct}%`, background: op.color }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+                );
+              })}
+            </div>
+          );
+        })()}
       </div>
 
       <div style={{ padding: "14px 18px", borderTop: "1px solid var(--line-soft)" }}>
