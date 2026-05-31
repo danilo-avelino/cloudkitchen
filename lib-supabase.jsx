@@ -966,8 +966,15 @@ async function dbUpdateKitchenRequestStatus(id, status, userId) {
 
 async function dbDeleteKitchenRequest(id) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
-  const { error } = await _client.from("kitchen_requests").delete().eq("id", id);
-  return { error };
+  // .select() devolve as linhas realmente apagadas · se a RLS filtrar a linha o
+  // delete "passa" sem erro porém com 0 linhas, então tratamos isso como falha em
+  // vez de remover da tela algo que continua no banco.
+  const { data, error } = await _client.from("kitchen_requests").delete().eq("id", id).select("id");
+  if (error) return { error };
+  if (!data || data.length === 0) {
+    return { error: new Error("Sem permissão para excluir esta requisição (ou ela já não existe)") };
+  }
+  return { error: null };
 }
 
 // =====================================================================
