@@ -1011,9 +1011,20 @@ function CategoryAccuracyRow({ cat, accuracy, divergences, items, financialImpac
 function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
   const isResume = !!initial;
   const allCats = useMemo(() => [...new Set(stockItems.map((i) => i.cat))].sort(), [stockItems]);
+
+  // Categorias que têm inventory_enabled=true (ou flag ausente = legado = true)
+  // são pré-selecionadas ao criar um inventário novo.
+  const defaultCats = useMemo(() =>
+    allCats.filter((c) => {
+      const item = stockItems.find((it) => it.cat === c);
+      return item ? item.catInventoryEnabled !== false : true;
+    }),
+    [allCats, stockItems]
+  );
+
   // Em modo "continuar", pula direto pra etapa de contagem e pré-carrega cats/responsável/contagens.
   const [step, setStep] = useState(isResume ? 2 : 1);
-  const [selectedCats, setSelectedCats] = useState(() => initial?.categories || []);
+  const [selectedCats, setSelectedCats] = useState(() => initial?.categories || defaultCats);
   const [responsible,  setResponsible]  = useState(() => initial?.responsible || "");
   const [counts, setCounts] = useState(() => {
     if (!initial) return {};
@@ -1247,9 +1258,13 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
               {allCats.map((c) => {
                 const on = selectedCats.includes(c);
                 const itemsInCat = stockItems.filter((it) => it.cat === c).length;
+                // Categoria desabilitada pra inventário — exibe com estilo apagado
+                // mas ainda permite override manual (clicável).
+                const invDisabled = stockItems.find((it) => it.cat === c)?.catInventoryEnabled === false;
                 return (
                   <button
                     key={c} type="button" onClick={() => toggleCat(c)}
+                    title={invDisabled ? "Categoria desabilitada para inventário · clique para incluir mesmo assim" : undefined}
                     style={{
                       display: "flex", alignItems: "center", gap: 8,
                       padding: "8px 10px", borderRadius: 4, cursor: "pointer",
@@ -1258,6 +1273,7 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
                       color: on ? "var(--fg-0)" : "var(--fg-2)",
                       fontSize: 12, textAlign: "left",
                       transition: "all 120ms ease",
+                      opacity: invDisabled && !on ? 0.45 : 1,
                     }}>
                     <span style={{
                       width: 14, height: 14, borderRadius: 3, flexShrink: 0,
@@ -1268,7 +1284,16 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
                       {on && <I.Check size={10} style={{ color: "var(--accent-fg)" }} />}
                     </span>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div>{c}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        {c}
+                        {invDisabled && (
+                          <span style={{
+                            fontFamily: "var(--mono)", fontSize: 8.5,
+                            color: "var(--fg-3)", letterSpacing: "0.06em",
+                            textTransform: "uppercase",
+                          }}>off</span>
+                        )}
+                      </div>
                       <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
                         {itemsInCat} {itemsInCat === 1 ? "item" : "itens"}
                       </div>

@@ -300,7 +300,7 @@ async function dbDeleteOperationShift(id) {
 // STOCK CATEGORIES · CRUD
 // =====================================================================
 // Campos completos da categoria · inclui as flags de comportamento
-const _STOCK_CATEGORY_FIELDS = "id, name, color, sort_order, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled";
+const _STOCK_CATEGORY_FIELDS = "id, name, color, sort_order, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled";
 
 async function dbListStockCategories(tenantId) {
   return dbOrMock(
@@ -333,7 +333,7 @@ async function dbRenameStockCategory(id, newName) {
 // Para auto_min_max_enabled use `dbSetCategoryAutoMinMax` que cascateia nos itens.
 async function dbUpdateStockCategory(id, patch) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
-  const allowed = ["name", "color", "alerts_enabled", "auto_shopping_enabled", "sort_order"];
+  const allowed = ["name", "color", "alerts_enabled", "auto_shopping_enabled", "inventory_enabled", "sort_order"];
   const body = {};
   for (const k of allowed) if (patch[k] !== undefined) body[k] = patch[k];
   if (Object.keys(body).length === 0) return { data: null, error: new Error("nada a atualizar") };
@@ -435,6 +435,7 @@ function mapStockItemFromDb(row) {
     catAlertsEnabled:       row.category?.alerts_enabled        !== false,
     catAutoShoppingEnabled: row.category?.auto_shopping_enabled !== false,
     catAutoMinMaxEnabled:   row.category?.auto_min_max_enabled  === true,
+    catInventoryEnabled:    row.category?.inventory_enabled     !== false,
     unit:      row.unit,
     cost:      Number(row.unit_cost) || 0,
     qty:       Number(row.current_qty) || 0,
@@ -467,7 +468,7 @@ async function dbListStockItems(tenantId) {
         id, code, name, unit, unit_cost, current_qty, reorder_point,
         max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
         category_id, supplier_id,
-        category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled),
+        category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
         supplier:suppliers(id, name),
         allocations:stock_allocations(qty, operation:operations(id, slug))
       `)
@@ -501,7 +502,7 @@ async function dbInsertStockItem(tenantId, item) {
     id, code, name, unit, unit_cost, current_qty, reorder_point,
     max_qty, expiration_date, compose_cmv, notes, status,
     category_id, supplier_id,
-    category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled),
+    category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
     supplier:suppliers(id, name),
     allocations:stock_allocations(qty, operation:operations(id, slug))
   `).single();
@@ -528,7 +529,7 @@ async function dbUpdateStockItem(id, patch) {
     id, code, name, unit, unit_cost, current_qty, reorder_point,
     max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled,
     category_id, supplier_id,
-    category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled),
+    category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
     supplier:suppliers(id, name),
     allocations:stock_allocations(qty, operation:operations(id, slug))
   `).single();

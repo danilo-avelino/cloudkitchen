@@ -2180,12 +2180,13 @@ function CategoriesView({
             <th style={{ textAlign: "center" }}>Alertas</th>
             <th style={{ textAlign: "center" }}>Min/Máx auto</th>
             <th style={{ textAlign: "center" }}>Lista compras</th>
+            <th style={{ textAlign: "center" }}>Inventário</th>
             <th />
           </tr>
         </thead>
         <tbody>
           {categories.length === 0 ? (
-            <tr><td colSpan={6} className="dim" style={{ textAlign: "center", padding: 24 }}>
+            <tr><td colSpan={7} className="dim" style={{ textAlign: "center", padding: 24 }}>
               Nenhuma categoria cadastrada
             </td></tr>
           ) : categories.map((c) => {
@@ -2196,6 +2197,7 @@ function CategoriesView({
             const alertsOn = dbCat ? dbCat.alerts_enabled !== false : true;
             const autoMmOn = dbCat ? dbCat.auto_min_max_enabled === true : false;
             const autoSpOn = dbCat ? dbCat.auto_shopping_enabled !== false : true;
+            const invOn    = dbCat ? dbCat.inventory_enabled !== false : true;
             return (
               <tr key={c}>
                 <td className="row-strong">{c}</td>
@@ -2203,6 +2205,7 @@ function CategoriesView({
                 <td style={{ textAlign: "center" }}><CategoryFlagBadge on={alertsOn} /></td>
                 <td style={{ textAlign: "center" }}><CategoryFlagBadge on={autoMmOn} /></td>
                 <td style={{ textAlign: "center" }}><CategoryFlagBadge on={autoSpOn} /></td>
+                <td style={{ textAlign: "center" }}><CategoryFlagBadge on={invOn} /></td>
                 <td style={{ width: 1, whiteSpace: "nowrap" }}>
                   <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                     <button className="btn" data-variant="ghost" data-size="sm"
@@ -2276,6 +2279,7 @@ function EditCategoryModal({
   const [alerts,     setAlerts]     = useState(dbCat?.alerts_enabled        !== false);
   const [autoMinMax, setAutoMinMax] = useState(dbCat?.auto_min_max_enabled  === true);
   const [autoShop,   setAutoShop]   = useState(dbCat?.auto_shopping_enabled !== false);
+  const [inventory,  setInventory]  = useState(dbCat?.inventory_enabled     !== false);
   const [saving,     setSaving]     = useState(false);
 
   const flagsAvailable = isDb && !!dbCat?.id;
@@ -2286,10 +2290,12 @@ function EditCategoryModal({
   const initialAlerts     = dbCat?.alerts_enabled        !== false;
   const initialAutoMm     = dbCat?.auto_min_max_enabled  === true;
   const initialAutoShop   = dbCat?.auto_shopping_enabled !== false;
+  const initialInventory  = dbCat?.inventory_enabled     !== false;
   const flagsChanged = flagsAvailable && (
-    alerts !== initialAlerts ||
-    autoMinMax !== initialAutoMm ||
-    autoShop !== initialAutoShop
+    alerts    !== initialAlerts   ||
+    autoMinMax !== initialAutoMm  ||
+    autoShop  !== initialAutoShop ||
+    inventory !== initialInventory
   );
   const canSave = !saving && (nameChanged || flagsChanged);
 
@@ -2304,11 +2310,12 @@ function EditCategoryModal({
       }
       const targetName = nameChanged ? nameTrim : name;
 
-      // 2. Flags simples · alerts + auto_shopping vão num único UPDATE
-      if (flagsAvailable && (alerts !== initialAlerts || autoShop !== initialAutoShop)) {
+      // 2. Flags simples · alerts + auto_shopping + inventory vão num único UPDATE
+      if (flagsAvailable && (alerts !== initialAlerts || autoShop !== initialAutoShop || inventory !== initialInventory)) {
         const ok = await onUpdateFlags(targetName, {
           alerts_enabled: alerts,
           auto_shopping_enabled: autoShop,
+          inventory_enabled: inventory,
         });
         if (!ok) return;
       }
@@ -2383,6 +2390,13 @@ function EditCategoryModal({
           onChange={setAutoShop}
           title="Entrar nas listas de compras automáticas"
           desc="Quando desligado, insumos desta categoria não entram na sugestão automática de lista de compras (mesmo abaixo do mínimo). Útil pra itens sazonais ou comprados sob demanda."
+        />
+        <CategoryToggleRow
+          on={inventory}
+          disabled={!flagsAvailable || saving}
+          onChange={setInventory}
+          title="Participar do inventário"
+          desc="Quando desligado, esta categoria não aparece na seleção de categorias ao criar um novo inventário. Os itens continuam no estoque normalmente — apenas são excluídos do escopo padrão de contagem."
         />
       </div>
     </Modal>
