@@ -750,7 +750,7 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
       }
     >
       {/* Cabeçalho do formulário: operação · data · turno · pedidos */}
-      <div style={{ display: "grid", gridTemplateColumns: requiresShift ? "1.3fr 0.9fr 1fr 0.7fr" : "1.4fr 0.9fr 0.7fr", gap: 12, marginBottom: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: requiresShift ? "minmax(0,1.3fr) minmax(0,0.7fr) minmax(0,1fr) minmax(0,0.7fr)" : "minmax(0,1.4fr) minmax(0,0.7fr) minmax(0,0.7fr)", gap: 12, marginBottom: 16 }}>
         <FormRow label="Operação">
           <select className="select" value={op} onChange={(e) => setOp(e.target.value)}>
             {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
@@ -798,7 +798,7 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
             </select>
           </FormRow>
         )}
-        <FormRow label="Total de pedidos" hint={ordersError ? "Obrigatório · informe ao menos 1 pedido" : null}>
+        <FormRow label="Pedidos" hint={ordersError ? "Obrigatório · informe ao menos 1 pedido" : null}>
           <input
             className="input mono"
             type="number"
