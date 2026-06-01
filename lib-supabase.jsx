@@ -2286,7 +2286,7 @@ function dbSubscribeTable(table, tenantId, callback, event = "*") {
 // =====================================================================
 // SUPERADMIN · CRUD global de tenants (painel /admin)
 // =====================================================================
-// Depende das policies de phase-15-tenant-admin.sql:
+// Depende das policies da migration phase_15_tenant_admin:
 //   profiles.is_superadmin = true → SELECT/INSERT/UPDATE/DELETE em tenants
 //
 // Provisionamento completo (tenant + owner + seeds) continua via edge

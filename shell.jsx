@@ -3,7 +3,7 @@
 
 // Catálogo único de módulos do app — espelha src/App.jsx e page-settings.jsx
 // "saas" é exclusivo do superadmin (gestão multi-tenant da plataforma).
-const APP_MODULES = ["dashboard","stock","recipes","revenue","requests","purchases","cmv","finance","dre","analise-mercado","settings"];
+const APP_MODULES = ["dashboard","stock","recipes","revenue","requests","purchases","cmv","finance","dre","settings"];
 const SUPERADMIN_MODULES = ["saas"];
 
 // Preset padrão por role do banco quando o membro não tem `modules` customizado
@@ -118,7 +118,6 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     { id: "cmv",        label: "CMV & margem",    icon: I.CMV },
     { id: "finance",    label: "Financeiro",      icon: I.Finance, badge: (financeOverdue + financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
     { id: "dre",        label: "DRE & Fechamento", icon: I.Lock },
-    { id: "analise-mercado", label: "Analise de mercado", icon: I.CMV },
     { id: "settings",   label: "Configurações",   icon: I.Settings },
   ].filter((item) => has(item.id));
 
@@ -223,7 +222,6 @@ function Topbar({ page, scope, theme, setTheme, user, onLogout }) {
     cmv: "CMV & margem",
     finance: "Financeiro",
     dre: "DRE & Fechamento",
-    "analise-mercado": "Analise de mercado",
     settings: "Configurações",
   };
   const initials = user?.avatar || user?.name?.split(" ").map((n) => n[0]).slice(0, 2).join("") || "?";

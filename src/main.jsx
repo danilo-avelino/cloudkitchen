@@ -39,8 +39,6 @@ window.SK_CONFIG = {
   supabaseUrl:     import.meta.env.VITE_SUPABASE_URL,
   supabaseAnonKey: import.meta.env.VITE_SUPABASE_ANON_KEY,
   appVersion:      import.meta.env.VITE_APP_VERSION || "dev",
-  marketAnalysisEndpoint: import.meta.env.VITE_MARKET_ANALYSIS_ENDPOINT,
-  marketOpenAiKeyEndpoint: import.meta.env.VITE_MARKET_OPENAI_KEY_ENDPOINT,
 };
 
 if (!window.SK_CONFIG.supabaseUrl || !window.SK_CONFIG.supabaseAnonKey) {
@@ -72,7 +70,6 @@ async function bootstrap() {
   await import("../page-cmv.jsx");
   await import("../page-finance.jsx");
   await import("../page-dre.jsx");
-  await import("../page-analise-mercado.jsx");
   await import("../page-settings.jsx");
 
   const { App } = await import("./App.jsx");

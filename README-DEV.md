@@ -24,13 +24,12 @@ cp .env.example .env.local
 | `npm run build`    | Bundle de produção em `dist/`                          |
 | `npm run preview`  | Serve o bundle de produção localmente                  |
 | `npm run typecheck`| `tsc --noEmit` (gradual · `strict:false` por enquanto) |
-| `npm run serve:legacy` | Server estático antigo (`server.mjs`) com Babel-standalone — só pra fallback durante a migração |
 
 ## Estrutura
 
 ```
 StockKitchen/
-├── index.html              # Entry HTML (substitui o StockKitchen.html legado)
+├── index.html              # Entry HTML do Vite
 ├── src/
 │   ├── main.jsx           # Entry Vite: injeta globais + monta App
 │   └── App.jsx            # Componente raiz
@@ -69,4 +68,4 @@ supabase functions deploy ingest-revenue
 supabase functions deploy compute-cmv-daily
 ```
 
-Ou via MCP (já feito — ver [supabase/DEPLOY-FASE-13.md](supabase/DEPLOY-FASE-13.md)).
+Ou via MCP do Supabase.

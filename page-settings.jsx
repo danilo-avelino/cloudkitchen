@@ -625,7 +625,6 @@ const USER_MODULES = [
   { id: "cmv",       label: "CMV & margem"     },
   { id: "finance",   label: "Financeiro"       },
   { id: "dre",       label: "DRE & Fechamento" },
-  { id: "analise-mercado", label: "Analise de mercado" },
   { id: "settings",  label: "Configurações"    },
 ];
 const ALL_MODULE_IDS = USER_MODULES.map((m) => m.id);
