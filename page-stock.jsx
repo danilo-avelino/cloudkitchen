@@ -1,10 +1,4 @@
 // Stock page — dense table with allocation drill-down
-// Normaliza string p/ busca: minúsculas + sem acentos
-function normalizeSearch(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD").replace(/[̀-ͯ]/g, "");
-}
 
 function Stock({ scope }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
@@ -332,7 +326,7 @@ function Stock({ scope }) {
   // Ordem fixa por urgência: ruptura → baixo → ok. Empate: nome alfabético.
   const STATUS_ORDER = { crit: 0, warn: 1, ok: 2 };
   const filtered = useMemo(() => {
-    const q = normalizeSearch(search.trim());
+    const q = search.trim();
     // Filtro "hidden" troca a fonte; nesse modo ignora status e mostra todos
     // os itens das categorias silenciadas — o ponto é justamente revisá-los.
     const source = filter === "hidden" ? hiddenItems : visibleItems;
@@ -341,7 +335,7 @@ function Stock({ scope }) {
         if (filter !== "all" && filter !== "hidden" && i.status !== filter) return false;
         if (cats.length > 0 && !cats.includes(i.cat)) return false;
         if (scope !== "all" && i.alloc[scope] === 0) return false;
-        if (q && !normalizeSearch(i.name).includes(q) && !normalizeSearch(i.id).includes(q)) return false;
+        if (q && !window.fuzzyMatch(i.name, q) && !window.fuzzyMatch(i.id, q)) return false;
         return true;
       })
       .sort((a, b) => {

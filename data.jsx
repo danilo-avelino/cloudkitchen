@@ -821,3 +821,73 @@ window.clearMockData = function clearMockData() {
     window.MOCK.STOCK_BALANCE = { initial: { value: 0 }, final: { value: 0 } };
   }
 };
+
+// =====================================================================
+// Busca tolerante (fuzzy) · compartilhada por Estoque, Financeiro, etc.
+// =====================================================================
+// Normaliza p/ comparação: minúsculas + sem acentos.
+function normalizeSearch(s) {
+  return String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+// Distância de edição Damerau-Levenshtein (OSA) com corte por `max`: além de
+// inserção/remoção/substituição, conta a TROCA de duas letras adjacentes como 1
+// edição — o erro de digitação mais comum ("tomtae" → "tomate"). Aborta cedo
+// quando uma linha inteira já passa de `max`.
+function _editDistance(a, b, max) {
+  const al = a.length, bl = b.length;
+  if (Math.abs(al - bl) > max) return max + 1;
+  const d = [];
+  for (let i = 0; i <= al; i++) { d[i] = new Array(bl + 1); d[i][0] = i; }
+  for (let j = 0; j <= bl; j++) d[0][j] = j;
+  for (let i = 1; i <= al; i++) {
+    let rowMin = Infinity;
+    for (let j = 1; j <= bl; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        v = Math.min(v, d[i - 2][j - 2] + 1); // transposição adjacente
+      }
+      d[i][j] = v;
+      if (v < rowMin) rowMin = v;
+    }
+    if (rowMin > max) return max + 1;
+  }
+  return d[al][bl];
+}
+
+// Tolerância de erros aceitos conforme o tamanho do termo digitado.
+function _searchTol(len) {
+  if (len <= 2) return 0;   // termos curtíssimos: exige exatidão p/ evitar ruído
+  if (len <= 4) return 1;
+  if (len <= 7) return 2;
+  return 3;
+}
+
+// Casa `query` contra `text` aceitando aproximações. Regras (por token da busca):
+//   1. substring exata (comportamento antigo, rápido) → casa;
+//   2. erro de digitação: palavra do texto dentro da tolerância de edição do
+//      token, comparando a palavra inteira OU o prefixo do mesmo tamanho do
+//      token (pega erro no meio/fim de nomes longos).
+// Todos os tokens precisam casar (AND), então buscas com várias palavras seguem
+// restritivas. Ex.: "tomate" casa "tomtae"/"tomats"; "arroz" casa "aroz".
+function fuzzyMatch(text, query) {
+  const t = normalizeSearch(text);
+  const q = normalizeSearch(query).trim();
+  if (!q) return true;
+  if (t.includes(q)) return true;
+  const words = t.split(/[^a-z0-9]+/).filter(Boolean);
+  const tokens = q.split(/\s+/).filter(Boolean);
+  return tokens.every((qt) => {
+    if (t.includes(qt)) return true;
+    const tol = _searchTol(qt.length);
+    if (tol === 0) return false;
+    return words.some((w) =>
+      _editDistance(w, qt, tol) <= tol ||
+      (w.length > qt.length && _editDistance(w.slice(0, qt.length), qt, tol) <= tol)
+    );
+  });
+}
+
+window.normalizeSearch = normalizeSearch;
+window.fuzzyMatch = fuzzyMatch;

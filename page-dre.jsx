@@ -208,7 +208,8 @@ function Dre() {
   const DRE_SUB_COLORS  = window.DRE_SUB_COLORS;
 
   const [tab, setTab] = useState("dre");
-  const [period, setPeriod] = useState("2026-05");
+  const [period, setPeriod] = useState(() => window.currentPeriod());
+  const periodOptions = useMemo(() => window.buildPeriodOptions(12), []);
   const [entries, setEntries] = useState(MOCK.ENTRIES);
   const [categories,    setCategories]    = useState(MOCK.DRE_CATEGORIES);
   const [subcategories, setSubcategories] = useState(MOCK.DRE_SUBCATEGORIES);
@@ -527,9 +528,7 @@ function Dre() {
           <h1 className="h-title">DRE &amp; Fechamento</h1>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <select className="select" value={period} onChange={(e) => setPeriod(e.target.value)}>
-              <option value="2026-04">Abril / 2026</option>
-              <option value="2026-05">Maio / 2026</option>
-              <option value="2026-06">Junho / 2026</option>
+              {periodOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 4,

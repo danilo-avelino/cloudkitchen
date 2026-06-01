@@ -41,6 +41,24 @@ const fmtDate = (iso) => {
 };
 const monthOf = (iso) => iso ? iso.slice(0, 7) : "";
 
+// Competência: mês corrente + N meses anteriores (rótulo pt-BR). Default da página
+// é sempre o mês atual — sem datas fixas que "travam" no passado.
+const _MONTHS_PT = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+const currentPeriod = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+function buildPeriodOptions(count = 12) {
+  const now = new Date();
+  const opts = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    opts.push({ value: ym, label: `${_MONTHS_PT[d.getMonth()]} / ${d.getFullYear()}` });
+  }
+  return opts;
+}
+
 // Urgência de um item do checklist em relação ao vencimento no período selecionado.
 // "overdue" → já passou da data; "soon" → ≤5 dias do vencimento; "none" → ainda longe ou
 // item sem data de vencimento (variáveis). Retorna { level, daysLeft }.
@@ -70,7 +88,8 @@ const DRE_SUB_COLORS = [
 
 function Finance() {
   const [tab, setTab] = useState("entries");
-  const [period, setPeriod] = useState("2026-05");
+  const [period, setPeriod] = useState(() => currentPeriod());
+  const periodOptions = useMemo(() => buildPeriodOptions(12), []);
   const [entries, setEntries] = useState(MOCK.ENTRIES);
   const [categories,    setCategories]    = useState(MOCK.DRE_CATEGORIES);
   const [subcategories, setSubcategories] = useState(MOCK.DRE_SUBCATEGORIES);
@@ -240,9 +259,7 @@ function Finance() {
           <h1 className="h-title">Financeiro</h1>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <select className="select" value={period} onChange={(e) => setPeriod(e.target.value)}>
-              <option value="2026-04">Abril / 2026</option>
-              <option value="2026-05">Maio / 2026</option>
-              <option value="2026-06">Junho / 2026</option>
+              {periodOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 4,
@@ -540,6 +557,7 @@ function FinanceTabs({ tab, setTab, checklist, period }) {
 
 // ---------- Lançamentos ----------
 function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
+  const [search, setSearch] = useState("");
   // Filtra despesas (não-receita) e remove auto-feeds (que são exibidos apenas na DRE)
   const expenseOnly = entries.filter((e) => {
     const sub = findSubcategory(subcategories, e.cat);
@@ -551,6 +569,16 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
   });
   const sorted = [...expenseOnly].sort((a, b) => b.comp.localeCompare(a.comp));
   const total = sorted.reduce((s, e) => s + e.value, 0);
+  // Busca tolerante por descrição, subcategoria ou categoria DRE (aceita typos).
+  // Os indicadores acima permanecem como visão do mês; só as linhas filtram.
+  const q = search.trim();
+  const visible = q
+    ? sorted.filter((e) => {
+        const sub = findSubcategory(subcategories, e.cat);
+        const cat = sub ? findCategory(categories, sub.category) : null;
+        return [e.desc, sub?.name, cat?.name].some((t) => window.fuzzyMatch(t, q));
+      })
+    : sorted;
   return (
     <div>
       <div style={{ display: "flex", padding: "16px 28px", gap: 24, borderBottom: "1px solid var(--line)" }}>
@@ -560,6 +588,14 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
         <SummaryStat label="Pendentes" value={sorted.filter((e) => e.status === "pending").length} tone="warn" />
         <span style={{ flex: 1 }} />
         <SummaryStat label="Total despesas" value={fmt(total)} tone="crit" />
+      </div>
+      <div style={{ padding: "12px 28px", borderBottom: "1px solid var(--line)" }}>
+        <div style={{ position: "relative", maxWidth: 340 }}>
+          <I.Search size={12} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--fg-3)", pointerEvents: "none" }} />
+          <input className="input" value={search} onChange={(e) => setSearch(e.target.value)}
+                 placeholder="Buscar por descrição, subcategoria ou categoria…"
+                 style={{ width: "100%", paddingLeft: 28, fontSize: 12 }} />
+        </div>
       </div>
       <table className="table">
         <thead>
@@ -580,7 +616,12 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
               Sem lançamentos de despesa neste período. Receitas são consolidadas em <span style={{ color: "var(--accent-bright)" }}>Faturamento</span>.
             </td></tr>
           )}
-          {sorted.map((e) => {
+          {sorted.length > 0 && visible.length === 0 && (
+            <tr><td colSpan="8" style={{ padding: "32px", textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
+              Nenhum lançamento encontrado para <strong style={{ color: "var(--fg-1)" }}>“{search.trim()}”</strong>.
+            </td></tr>
+          )}
+          {visible.map((e) => {
             const sub = findSubcategory(subcategories, e.cat);
             const cat = sub ? findCategory(categories, sub.category) : null;
             const tone = e.status === "paid" ? "ok" : e.status === "scheduled" ? "info" : "warn";
@@ -626,10 +667,17 @@ function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, o
   // no render porque no top-of-file ainda é undefined.
   const DreStat = window.DreStat;
   const [filter, setFilter] = useState("pending");
+  const [search, setSearch] = useState("");
 
+  // Busca tolerante por nome do item, fonte do valor ou subcategoria (aceita typos).
+  const q = search.trim();
   const filtered = checklist.filter((c) => {
-    if (filter === "pending") return c.status !== "filled";
-    if (filter === "filled")  return c.status === "filled";
+    if (filter === "pending" && c.status === "filled") return false;
+    if (filter === "filled"  && c.status !== "filled") return false;
+    if (q) {
+      const sub = findSubcategory(subcategories, c.cat);
+      if (![c.label, c.source, sub?.name].some((t) => window.fuzzyMatch(t, q))) return false;
+    }
     return true;
   });
 
@@ -682,6 +730,13 @@ function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, o
             }}>{label} <span style={{ fontFamily: "var(--mono)", color: "var(--fg-3)", marginLeft: 6, fontSize: 10 }}>{count}</span></button>
           );
         })}
+        <span style={{ flex: 1 }} />
+        <div style={{ position: "relative", width: 300 }}>
+          <I.Search size={12} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--fg-3)", pointerEvents: "none" }} />
+          <input className="input" value={search} onChange={(e) => setSearch(e.target.value)}
+                 placeholder="Buscar item, fonte ou subcategoria…"
+                 style={{ width: "100%", paddingLeft: 28, fontSize: 12 }} />
+        </div>
       </div>
 
       {checklist.length === 0 && (
@@ -694,6 +749,14 @@ function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, o
             <strong style={{ color: "var(--accent-bright)" }}> + Adicionar item</strong> no canto superior direito.
             Cada item aparece em todos os meses e fica marcado como preenchido quando você lança o valor real.
           </div>
+        </div>
+      )}
+
+      {checklist.length > 0 && filtered.length === 0 && (
+        <div className="card" style={{ padding: "32px 24px", textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+          {q
+            ? <>Nenhum item encontrado para <strong style={{ color: "var(--fg-1)" }}>“{search.trim()}”</strong>.</>
+            : "Nenhum item neste filtro."}
         </div>
       )}
 
@@ -1066,6 +1129,8 @@ window.fmt              = fmt;
 window.fmtShort         = fmtShort;
 window.fmtDate          = fmtDate;
 window.monthOf          = monthOf;
+window.currentPeriod      = currentPeriod;
+window.buildPeriodOptions = buildPeriodOptions;
 window.findCategory     = findCategory;
 window.findSubcategory  = findSubcategory;
 window.subsByCategory   = subsByCategory;
