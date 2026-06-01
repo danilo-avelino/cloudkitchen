@@ -647,12 +647,14 @@ async function dbListPaymentMethods(tenantId) {
 // REVENUE ENTRIES · faturamento por dia × operação × source
 // =====================================================================
 function mapRevenueFromDb(row) {
-  const breakdown = {};
+  // Campo `methods` (keyed por slug do método) — mesmo shape do MOCK e do que as
+  // views de Faturamento consomem (e.methods[slug]). O join vem como payment_breakdown.
+  const methods = {};
   (row.payment_breakdown || []).forEach((b) => {
     const slug = b.method?.slug;
-    if (slug) breakdown[slug] = Number(b.amount) || 0;
+    if (slug) methods[slug] = Number(b.amount) || 0;
   });
-  const revenue = Object.values(breakdown).reduce((s, v) => s + v, 0);
+  const revenue = Object.values(methods).reduce((s, v) => s + v, 0);
   return {
     id:           row.id,
     op:           row.operation?.slug || row.operation_id,
@@ -666,7 +668,7 @@ function mapRevenueFromDb(row) {
     shiftId:      row.shift_id || null,
     shiftName:    row.shift?.name || null,
     revenue,
-    breakdown,
+    methods,
   };
 }
 
@@ -734,7 +736,7 @@ async function dbInsertRevenueEntry(tenantId, draft) {
     const { error: bErr } = await _client.from("revenue_payment_breakdown").insert(breakdownRows);
     if (bErr) return { data: row, error: bErr };
   }
-  return { data: { ...mapRevenueFromDb(row), breakdown }, error: null };
+  return { data: { ...mapRevenueFromDb(row), methods: breakdown }, error: null };
 }
 
 async function dbUpdateRevenueEntry(id, patch) {
@@ -1859,7 +1861,7 @@ function mapClosingChecklistFromDb(row) {
     formula:    row.formula || "",
     // Mês a partir do qual o item passa a aparecer no checklist (YYYY-MM).
     // Derivado de created_at — itens criados em maio não retroagem pra abril.
-    startPeriod: row.created_at ? String(row.created_at).slice(0, 7) : null,
+    startPeriod: row.created_at ? window.spMonth(row.created_at) : null,
   };
 }
 

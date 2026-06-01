@@ -575,11 +575,11 @@ function Spark({ accent }) {
 }
 
 function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false }) {
-  // CMV real por operação no MTD = COGS (saídas de estoque × custo) ÷ faturamento.
-  // Faturamento vem de cmv_daily; COGS é recalculado aqui a partir de stock_movements
-  // (kind=out) porque revenue_entries.cogs é hoje apenas um placeholder.
-  // Ajustes de inventário (kind=adjust) entram como CUSTO COMPARTILHADO, rateados
-  // proporcionalmente ao faturamento (eles não têm operação atribuída).
+  // CMV real por operação no MTD = COGS ÷ faturamento. Faturamento vem de cmv_daily;
+  // COGS é recalculado aqui a partir de stock_movements porque revenue_entries.cogs é
+  // hoje apenas um placeholder. Mesma fórmula do módulo CMV: consumo = out + loss/
+  // expiration COM operação, excluindo compose_cmv=false; custo compartilhado (ajustes
+  // + desperdício sem operação) rateado proporcionalmente ao faturamento.
   const data = useMemo(() => {
     const m = {};
     for (const row of cmvDaily) {
@@ -587,25 +587,32 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
       if (!m[row.op]) m[row.op] = { op: row.op, revenue: 0, cogs: 0, sharedCogs: 0 };
       m[row.op].revenue += row.revenue || 0;
     }
+    // Consumo por operação: saídas (out) + desperdício COM operação (loss/expiration),
+    // excluindo itens desmarcados do CMV (compose_cmv=false). Mesmo critério do módulo CMV.
     for (const mv of movements) {
-      if (mv.kind !== "out") continue;
+      if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
+      if (mv.composeCmv === false) continue;
       const key = mv.op;
       if (!key || key === "—") continue;
       if (!m[key]) m[key] = { op: key, revenue: 0, cogs: 0, sharedCogs: 0 };
       // delta vem positivo no mapping; custo da saída = |qty| × unit_cost
       m[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
     }
-    // Ajustes: custo líquido (perdas − sobras) rateado por faturamento
-    let adjustNetCost = 0;
+    // Custo compartilhado (sem operação) rateado por faturamento: ajustes de inventário
+    // (perdas − sobras) + desperdício sem operação. Mesmo critério do módulo CMV.
+    let sharedCost = 0;
     for (const mv of movements) {
-      if (mv.kind !== "adjust") continue;
       if (mv.composeCmv === false) continue;
-      adjustNetCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+      if (mv.kind === "adjust") {
+        sharedCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+      } else if ((mv.kind === "loss" || mv.kind === "expiration") && (!mv.op || mv.op === "—")) {
+        sharedCost += Math.abs(Number(mv.delta) || 0) * Number(mv.unitCost || 0);
+      }
     }
     const totalRev = Object.values(m).reduce((s, r) => s + r.revenue, 0);
-    if (totalRev > 0 && adjustNetCost !== 0) {
+    if (totalRev > 0 && sharedCost !== 0) {
       for (const r of Object.values(m)) {
-        const share = adjustNetCost * (r.revenue / totalRev);
+        const share = sharedCost * (r.revenue / totalRev);
         r.cogs       += share;
         r.sharedCogs += share;
       }
@@ -700,11 +707,11 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
 
 function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
   const ranking = useMemo(() => {
-    // Margem de contribuição (R$) = faturamento − custo real das saídas de estoque.
+    // Margem de contribuição (R$) = faturamento − COGS real das saídas de estoque.
     // revenue_entries.cogs é placeholder (zero); o COGS real vem de stock_movements
-    // (kind=out) ponderado pelo unit_cost — mesmo cálculo do CmvByOpCard.
-    // Ajustes de inventário (kind=adjust) entram como custo compartilhado, rateados
-    // proporcionalmente ao faturamento (eles não têm operação atribuída).
+    // ponderado pelo unit_cost — mesma fórmula do CmvByOpCard e do módulo CMV
+    // (out + loss/expiration com operação, excluindo compose_cmv=false; ajustes +
+    // desperdício sem operação rateados pelo faturamento).
     const byOp = {};
     for (const row of cmvDaily) {
       if (!row.op) continue;
@@ -712,23 +719,27 @@ function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
       byOp[row.op].revenue += row.revenue || 0;
     }
     for (const mv of movements) {
-      if (mv.kind !== "out") continue;
+      if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
+      if (mv.composeCmv === false) continue;
       const key = mv.op;
       if (!key || key === "—") continue;
       if (!byOp[key]) byOp[key] = { op: key, revenue: 0, cogs: 0 };
       byOp[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
     }
-    // Ajustes: custo líquido (perdas − sobras) rateado por faturamento
-    let adjustNetCost = 0;
+    // Custo compartilhado (sem operação) rateado por faturamento: ajustes + desperdício sem op.
+    let sharedCost = 0;
     for (const mv of movements) {
-      if (mv.kind !== "adjust") continue;
       if (mv.composeCmv === false) continue;
-      adjustNetCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+      if (mv.kind === "adjust") {
+        sharedCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+      } else if ((mv.kind === "loss" || mv.kind === "expiration") && (!mv.op || mv.op === "—")) {
+        sharedCost += Math.abs(Number(mv.delta) || 0) * Number(mv.unitCost || 0);
+      }
     }
     const totalRev = Object.values(byOp).reduce((s, r) => s + r.revenue, 0);
-    if (totalRev > 0 && adjustNetCost !== 0) {
+    if (totalRev > 0 && sharedCost !== 0) {
       for (const r of Object.values(byOp)) {
-        r.cogs += adjustNetCost * (r.revenue / totalRev);
+        r.cogs += sharedCost * (r.revenue / totalRev);
       }
     }
     return Object.values(byOp)
@@ -818,9 +829,9 @@ function StockByCategoryCard({ stock = [], onClick }) {
     return { arr, totalValue, totalItems: stock.length };
   }, [stock]);
 
-  const top5 = data.arr.slice(0, 5);
-  const max = top5[0]?.val || 1;
-  const palette = ["var(--ok)", "var(--crit)", "var(--fg-3)", "var(--accent-bright)", "var(--warn)"];
+  const top10 = data.arr.slice(0, 10);
+  const max = top10[0]?.val || 1;
+  const palette = ["var(--ok)", "var(--crit)", "var(--fg-3)", "var(--accent-bright)", "var(--warn)", "var(--info)", "#a78bfa", "#f472b6", "#34d399", "#fbbf24"];
 
   const fmtBRL = (v) => `R$ ${(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const valStr = data.totalValue.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -859,13 +870,13 @@ function StockByCategoryCard({ stock = [], onClick }) {
 
       <div style={{ padding: "14px 16px 6px", display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--fg-2)" }}>
         <I.ArrowUp size={11} style={{ color: "var(--ok)" }} />
-        Valor em estoque por categoria (Top 5)
+        Valor em estoque por categoria (Top 10)
       </div>
 
-      <div style={{ padding: "8px 16px 18px", display: "grid", gridTemplateColumns: `repeat(${Math.max(top5.length, 1)}, 1fr)`, gap: 14, alignItems: "end", minHeight: 200 }}>
-        {top5.length === 0 ? (
+      <div style={{ padding: "8px 16px 18px", display: "grid", gridTemplateColumns: `repeat(${Math.max(top10.length, 1)}, 1fr)`, gap: 10, alignItems: "end", minHeight: 200 }}>
+        {top10.length === 0 ? (
           <div style={{ textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>Sem itens cadastrados.</div>
-        ) : top5.map((g, i) => {
+        ) : top10.map((g, i) => {
           const h = max > 0 ? Math.max(8, (g.val / max) * 160) : 8;
           return (
             <div key={g.cat} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>

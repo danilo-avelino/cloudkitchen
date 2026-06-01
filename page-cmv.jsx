@@ -34,6 +34,12 @@ const _fmtBRLc  = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { mini
 const _fmtBRLci = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const _ymd = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
+// Data local de SP (YYYY-MM-DD) a partir de um timestamp ISO. stock_movements.performed_at
+// é timestamptz; sem converter pro fuso de SP, movimentos da noite (ex.: 31/05 22h SP =
+// 01/06 01h UTC) caíam no dia seguinte e divergiam do "Resultado por operação" (que usa
+// limites de busca em horário de SP). Alinha a atribuição de dia ao mesmo fuso.
+const _spDay = (iso) => iso ? new Date(iso).toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" }) : "";
+
 // Calcula intervalo [fromDate, toDate] em YYYY-MM-DD a partir do period.
 function getDateRange(period) {
   const now = new Date();
@@ -74,7 +80,7 @@ function buildDailyRows(revenueEntries, movements) {
     // Desperdício compartilhado (sem op) é tratado fora, rateado pelo faturamento.
     if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
     if (mv.composeCmv === false) continue; // respeita flag "não compõe CMV"
-    const d = String(mv.at || "").slice(0, 10);
+    const d = _spDay(mv.at);
     const op = mv.op;
     if (!d || !op || op === "—") continue;
     const k = key(d, op);
@@ -92,7 +98,7 @@ function excludedImpact(movements, fromDate, toDate) {
   for (const mv of movements) {
     const isCogsKind = mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration";
     if (!isCogsKind || mv.composeCmv !== false) continue;
-    const d = String(mv.at || "").slice(0, 10);
+    const d = _spDay(mv.at);
     if (d < fromDate || d > toDate) continue;
     if (mv.itemId) set.add(mv.itemId);
     total += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
