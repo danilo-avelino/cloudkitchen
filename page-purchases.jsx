@@ -30,7 +30,7 @@ const _isoTimeBR = (iso) => {
   const d = new Date(iso);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
-const _dayKey = (iso) => (iso || "").slice(0, 10); // YYYY-MM-DD
+const _dayKey = (iso) => window.spDay(iso); // YYYY-MM-DD no fuso de SP
 // Parser BR-safe: aceita "8,50", "1.234,56", "8.5" e devolve Number.
 // Sem isso, `Number("8,50")` vira NaN e o unit_cost some antes do stock_movements.
 // Parse "68,31" → 68.31, "68.31" → 68.31, "1.234,56" → 1234.56, "1,234.56" → 1234.56.

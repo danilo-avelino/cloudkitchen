@@ -1027,7 +1027,7 @@ function ClosingValidationCard({ period, required, pendentes, opcionaisPend, pod
               </div>
               <div style={{ fontSize: 12, color: "var(--fg-2)" }}>
                 {jaFechado
-                  ? <>Mês formalmente fechado{closedItem?.closed_at ? <> em {fmtDate(closedItem.closed_at.slice(0, 10))}</> : null}. Reabra para corrigir lançamentos retroativos.</>
+                  ? <>Mês formalmente fechado{closedItem?.closed_at ? <> em {fmtDate(window.spDay(closedItem.closed_at))}</> : null}. Reabra para corrigir lançamentos retroativos.</>
                   : podeFechar
                     ? <>Todos os {totalRequired} impeditivos do checklist estão preenchidos. Você pode marcar o mês como fechado.</>
                     : <>O fechamento está bloqueado até que todos os impeditivos do checklist sejam preenchidos. O checklist está no módulo <strong style={{ color: "var(--fg-0)" }}>Financeiro</strong>.</>}
@@ -1165,7 +1165,7 @@ function ClosedPeriodsList({ closedPeriods, currentPeriod, onSelectPeriod, onReq
                 {c.period.replace("-", "/")}
               </button>
               <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
-                {c.closed_at ? fmtDate(c.closed_at.slice(0, 10)) : ""}
+                {c.closed_at ? fmtDate(window.spDay(c.closed_at)) : ""}
               </span>
               <button type="button" onClick={() => onRequestReopen?.(c.period)}
                       title="Reabrir mês"

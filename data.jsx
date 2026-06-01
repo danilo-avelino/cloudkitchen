@@ -891,3 +891,24 @@ function fuzzyMatch(text, query) {
 
 window.normalizeSearch = normalizeSearch;
 window.fuzzyMatch = fuzzyMatch;
+
+// =====================================================================
+// Fuso horário · dia/mês local de São Paulo a partir de um timestamp
+// =====================================================================
+// Colunas timestamptz (performed_at, finished_at, created_at, closed_at…) chegam
+// em UTC. Fatiar a string ISO (slice 0,10 / 0,7) dá o dia/mês em UTC — registros
+// perto da meia-noite caem no dia/mês errado e divergem dos limites de período,
+// que são calculados no fuso local (SP). Use estes helpers para atribuir
+// dia/mês de calendário a partir de um timestamp. (Campos `date` puros, como
+// business_date/competence_date, NÃO precisam — já são data de calendário.)
+function spDay(iso) {
+  if (!iso) return "";
+  const s = String(iso);
+  // Já é data de calendário (sem horário) → devolve como está. Sem isso,
+  // new Date("2026-05-20") é lido como UTC e converter pra SP voltaria 1 dia.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return new Date(s).toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+}
+function spMonth(iso) { return iso ? spDay(iso).slice(0, 7) : ""; }
+window.spDay = spDay;
+window.spMonth = spMonth;
