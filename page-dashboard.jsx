@@ -912,6 +912,7 @@ function RecentRequestsCard({ setPage, requests = [], dbOnline = false }) {
         ) : recent.map((r, i) => {
           const opSlug = r.op || r.operationId || r.operation?.slug;
           const op = MOCK.opById(opSlug);
+          const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
           const status = r.status || "pending";
           const [lbl, tone] = statusMap[status] || [status, "info"];
           const code = r.code || r.id;
@@ -940,9 +941,9 @@ function RecentRequestsCard({ setPage, requests = [], dbOnline = false }) {
           return (
             <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: i < recent.length - 1 ? "1px solid var(--line-soft)" : "none" }}>
               <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", width: 72, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(code).slice(0, 8)}</span>
-              <span style={{ width: 6, height: 6, borderRadius: 50, background: op?.color || "var(--fg-3)", flexShrink: 0 }} />
+              <span style={{ width: 6, height: 6, borderRadius: 50, background: isShared ? "#94a3b8" : (op?.color || "var(--fg-3)"), flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                <span style={{ fontSize: 12, color: "var(--fg-0)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{op?.name || "Operação"}</span>
+                <span style={{ fontSize: 12, color: "var(--fg-0)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isShared ? "🔗 Uso compartilhado" : (op?.name || "Operação")}</span>
                 <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
                   {itemsCount} {itemsCount === 1 ? "item" : "itens"}{timeLabel ? ` · ${timeLabel}` : ""}
                 </span>
