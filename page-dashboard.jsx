@@ -229,7 +229,7 @@ function Dashboard({ scope, setPage }) {
       {/* KPIs financeiros (linha 1) */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         <KpiCard label={`Faturamento · ${periodLabel}`} data={(k[scope] || k.all).revenue} accent loading={periodLoading} />
-        <KpiCard label="CMV consolidado" data={(k[scope] || k.all).cmv} loading={periodLoading} />
+        <KpiCard label="CMV do estoque" data={(k[scope] || k.all).cmv} loading={periodLoading} />
         <KpiCard label="Valor em estoque" data={(k[scope] || k.all).stockValue}
           onClick={() => setShowStockValueModal(true)}
           title="Ver os 25 insumos mais caros" />
@@ -391,23 +391,6 @@ function StockFlowDetailModal({ direction, periodLabel, movements, onClose }) {
   );
 }
 
-// Calcula CMV real a partir de revenue e stock value
-// CMV = (Custo do Estoque Vendido) / Revenue
-// Estimativa: usa valor em estoque como proxy de COGS
-function estimateCmvFromData(revenue, stock) {
-  const totalRevenue = revenue.reduce((s, r) => s + (r.revenue || 0), 0);
-  if (totalRevenue <= 0) return 0;
-
-  // Estimativa de COGS: média ponderada de % do valor em estoque
-  // (simplificação: assume que 40% do estoque virou venda).
-  // Saldos negativos contam como 0 — vêm de baixa antes de entrada e não
-  // devem reduzir o patrimônio em estoque.
-  const stockValue = stock.reduce((s, it) => s + (Math.max(0, it.qty || 0) * (it.cost || 0)), 0);
-  const estimatedCogs = stockValue * 0.40; // proxy: 40% do estoque = COGS
-
-  return Math.min(99, (estimatedCogs / totalRevenue) * 100);
-}
-
 // Computa KPI financeiro a partir de dados reais (revenue + stock + período anterior)
 function computeKpi(scope, dbData = {}, period = "7d") {
   const { revenue = [], revenuePrev = [], stock = [] } = dbData;
@@ -446,9 +429,16 @@ function computeKpi(scope, dbData = {}, period = "7d") {
   const stockValue = stockFiltered.reduce((s, it) => s + (Math.max(0, it.qty || 0) * (it.cost || 0)), 0);
   const stockSub   = stockValue > 0 ? `${stockFiltered.length} SKUs em estoque` : "sem itens";
 
-  // CMV real + meta da operação
-  const cmvPct  = estimateCmvFromData(revFiltered, stockFiltered);
-  const cmv     = `${cmvPct.toFixed(1)}%`;
+  // CMV do estoque = saídas de estoque (out + perdas + ajuste negativo) ÷ faturamento.
+  // Mesma base do KPI "Saídas de estoque" (stockFlows.saidas).
+  let saidasValue = 0;
+  for (const mv of (dbData.periodMovements || [])) {
+    const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+    if (mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration") saidasValue += value;
+    else if (mv.kind === "adjust" && (mv.delta || 0) < 0) saidasValue += value;
+  }
+  const cmvPct  = totalRevenue > 0 ? (saidasValue / totalRevenue) * 100 : 0;
+  const cmv     = totalRevenue > 0 ? `${cmvPct.toFixed(1)}%` : "—";
   const cmvDelta = cmvPct < 30 ? "up" : cmvPct < 35 ? "info" : cmvPct < 40 ? "warn" : "down";
 
   let cmvGoalTxt, cmvSub;

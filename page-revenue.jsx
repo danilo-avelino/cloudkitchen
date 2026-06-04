@@ -10,20 +10,6 @@ const _isoToBRFull = (iso) => {
   const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})$/);
   return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso);
 };
-const _brToISO = (br) => {
-  const m = String(br || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return null;
-  const [_, d, mo, y] = m;
-  const dt = new Date(`${y}-${mo}-${d}T12:00:00`);
-  if (isNaN(dt.getTime())) return null;
-  return `${y}-${mo}-${d}`;
-};
-const _maskBRDate = (raw) => {
-  const digits = String(raw || "").replace(/\D/g, "").slice(0, 8);
-  if (digits.length <= 2) return digits;
-  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
-  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-};
 const _todayISO    = () => {
   const d = new Date();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -155,8 +141,13 @@ function Revenue({ scope }) {
     if (source === "db" && tenantId) {
       const isUpdate = draft.id && entries.find((e) => e.id === draft.id);
       if (isUpdate) {
+        // Resolve a operação para UUID (draft.op pode vir como slug) e persiste —
+        // sem isso a troca de operação na edição era descartada, deixando shift_id
+        // de uma operação e operation_id de outra (trigger rejeita).
+        const operationId = ops.find((o) => o.id === draft.op || o.slug === draft.op)?.id || draft.op;
         const { error } = await dbUpdateRevenueEntry(draft.id, {
           cogs,
+          operationId,
           ordersCount: orders,
           status:      draft.status,
           date:        draft.date,
@@ -427,8 +418,8 @@ function ByDayView({ entries, methods, onEdit }) {
                   <th style={{ width: "18%" }}>Operação</th>
                   {methods.map((m) => <th key={m.id} className="num" style={{ minWidth: 78 }}>{m.short}</th>)}
                   <th className="num">Pedidos</th>
+                  <th className="num">Ticket médio</th>
                   <th className="num">Total dia</th>
-                  <th>Status</th>
                   <th />
                 </tr>
               </thead>
@@ -440,8 +431,9 @@ function ByDayView({ entries, methods, onEdit }) {
                     <td key={m.id} className="num" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{_fmtBRLShort(byMethod[m.id])}</td>
                   ))}
                   <td className="num" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{dayOrders}</td>
+                  <td className="num" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{dayOrders > 0 ? _fmtBRL(dayTotal / dayOrders) : "—"}</td>
                   <td className="num" style={{ color: "var(--accent-bright)", fontWeight: 500, fontSize: 13 }}>{_fmtBRL(dayTotal)}</td>
-                  <td colSpan="2" />
+                  <td />
                 </tr>
               </tbody>
             </table>
@@ -475,8 +467,8 @@ function EntryRow({ e, methods, onEdit }) {
         </td>
       ))}
       <td className="num">{e.orders}</td>
+      <td className="num" style={{ color: "var(--fg-1)" }}>{e.orders > 0 ? _fmtBRL(e.revenue / e.orders) : "—"}</td>
       <td className="num" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{_fmtBRL(e.revenue)}</td>
-      <td><span className="badge" data-tone={e.status === "confirmed" ? "ok" : "warn"}>{e.status === "confirmed" ? "Conf." : "Pend."}</span></td>
       <td>
         <button className="btn" data-variant="ghost" data-size="sm" style={{ padding: "3px 7px" }}
                 onClick={(ev) => { ev.stopPropagation(); onEdit(e); }} title="Editar">
@@ -634,7 +626,8 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   // Aceita tanto MOCK (orders, methods) quanto DB-mapped (ordersCount, breakdown)
   const initialOrders = initial?.orders ?? initial?.ordersCount ?? "";
   const initialMethods = initial?.methods ?? initial?.breakdown ?? null;
-  const [op,      setOp]      = useState(initial?.op     || defaultOp || ops[0]?.id || "");
+  // Ao lançar (sem initial e sem escopo), começa vazio para forçar a escolha da operação.
+  const [op,      setOp]      = useState(initial?.op     || defaultOp || "");
   const [date,    setDate]    = useState(initial?.date   || _todayISO());
   const [orders,  setOrders]  = useState(initialOrders);
   const [status,  setStatus]  = useState(initial?.status || "confirmed");
@@ -644,8 +637,11 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   const [deleting, setDeleting] = useState(false);
   // Se o usuário mudar op/data depois de confirmar, exigir nova confirmação
   useEffect(() => { setConfirmDup(false); }, [op, date]);
-  // Ao trocar de operação, limpa o turno (turno é por operação)
-  useEffect(() => { if (!initial) setShiftId(""); }, [op]);
+  // Ao trocar de operação, descarta o turno se ele não pertencer à operação selecionada
+  // (turno é por operação). Vale também na edição: trocar a operação invalida o turno antigo.
+  useEffect(() => {
+    setShiftId((cur) => (cur && shifts.some((s) => s.id === cur && s.operation_id === op) ? cur : ""));
+  }, [op]);
   const [methodVals, setMethodVals] = useState(() => {
     const init = {};
     methods.forEach((m) => { init[m.id] = initialMethods?.[m.id] ?? ""; });
@@ -665,6 +661,7 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   const validOrders = Number.isFinite(ordersNum) && ordersNum > 0;
   const valid = op && date && validOrders && total > 0 && !shiftError;
   const ordersError = !validOrders;
+  const opError = !op;
 
   // Detecta lançamento já existente para mesma operação × data × turno
   // (com turnos, almoço e jantar são lançamentos distintos)
@@ -751,11 +748,21 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
     >
       {/* Cabeçalho do formulário: operação · data · turno · pedidos */}
       <div style={{ display: "grid", gridTemplateColumns: requiresShift ? "minmax(0,1.3fr) minmax(0,0.7fr) minmax(0,1fr) minmax(0,0.7fr)" : "minmax(0,1.4fr) minmax(0,0.7fr) minmax(0,0.7fr)", gap: 12, marginBottom: 16 }}>
-        <FormRow label="Operação">
-          <select className="select" value={op} onChange={(e) => setOp(e.target.value)}>
+        <FormRow label="Operação" hint={opError ? "Selecione a operação" : null}>
+          <select
+            className="select"
+            value={op}
+            onChange={(e) => setOp(e.target.value)}
+            style={opError ? {
+              borderColor: "var(--crit)",
+              boxShadow: "0 0 0 1px var(--crit-line) inset",
+              color: "var(--crit)",
+            } : null}
+          >
+            <option value="">— Selecione —</option>
             {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
           </select>
-          {opObj && (
+          {op && opObj && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
               <span style={{ width: 6, height: 6, borderRadius: 50, background: opObj.color }} />
               <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
@@ -764,19 +771,12 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
             </div>
           )}
         </FormRow>
-        <FormRow label="Data" hint="dd/mm/aaaa">
+        <FormRow label="Data">
           <input
             className="input mono"
-            type="text"
-            inputMode="numeric"
-            placeholder="dd/mm/aaaa"
-            maxLength={10}
-            value={_isoToBRFull(date)}
-            onChange={(e) => {
-              const masked = _maskBRDate(e.target.value);
-              const iso = _brToISO(masked);
-              setDate(iso || masked);
-            }}
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
           />
         </FormRow>
         {requiresShift && (

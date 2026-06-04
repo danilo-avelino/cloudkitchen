@@ -1565,7 +1565,6 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
               const checked = splits[o.id] != null;
               const pct = splits[o.id] || 0;
               const value = (totalEst * pct) / 100;
-              const opRevenue = revenueByOp[o.id] || 0;
               return (
                 <div key={o.id} style={{
                   display: "grid",
@@ -1580,16 +1579,9 @@ function NewRequestModal({ defaultOp, onCancel, onSubmit, stockItems = MOCK.STOC
                     onChange={() => toggleSplitOp(o.id)}
                     style={{ accentColor: "var(--accent-bright)" }}
                   />
-                  <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: 50, background: o.color }} />
-                      <span style={{ color: "var(--fg-0)" }}>{o.name}</span>
-                    </span>
-                    <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
-                      Faturamento {opRevenue > 0
-                        ? `R$ ${opRevenue.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
-                        : "—"}
-                    </span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12.5, minWidth: 0 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: 50, background: o.color }} />
+                    <span style={{ color: "var(--fg-0)" }}>{o.name}</span>
                   </span>
                   <div style={{ position: "relative" }}>
                     <input

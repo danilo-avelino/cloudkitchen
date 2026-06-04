@@ -663,6 +663,7 @@ function mapRevenueFromDb(row) {
     source:       row.source,
     status:       row.status,
     ordersCount:  row.orders_count,
+    orders:       row.orders_count,   // alias p/ as views (mesmo shape do MOCK)
     cogs:         Number(row.cogs) || 0,
     notes:        row.notes,
     shiftId:      row.shift_id || null,
@@ -742,6 +743,7 @@ async function dbInsertRevenueEntry(tenantId, draft) {
 async function dbUpdateRevenueEntry(id, patch) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   const update = {};
+  if (patch.operationId !== undefined) update.operation_id = patch.operationId;
   if (patch.cogs !== undefined)        update.cogs = patch.cogs;
   if (patch.ordersCount !== undefined) update.orders_count = patch.ordersCount;
   if (patch.status !== undefined)      update.status = patch.status;
