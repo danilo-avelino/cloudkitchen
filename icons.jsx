@@ -110,6 +110,12 @@ const I = {
       <path d="M9 6 L15 12 L9 18" />
     </Icon>
   ),
+  PanelLeft: (p) => (
+    <Icon {...p}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4 V20" />
+    </Icon>
+  ),
   Plus: (p) => (
     <Icon {...p}>
       <path d="M12 5 V19 M5 12 H19" />

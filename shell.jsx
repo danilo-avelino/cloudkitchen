@@ -197,10 +197,13 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   );
 }
 
-function Topbar({ page, scope, theme, setTheme, user, onLogout }) {
+function Topbar({ page, scope, theme, setTheme, user, onLogout, onSwitchTenant, sidebarCollapsed, onToggleSidebar }) {
   const op = MOCK.opById(scope);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
+  const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
+  const tenantMenuRef = useRef(null);
+  const tenants = Array.isArray(user?.tenants) ? user.tenants : [];
 
   useEffect(() => {
     if (!userMenuOpen) return;
@@ -210,6 +213,15 @@ function Topbar({ page, scope, theme, setTheme, user, onLogout }) {
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [userMenuOpen]);
+
+  useEffect(() => {
+    if (!tenantMenuOpen) return;
+    const onDoc = (e) => {
+      if (tenantMenuRef.current && !tenantMenuRef.current.contains(e.target)) setTenantMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [tenantMenuOpen]);
 
   const titleMap = {
     saas: "Gestão SaaS",
@@ -228,12 +240,71 @@ function Topbar({ page, scope, theme, setTheme, user, onLogout }) {
 
   return (
     <header style={tb.bar}>
+      {onToggleSidebar && (
+        <button
+          style={tb.iconBtn}
+          onClick={onToggleSidebar}
+          title={sidebarCollapsed ? "Mostrar menu lateral" : "Esconder menu lateral"}
+        >
+          <I.PanelLeft size={15} />
+        </button>
+      )}
       <div style={tb.crumbs}>
         <span style={tb.crumbDim}>Cloud Kitchen</span>
         <I.ChevronR size={11} style={{ color: "var(--fg-4)" }} />
         <span style={tb.crumb}>{titleMap[page]}</span>
       </div>
       <div style={tb.spacer} />
+
+      {/* Seletor "Trocar conta" · só aparece p/ usuários com 2+ tenants */}
+      {tenants.length > 1 && (
+        <div ref={tenantMenuRef} style={{ position: "relative" }}>
+          <button style={{
+            ...tb.iconBtn, width: "auto", padding: "4px 10px", gap: 8,
+            display: "flex", alignItems: "center",
+          }} onClick={() => setTenantMenuOpen(!tenantMenuOpen)} title="Trocar conta">
+            <I.Truck size={14} style={{ color: "var(--fg-2)" }} />
+            <span style={{ fontSize: 11.5, color: "var(--fg-1)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {user?.tenantName || "Trocar conta"}
+            </span>
+            <I.Chevron size={12} style={{ color: "var(--fg-3)" }} />
+          </button>
+          {tenantMenuOpen && (
+            <div style={{
+              position: "absolute", top: "calc(100% + 4px)", right: 0,
+              background: "var(--bg-2)", border: "1px solid var(--line-strong)",
+              borderRadius: 4, padding: 6, zIndex: 100, minWidth: 240,
+              boxShadow: "0 8px 24px -8px rgba(0,0,0,0.5)",
+            }}>
+              <div style={{
+                fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)",
+                letterSpacing: "0.12em", textTransform: "uppercase", padding: "4px 8px 6px",
+              }}>Trocar conta</div>
+              {tenants.map((tn) => {
+                const active = tn.id === user?.tenantId;
+                return (
+                  <button key={tn.id}
+                    onClick={() => { setTenantMenuOpen(false); if (!active) onSwitchTenant?.(tn.id); }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8, width: "100%",
+                      padding: "8px 8px", background: active ? "var(--bg-3)" : "transparent",
+                      border: "none", borderRadius: 3, textAlign: "left",
+                      cursor: active ? "default" : "pointer",
+                    }}>
+                    <span style={{ width: 6, height: 6, borderRadius: 50, flexShrink: 0, background: active ? "var(--accent-bright)" : "var(--fg-4)" }} />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: "block", fontSize: 12.5, color: active ? "var(--fg-0)" : "var(--fg-1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tn.name}</span>
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.04em", textTransform: "uppercase" }}>{tn.role}</span>
+                    </span>
+                    {active && <I.Check size={13} style={{ color: "var(--accent-bright)", flexShrink: 0 }} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       <button style={tb.iconBtn} onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Alternar tema">
         {theme === "dark" ? <I.Sun size={15} /> : <I.Moon size={15} />}
       </button>

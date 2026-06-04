@@ -281,7 +281,7 @@ function Finance() {
 
       <div style={{ flex: 1, overflow: "auto" }}>
         {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} onEdit={setEditingEntry} onDelete={setConfirmDeleteEntry} />}
-        {tab === "checklist" && <ChecklistView checklist={checklistForPeriod} categories={categories} subcategories={subcategories} onFill={setFillItem} onEdit={setEditingChecklistItem} onDelete={setConfirmDeleteChecklist} period={period} />}
+        {tab === "checklist" && <ChecklistView checklist={checklistForPeriod} subcategories={subcategories} onFill={setFillItem} onEdit={setEditingChecklistItem} onDelete={setConfirmDeleteChecklist} period={period} />}
       </div>
 
       {draftOpen  && <EntryDraft  categories={categories} subcategories={subcategories} onClose={() => setDraftOpen(false)} onSave={addEntry} period={period} />}
@@ -662,7 +662,7 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
 }
 
 // ---------- Checklist de fechamento ----------
-function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, onDelete, period }) {
+function ChecklistView({ checklist, subcategories, onFill, onEdit, onDelete, period }) {
   // DreStat mora em page-dre.jsx (carregado depois deste arquivo); pegamos via window
   // no render porque no top-of-file ainda é undefined.
   const DreStat = window.DreStat;
@@ -686,15 +686,19 @@ function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, o
   const pendingValue  = checklist.filter((c) => c.status !== "filled").reduce((s, c) => s + (c.expected || 0), 0);
   const progress      = totalRequired > 0 ? (totalFilled / totalRequired) * 100 : 0;
 
-  // Agrupa por categoria DRE. Preferência: categoria pai da subcategoria; fallback
-  // pra categoryId direto (itens sem subcategoria). Nunca silenciar item — se nada
-  // mapear, joga no bucket da primeira categoria pra ficar visível.
+  // Agrupa por data de vencimento (dia do mês). Itens variáveis / sem `due`
+  // caem num bucket final "sem data fixa". Cada box vira um vencimento.
+  const NO_DUE = "__no_due__";
   const grouped = {};
-  categories.forEach((g) => grouped[g.id] = []);
   filtered.forEach((c) => {
-    const sub = findSubcategory(subcategories, c.cat);
-    const catId = sub?.category || c.categoryId || categories[0]?.id;
-    if (grouped[catId]) grouped[catId].push(c);
+    const key = c.due ? String(Math.max(1, Math.min(31, Number(c.due)))) : NO_DUE;
+    (grouped[key] || (grouped[key] = [])).push(c);
+  });
+  // Ordena os boxes: dias 1→31 ascendente, "sem data" sempre por último.
+  const groupKeys = Object.keys(grouped).sort((a, b) => {
+    if (a === NO_DUE) return 1;
+    if (b === NO_DUE) return -1;
+    return Number(a) - Number(b);
   });
 
   return (
@@ -760,16 +764,20 @@ function ChecklistView({ checklist, categories, subcategories, onFill, onEdit, o
         </div>
       )}
 
-      {categories.sort((a, b) => a.order - b.order).map((g) => {
-        const items = grouped[g.id];
+      {groupKeys.map((key) => {
+        const items = grouped[key];
         if (!items || items.length === 0) return null;
         const groupFilled = items.filter((i) => i.status === "filled").length;
         const groupTotal = items.reduce((s, i) => s + (i.actual ?? i.expected ?? 0), 0);
+        const isNoDue = key === NO_DUE;
+        const [yy, mm] = period.split("-");
+        const dd = isNoDue ? null : key.padStart(2, "0");
+        const groupTitle = isNoDue ? "Sem data fixa (variáveis)" : `Vencimento ${dd}/${mm}/${yy}`;
         return (
-          <div key={g.id} className="card">
+          <div key={key} className="card">
             <div className="card-header">
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <h3 className="card-title">{g.name}</h3>
+                <h3 className="card-title">{groupTitle}</h3>
                 <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
                   {groupFilled}/{items.length} preenchidos · {fmt(groupTotal)}
                 </span>

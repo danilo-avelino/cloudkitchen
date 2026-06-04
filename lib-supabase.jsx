@@ -122,8 +122,24 @@ async function dbGetSession() {
   return data?.session || null;
 }
 
+// Tenant ativo · quando um usuário pertence a vários tenants, este override
+// (persistido em localStorage) decide qual `tenant_members` row vira o contexto.
+// Sem override, cai no primeiro membership. Usado pelo seletor "Trocar conta".
+let _activeTenantId = null;
+try { _activeTenantId = localStorage.getItem("stockkitchen.activeTenant.v1") || null; } catch {}
+function dbGetActiveTenant() { return _activeTenantId; }
+function dbSetActiveTenant(id) {
+  _activeTenantId = id || null;
+  try {
+    if (id) localStorage.setItem("stockkitchen.activeTenant.v1", id);
+    else localStorage.removeItem("stockkitchen.activeTenant.v1");
+  } catch {}
+}
+
 // Resolve o profile + tenant_member do usuário atual (após login).
-// Retorna { profile, member, tenant } ou null se algo falhar.
+// Retorna { profile, member, tenant, members, tenants } ou null se algo falhar.
+// `member`/`tenant` refletem o tenant ATIVO (override ou primeiro); `tenants`
+// lista todos os vínculos (id, name, role, modules, ops) p/ o seletor de conta.
 async function dbGetCurrentContext() {
   if (!_client) return null;
   try {
@@ -144,7 +160,30 @@ async function dbGetCurrentContext() {
         members = full.data;
       }
     }
-    const member = members?.[0] || null;
+    // Membership ativo: respeita o override do seletor "Trocar conta" se ele
+    // apontar pra um tenant que o usuário realmente é membro; senão, o primeiro.
+    const member = (() => {
+      if (!members?.length) return null;
+      if (_activeTenantId) {
+        const found = members.find((m) => m.tenant_id === _activeTenantId);
+        if (found) return found;
+      }
+      return members[0];
+    })();
+    // Nomes de todos os tenants do usuário, p/ o seletor de conta na topbar.
+    let tenants = [];
+    if (members?.length) {
+      const ids = members.map((m) => m.tenant_id);
+      const { data: ts } = await _client.from("tenants").select("id, name").in("id", ids);
+      const nameById = Object.fromEntries((ts || []).map((t) => [t.id, t.name]));
+      tenants = members.map((m) => ({
+        id: m.tenant_id,
+        name: nameById[m.tenant_id] || "Tenant",
+        role: m.role,
+        modules: Array.isArray(m.modules) ? m.modules : null,
+        ops: m.ops || [],
+      }));
+    }
     let tenant = null;
     if (member) {
       const { data: t } = await _client.from("tenants").select("*").eq("id", member.tenant_id).maybeSingle();
@@ -167,7 +206,7 @@ async function dbGetCurrentContext() {
         }
       } catch {}
     }
-    return { user, profile, member, tenant };
+    return { user, profile, member, tenant, members, tenants };
   } catch (e) {
     console.warn("dbGetCurrentContext falhou", e);
     return null;
@@ -2434,6 +2473,7 @@ function useSession() {
 Object.assign(window, {
   initSupabase, getSupabaseClient, getDbState, getDbError, isDbOnline, useDbStatus,
   dbOrMock, dbSignIn, dbSignOut, dbGetSession, dbGetCurrentContext, dbResetPassword, dbUpdatePassword,
+  dbGetActiveTenant, dbSetActiveTenant,
   dbListOperations, dbInsertOperation, dbUpdateOperation, dbDeleteOperation,
   dbListOperationShifts, dbInsertOperationShift, dbUpdateOperationShift, dbDeleteOperationShift,
   dbListRecipeCategories, dbInsertRecipeCategory,

@@ -65,6 +65,29 @@ export function App() {
     setScope("all");
   };
 
+  // Troca o tenant ativo (usuários com acesso a mais de um). Atualiza a sessão
+  // persistida com o role/módulos/nome do tenant escolhido e recarrega — assim
+  // todas as páginas re-resolvem o contexto do zero via dbGetCurrentContext.
+  const handleSwitchTenant = (tenantId) => {
+    const t = (user?.tenants || []).find((x) => x.id === tenantId);
+    if (!t || tenantId === user?.tenantId) return;
+    window.dbSetActiveTenant?.(tenantId);
+    const updated = {
+      ...user,
+      tenantId: t.id,
+      tenantName: t.name,
+      role: user.isSuperadmin ? user.role : t.role,
+      modules: t.modules ?? null,
+      ops: t.ops || [],
+    };
+    try {
+      localStorage.setItem("stockkitchen.session.v1", JSON.stringify({
+        ...updated, loggedAt: new Date().toISOString(),
+      }));
+    } catch {}
+    window.location.reload();
+  };
+
   if (!user) {
     return (
       <>
@@ -78,10 +101,11 @@ export function App() {
     t={t} setTweak={setTweak} scope={scope} setScope={setScope}
     page={page} setPage={setPage} opMenuOpen={opMenuOpen} setOpMenuOpen={setOpMenuOpen}
     toasts={toasts} setToasts={setToasts} user={user} onLogout={handleLogout}
+    onSwitchTenant={handleSwitchTenant}
   />;
 }
 
-function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, toasts, setToasts, user, onLogout }) {
+function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, toasts, setToasts, user, onLogout, onSwitchTenant }) {
   useEffect(() => {
     if (!user?.name) return;
     const id = Date.now();
@@ -93,13 +117,25 @@ function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, set
 
   const setTheme = (v) => setTweak("theme", v);
 
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("sk_sidebar_collapsed") === "1"; } catch { return false; }
+  });
+  const toggleSidebar = () => setSidebarCollapsed((c) => {
+    const next = !c;
+    try { localStorage.setItem("sk_sidebar_collapsed", next ? "1" : "0"); } catch {}
+    return next;
+  });
+
   return (
     <div data-screen-label={`page-${page}`} style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--bg-0)" }}>
-      <Sidebar scope={scope} setScope={setScope} page={page} setPage={setPage} opMenuOpen={opMenuOpen} setOpMenuOpen={setOpMenuOpen} user={user} />
+      {!sidebarCollapsed && (
+        <Sidebar scope={scope} setScope={setScope} page={page} setPage={setPage} opMenuOpen={opMenuOpen} setOpMenuOpen={setOpMenuOpen} user={user} />
+      )}
 
       <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         <Topbar page={page} scope={scope} theme={t.theme} setTheme={setTheme}
-                user={user} onLogout={onLogout} />
+                user={user} onLogout={onLogout} onSwitchTenant={onSwitchTenant}
+                sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} />
 
         <div key={`${page}-${scope}`} style={{ flex: 1, overflow: "auto", background: "var(--bg-0)", animation: "fadeUp 220ms ease both" }}>
           {page === "saas"      && <SuperAdmin user={user} onLogout={onLogout} embedded />}

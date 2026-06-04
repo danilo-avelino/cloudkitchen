@@ -1,0 +1,250 @@
+## BEBIDAS
+- Água com Gás - 12 und | Und | R$11,40
+- Água sem Gás - 12 und | Und | R$6,25
+- Cajuína - caixa | Und | R$78,36
+- Coca Cola Original - 12 und | Und | R$40,85
+- Coca Cola Zero - 6 und | Und | R$20,00
+- Fanta Uva - 6 und | Und | R$17,39
+- Gelo | Und | R$1,73
+- Guarana Antarctica - 12 und | Und | R$33,00
+- Guarana Zero - 12 und | Und | R$33,75
+- Lemon Fresh - 12 und | Und | R$46,22
+- Pepsi Black - 12 und | Und | R$32,87
+- Schweppes Citrus | Und | R$17,25
+- Soda Limonada - 12 und | Und | R$32,67
+- Spaten Long Neck 355ml - 24 und | Und | R$120,28
+- Sprite Zero | Und | R$11,63
+- Sukita - 12 und | Und | R$27,50
+
+## PROTEINAS - BOVINAS
+- Alcatra | Kg | R$46,24
+- Capa de Filé | Kg | R$28,92
+- Carne Moida | Kg | R$30,53
+- Contra Filé | Kg | R$39,63
+- Cordão de Filé | Kg | R$26,57
+- Coxão Duro | Kg | R$36,54
+- Cupim | Kg | R$36,88
+- Fraldinha | Kg | R$32,86
+- Língua de Boi | Kg | R$15,35
+- Maminha | Kg | R$46,79
+- Panelada | Kg | R$20,00
+
+## CARNE SUÍNA
+- Bisteca Suína | Kg | R$21,90
+- Costela Suína | Kg | R$23,65
+- Linguiça Toscana (5kg) | Und | R$104,48
+- Lombo Suíno | Kg | R$23,76
+
+## CORDEIRO
+- Cordeiro Desossada | Kg | R$45,15
+- Guisado de Cordeiro | Kg | R$25,86
+- Paleta Desossada | Kg | R$52,90
+
+## DESCARTÁVEIS E EMBALAGENS
+- Açucar Sachê - Caixa | Und | R$36,00
+- Copo de Isopor | Und | R$2,93
+- Guardanapo Sachê | Und | R$151,25
+- Marmita Isopor pacote | Und | R$35,63
+- Palito Dental (CX-1000) | Und | R$17,15
+- Papel Toalha | Und | R$7,23
+- Plástico Filme | Und | R$11,45
+- Saco Picotado | Und | R$19,53
+- Saco Talher (CX-1000) | Und | R$39,19
+- Sachê de Sal caixa | Und | R$7,75
+- Touca Descartável | Und | R$14,12
+
+## FRANGO
+- Asa de Frango | Kg | R$19,50
+- Coração de Frango | Kg | R$26,11
+- Coxa s/ Coxa | Kg | R$9,99
+- File p/ de Frango | Kg | R$14,73
+- Galinha | Und | R$15,48
+- Galo | Kg | R$8,78
+- Sobrecoxa de Frango | Kg | R$11,90
+- Sobrecoxa Desossada | Kg | R$15,64
+
+## HORTIFRUTI
+- Abacaxi | Und | R$5,59
+- Abobora | Kg | R$2,98
+- Abobrinha | Kg | R$3,83
+- Acelga | Und | R$7,17
+- Alecrim | Und | R$8,36
+- Alface Americano | Und | R$4,46
+- Alface Crespa | Und | R$3,76
+- Alface Roxa | Und | R$3,98
+- Alho | Kg | R$23,76
+- Alho Poró | Und | R$2,99
+- Asplenium | Und | R$17,49
+- Banana | Kg | R$4,44
+- Batata Doce | Kg | R$3,01
+- Batata Inglesa | Kg | R$8,07
+- Berinjela | Kg | R$4,18
+- Beterraba | Kg | R$6,76
+- Brócolis | Und | R$7,72
+- Cebola Branca | Kg | R$6,66
+- Cebola Roxa | Kg | R$7,92
+- Cebolinha | Und | R$1,77
+- Cenoura | Kg | R$8,72
+- Cheiro Verde | Und | R$2,24
+- Chuchu | Kg | R$2,87
+- Coentro | Und | R$1,77
+- Couve Flor | Und | R$7,44
+- Couve Folha | Und | R$1,69
+- Desinfetante de Hortifrutícolas | Und | R$5,26
+- Espinafre | Und | R$1,41
+- Gengibre | Kg | R$18,90
+- Grão de Bico | Und | R$14,11
+- Laranja Pera | Kg | R$2,55
+- Limão | Kg | R$3,78
+- Maçã | Kg | R$8,21
+- Mandioca | Kg | R$4,89
+- Manga | Kg | R$5,54
+- Maracujá | Kg | R$10,90
+- Melancia | Kg | R$2,34
+- Melão | Kg | R$6,45
+- Morango | Und | R$11,59
+- Pepino | Kg | R$3,30
+- Pimenta de Cheiro | Kg | R$10,27
+- Pimenta Dedo de Moça | Kg | R$23,16
+- Pimentão Amarelo | Kg | R$29,09
+- Pimentão Verde | Kg | R$8,32
+- Pimentão Vermelho | Kg | R$28,95
+- Pimentinha de Cheiro | Kg | R$10,46
+- Quiabo | Kg | R$3,61
+- Rabanete | Und | R$4,15
+- Repolho Roxo | Kg | R$7,86
+- Repolho Verde | Kg | R$7,16
+- Rúcula | Und | R$1,63
+- Salsinha | Und | R$1,49
+- Tomate | Kg | R$9,00
+- Tomate Cereja | Und | R$7,52
+- Uva | Kg | R$13,75
+- Uva Passa | Kg | R$78,36
+- Vagem | Kg | R$10,31
+
+## INSUMOS
+- Achocolatado Nescau | Und | R$25,65
+- Açúcar Cristal (1kg) | Und | R$3,57
+- Amaciante p/ Carnes (1kg) | Und | R$19,97
+- Amido de Milho (1kg) | Und | R$9,49
+- Arroz Branco (1kg) | Und | R$3,90
+- Arroz Branco (5kg) | Und | R$17,79
+- Arroz Integral | Und | R$4,20
+- Azeite de Dendê (900ml) | Und | R$18,90
+- Azeite de Oliva | Und | R$32,76
+- Azeitona | Kg | R$12,32
+- Barra de Chocolate | Und | R$32,37
+- Biscoito Maizena | Und | R$5,39
+- Cacau em Pó | Und | R$16,69
+- Caldo de Carne (850g) | Und | R$19,49
+- Caldo de Galinha (1kg) | Und | R$23,26
+- Canela em Pó | Und | R$9,29
+- Canudo Biodegradavel | Und | R$5,49
+- Cápsula de Café (8g) | Und | R$17,14
+- Chimichurri | Kg | R$21,45
+- Chocolate Granulado | Und | R$2,63
+- Coco Ralado | Und | R$4,38
+- Cominho (50g) | Und | R$5,96
+- Corante (500g) | Und | R$5,49
+- Creme de Leite | Und | R$17,15
+- Curry | Kg | R$14,52
+- Ervilha (1kg) | Und | R$5,88
+- Ervilha 170g | Und | R$2,91
+- Espeto | Und | R$6,19
+- Extrato de Tomate (1.7kg) | Und | R$14,00
+- Farinha Branca (1kg) | Und | R$6,41
+- Farinha de Rosca (1kg) | Und | R$5,35
+- Farinha de Trigo (1kg) | Und | R$7,92
+- Feijão Branco | Und | R$5,15
+- Feijão Carioca | Und | R$6,96
+- Feijão Fraldinho | Und | R$6,67
+- Feijão Preto (1kg) | Und | R$5,41
+- Flocão de Milho (500g) | Und | R$1,50
+- Gelatina | Und | R$7,49
+- Goiabada | Und | R$5,85
+- Ketchup (1kg) | Und | R$9,79
+- Leite Condensado | Und | R$5,82
+- Leite de Coco (2L) | Und | R$13,43
+- Leite de Coco 500ml | Und | R$4,84
+- Leite em Pó | Und | R$5,89
+- Leite Líquido | Und | R$4,79
+- Macarrão Espaguete (400g) | Und | R$3,48
+- Macarrão p/ Lasanha (500g) | Und | R$9,89
+- Macarrão Paganini (500g) | Und | R$29,99
+- Macarrão Parafuso | Und | R$5,45
+- Macarrão Penne | Und | R$4,84
+- Maionese (1kg) | Und | R$12,42
+- Maionese (2,8kg) | Und | R$30,80
+- Manteiga (500g) | Und | R$16,90
+- Massa Pronta | Und | R$9,74
+- Milho Verde (170g) | Und | R$2,91
+- Molho Ceaser - Salada | Und | R$12,61
+- Molho de Queijo - Salada | Und | R$12,77
+- Molho de Tomate (1.7kg) | Und | R$12,52
+- Molho Kenko - Salada | Und | R$9,65
+- Molho Limão - Salada | Und | R$12,77
+- Noz Moscada | Und | R$8,05
+- Oleo de Soja | Und | R$7,10
+- Orégano (200g) | Und | R$23,00
+- Ovos Brancos (UN) | Und | R$12,38
+- Ovos de Codorna | Und | R$9,22
+- Papel Alumínio | Und | R$5,93
+- Pimenta Biquinho (200g) | Und | R$10,15
+- Pimenta do Reino (UN) | Und | R$0,00
+- Sal (1kg) | Und | R$1,34
+- Sal Grosso | Und | R$2,78
+- Sardinha em Lata | Und | R$4,54
+- Tomilho Seco (kg) | Kg | R$96,00
+- Vinagre Álcool (500ml) | Und | R$1,85
+- Vinagre de Maçã | Und | R$5,62
+- Vinho Pergola | Und | R$29,90
+
+## LATICÍNIOS E FRIOS
+- Bacon | Kg | R$22,31
+- Banha Frimesa | Und | R$13,65
+- Batata Frita (2kg) | Und | R$23,50
+- Batata Frita (400g) | Und | R$6,19
+- Jerked (UN) | Und | R$30,10
+- Kit Feijoada | Kg | R$16,28
+- Linguiça Calabresa | Kg | R$23,95
+- Macaxeira Vácuo | Und | R$8,63
+- Mão de Vaca | Kg | R$20,78
+- Margarina (3kg) | Und | R$32,94
+- Orelha | Kg | R$26,69
+- Presunto | Kg | R$26,48
+- Queijo Coalho | Kg | R$43,95
+- Queijo Mussalera | Kg | R$34,54
+- Rabo Salg (400g) | Und | R$20,50
+- Requeijão | Und | R$27,00
+- Toucinho d/ Porco | Kg | R$27,00
+
+## LIMPEZA E HIGIENE
+- Adesivo Pega Mosca (10 und) | Und | R$12,00
+- Água Sanitária | Und | R$2,12
+- Álcool 70% | Und | R$10,30
+- Bombril | Und | R$4,19
+- CIF | Und | R$11,60
+- Desinfetante 2L | Und | R$4,94
+- Desinfetante 5L | Und | R$0,00
+- Detergente (UN) | Und | R$1,28
+- Esponja | Und | R$2,63
+- Limpa Alumínio | Und | R$1,63
+- Limpa Vidros (500ml) | Und | R$4,26
+- Multiuso | Und | R$4,16
+- Palha Brilhaço | Und | R$1,70
+- Papel Higiênico | Und | R$70,00
+- Pote Pleion | Und | R$12,49
+- Sabonete Líquido 5L | Und | R$20,40
+- Saco de Lixo (100L) | Und | R$18,22
+- Saco de Lixo (15L) | Und | R$8,34
+- Saco de Lixo (50L) | Und | R$13,90
+
+## ÓLEOS, MOLHOS E CONDIMENTOS
+- Azeite Composto | Und | R$17,08
+- Barbecue 3.4kg | Und | R$20,95
+- Mostarda (3,2kg) | Und | R$106,35
+- Palmito | Und | R$29,95
+
+## PEIXES E FRUTOS DO MAR
+- Camarão | Kg | R$26,40
+- Filé Tilápia | Kg | R$40,98

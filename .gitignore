@@ -7,6 +7,13 @@ config.local.js
 # MCP config (contém Personal Access Token Supabase)
 .mcp.json
 
+# Credenciais e saída do teste local do iFood
+.env.ifood
+scripts/.ifood-state.json
+scripts/ifood-out.json
+scripts/ifood-events.json
+scripts/ifood-order-*.json
+
 # Node / npm
 node_modules/
 npm-debug.log

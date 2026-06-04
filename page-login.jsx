@@ -105,6 +105,8 @@ function LoginPage({ onLogin }) {
           tenantName: ctx?.tenant?.name || mockUser?.tenantName || null,
           ops: ctx?.member?.ops || [],
           modules: Array.isArray(ctx?.member?.modules) ? ctx.member.modules : null,
+          // Todos os tenants do usuário · alimenta o seletor "Trocar conta".
+          tenants: Array.isArray(ctx?.tenants) ? ctx.tenants : [],
           avatar: mockUser?.avatar || (ctx?.profile?.full_name || "?").split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase(),
           authSource: "supabase",
         };
