@@ -4,10 +4,21 @@
 <meta charset="utf-8" />
 <title>Cloud Kitchen</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/png" href="/icon.png" />
+<link rel="apple-touch-icon" href="/icon.png" />
 <link rel="stylesheet" href="/styles.css" />
+<style>
+  /* Splash de boot — visível enquanto o app carrega (dynamic imports do main.jsx).
+     Fica dentro de #root e é removido automaticamente quando o React monta o App. */
+  #sk-boot { position: fixed; inset: 0; display: grid; place-items: center; background: #07080a; z-index: 9999; }
+  #sk-boot img { width: 96px; height: 96px; object-fit: contain; animation: sk-boot-pulse 1.4s ease-in-out infinite; }
+  @keyframes sk-boot-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.95); } }
+</style>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">
+  <div id="sk-boot"><img src="/icon.png" alt="Cloud Kitchen" /></div>
+</div>
 
 <!-- Desregistra service workers órfãos de outros projetos que rodaram em localhost:5173 -->
 <script>

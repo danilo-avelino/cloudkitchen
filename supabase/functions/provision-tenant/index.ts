@@ -144,17 +144,22 @@ serve(async (req) => {
     }
 
     // 7. Seeds: métodos de pagamento + categorias de estoque
+    // Colunas reais de payment_methods: slug (citext NOT NULL), label (NOT NULL),
+    // short_label, color, sort_order. Espelha o seed canônico de
+    // create_tenant_with_owner (schema.sql) — sem isso o tenant nasce sem métodos
+    // e todo faturamento grava breakdown vazio (revenue = 0).
     const PAYMENT_SEEDS = [
-      { name: "iFood online", kind: "online" },
-      { name: "Rappi online", kind: "online" },
-      { name: "Dinheiro",     kind: "cash" },
-      { name: "Débito",       kind: "debit" },
-      { name: "Crédito",      kind: "credit" },
-      { name: "Pix",          kind: "pix" },
+      { slug: "debito",   label: "Débito",   short_label: "Déb",  color: "#3d6cb0", sort_order: 1 },
+      { slug: "credito",  label: "Crédito",  short_label: "Créd", color: "#6b5fb0", sort_order: 2 },
+      { slug: "voucher",  label: "Voucher",  short_label: "Vchr", color: "#c2843a", sort_order: 3 },
+      { slug: "dinheiro", label: "Dinheiro", short_label: "Din",  color: "#2d8c66", sort_order: 4 },
+      { slug: "pix",      label: "Pix",      short_label: "Pix",  color: "#1aa39e", sort_order: 5 },
+      { slug: "online",   label: "Online",   short_label: "Onl",  color: "#b04545", sort_order: 6 },
     ];
-    await admin
+    const { error: pmErr } = await admin
       .from("payment_methods")
       .insert(PAYMENT_SEEDS.map((m) => ({ ...m, tenant_id: tenant.id, is_active: true })));
+    if (pmErr) console.warn("payment_methods seed falhou:", pmErr.message);
 
     const CAT_SEEDS = ["Carnes", "Hortifruti", "Laticínios", "Secos", "Embalagens", "Descartáveis", "Limpeza", "Outros"];
     await admin

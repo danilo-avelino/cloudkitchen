@@ -662,6 +662,7 @@ async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, sto
     operationColor: m.operation?.color || null,
     lossReason: m.loss_reason || null,
     referenceType: m.reference_type || null,
+    referenceId: m.reference_id || null,
     notes: m.notes || null,
     ref:   m.notes || m.reference_type || "—",
   }));
@@ -2282,6 +2283,29 @@ async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
   return { data: sorted.slice(0, limit), source: "db", error: null };
 }
 
+// Splits de rateio das requisições "Uso compartilhado" para os referenceIds dados.
+// Retorna { [requestId]: [{ op, pct }] } (op = uuid da operação). O CMV usa isso pra
+// ratear o custo compartilhado entre operações no cliente (sem tocar no estoque).
+async function dbListSharedSplits(tenantId, requestIds) {
+  if (!isDbOnline() || !_client) return { data: {}, source: "mock", error: null };
+  const ids = [...new Set((requestIds || []).filter(Boolean))];
+  if (ids.length === 0) return { data: {}, source: "db", error: null };
+  const { data, error } = await _client
+    .from("kitchen_requests")
+    .select("id, splits")
+    .eq("tenant_id", tenantId)
+    .eq("is_shared", true)
+    .in("id", ids);
+  if (error) return { data: {}, source: "mock", error };
+  const map = {};
+  for (const r of data || []) {
+    if (Array.isArray(r.splits) && r.splits.length > 0) {
+      map[r.id] = r.splits.map((s) => ({ op: s.op, pct: Number(s.pct) || 0 }));
+    }
+  }
+  return { data: map, source: "db", error: null };
+}
+
 // =====================================================================
 // STORAGE · upload e URL de evidências (bucket: evidence-photos)
 // Path convention: {tenantId}/{executionId}/{timestamp}_{filename}
@@ -2502,7 +2526,7 @@ Object.assign(window, {
   dbListClosedPeriods, dbClosePeriod, dbReopenPeriod,
   dbInsertDreCategory, dbUpdateDreCategory, dbDeleteDreCategory,
   dbInsertDreSubcategory, dbUpdateDreSubcategory, dbDeleteDreSubcategory,
-  dbListCmvDaily, dbTopConsumedItems,
+  dbListCmvDaily, dbTopConsumedItems, dbListSharedSplits,
   dbUploadEvidence, dbGetSignedUrl,
   dbSubscribeTable,
   getSession, useSession,

@@ -530,17 +530,6 @@ function Dre() {
             <select className="select" value={period} onChange={(e) => setPeriod(e.target.value)}>
               {periodOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-              padding: "2px 7px", borderRadius: 99,
-              color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-              background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-              border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-            }} title={source === "db" ? "Dados do Supabase" : "Modo MOCK"}>
-              <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-              {source === "db" ? "Supabase" : "Mock"}
-            </span>
             {tab === "dre" && (
               <>
                 <button className="btn" data-size="sm" onClick={() => setShowStructure(true)}>

@@ -597,17 +597,6 @@ function PurchasesShell({ tab, setTab, listsCount, onNewAuto, children, source }
         <div>
           <div className="h-eyebrow" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 10 }}>
             Painel central de pedidos e recebimentos
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-              padding: "2px 7px", borderRadius: 99,
-              color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-              background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-              border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-            }}>
-              <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-              {source === "db" ? "Supabase" : "Mock"}
-            </span>
           </div>
           <h1 className="h-title">Compras</h1>
           <p className="h-sub">Pedidos, sugestão automática e recebimentos físicos em um único lugar.</p>

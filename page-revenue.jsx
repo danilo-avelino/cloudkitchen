@@ -215,17 +215,6 @@ function Revenue({ scope }) {
         <div>
           <div className="h-eyebrow" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 10 }}>
             {scope === "all" ? "Consolidado · todas as operações" : `Operação · ${MOCK.opById(scope).name}`}
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-              padding: "2px 7px", borderRadius: 99,
-              color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-              background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-              border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-            }}>
-              <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-              {source === "db" ? "Supabase" : "Mock"}
-            </span>
           </div>
           <h1 className="h-title">Faturamento · {periodLabel}</h1>
           <p className="h-sub">Registre o fechamento de caixa por dia e operação. A receita alimenta a DRE automaticamente.</p>
@@ -288,7 +277,7 @@ function Revenue({ scope }) {
         ) : view === "daily" ? (
           <ByDayView entries={visible} methods={methods} onEdit={setEditing} />
         ) : view === "byop" ? (
-          <ByOpView entries={visible} methods={methods} ops={ops} onEdit={setEditing} />
+          <ByOpView entries={visible} methods={methods} ops={ops} shifts={shifts} />
         ) : (
           <FlatView entries={visible} methods={methods} onEdit={setEditing} />
         )}
@@ -479,8 +468,8 @@ function EntryRow({ e, methods, onEdit }) {
   );
 }
 
-// ===== Por operação =====
-function ByOpView({ entries, methods, ops, onEdit }) {
+// ===== Por operação · consolidado por turno =====
+function ByOpView({ entries, methods, ops, shifts = [] }) {
   const grouped = {};
   entries.forEach((e) => {
     if (!grouped[e.op]) grouped[e.op] = [];
@@ -493,17 +482,33 @@ function ByOpView({ entries, methods, ops, onEdit }) {
         const op = MOCK.opById(opId);
         const total  = arr.reduce((s, e) => s + (e.revenue || 0), 0);
         const orders = arr.reduce((s, e) => s + (e.orders  || 0), 0);
+        const days   = new Set(arr.map((e) => e.date)).size;
         const byMethod = methods.reduce((acc, m) => {
           acc[m.id] = arr.reduce((s, e) => s + (e.methods?.[m.id] || 0), 0);
           return acc;
         }, {});
+
+        // Consolida os lançamentos por turno (ordenados pelo sort_order do turno).
+        const opUuid = arr[0]?.operationId || op?.id;
+        const groups = {};
+        arr.forEach((e) => {
+          const k = e.shiftId || "__none__";
+          (groups[k] = groups[k] || []).push(e);
+        });
+        const shiftRows = [];
+        shifts.filter((s) => s.operation_id === opUuid).forEach((s) => {
+          if (groups[s.id]) { shiftRows.push({ key: s.id, name: s.name, entries: groups[s.id] }); delete groups[s.id]; }
+        });
+        Object.entries(groups).forEach(([k, ents]) => {
+          shiftRows.push({ key: k, name: k === "__none__" ? "Sem turno" : (ents[0].shiftName || "Turno"), entries: ents });
+        });
         return (
           <div key={opId} className="card">
             <div className="card-header" style={{ display: "flex", alignItems: "center", gap: 16 }}>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 50, background: op.color }} />
                 <h3 className="card-title">{op.name}</h3>
-                <span className="card-sub">{arr.length} dias · {orders} pedidos</span>
+                <span className="card-sub">{days} {days === 1 ? "dia" : "dias"} · {orders} pedidos · ticket médio {_fmtBRL(orders > 0 ? total / orders : 0)}</span>
               </span>
               <span style={{ flex: 1 }} />
               <span className="mono" style={{ fontSize: 16, fontWeight: 500, color: "var(--accent-bright)", letterSpacing: "-0.018em" }}>{_fmtBRL(total)}</span>
@@ -537,32 +542,33 @@ function ByOpView({ entries, methods, ops, onEdit }) {
             <table className="table">
               <thead>
                 <tr>
-                  <th style={{ width: 90 }}>Data</th>
+                  <th>Turno</th>
                   {methods.map((m) => <th key={m.id} className="num" style={{ minWidth: 70 }}>{m.short}</th>)}
+                  <th className="num">Dias</th>
                   <th className="num">Pedidos</th>
                   <th className="num">Total</th>
-                  <th />
                 </tr>
               </thead>
               <tbody>
-                {[...arr].sort((a, b) => b.date.localeCompare(a.date)).map((e) => (
-                  <tr key={e.id} style={{ cursor: "pointer" }} onClick={() => onEdit(e)}>
-                    <td className="mono" style={{ fontSize: 11.5, color: "var(--fg-1)" }}>{_isoToBR(e.date)}</td>
-                    {methods.map((m) => (
-                      <td key={m.id} className="num" style={{ color: e.methods?.[m.id] ? "var(--fg-1)" : "var(--fg-4)" }}>
-                        {e.methods?.[m.id] ? _fmtBRLShort(e.methods[m.id]) : "—"}
-                      </td>
-                    ))}
-                    <td className="num">{e.orders}</td>
-                    <td className="num" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{_fmtBRL(e.revenue)}</td>
-                    <td>
-                      <button className="btn" data-variant="ghost" data-size="sm" style={{ padding: "3px 7px" }}
-                              onClick={(ev) => { ev.stopPropagation(); onEdit(e); }}>
-                        <I.More size={12} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {shiftRows.map((row) => {
+                  const rBy     = methods.reduce((acc, m) => { acc[m.id] = row.entries.reduce((s, e) => s + (e.methods?.[m.id] || 0), 0); return acc; }, {});
+                  const rOrders = row.entries.reduce((s, e) => s + (e.orders  || 0), 0);
+                  const rTotal  = row.entries.reduce((s, e) => s + (e.revenue || 0), 0);
+                  const rDays   = new Set(row.entries.map((e) => e.date)).size;
+                  return (
+                    <tr key={row.key}>
+                      <td style={{ fontSize: 12.5, color: "var(--fg-1)" }}>{row.name}</td>
+                      {methods.map((m) => (
+                        <td key={m.id} className="num" style={{ color: rBy[m.id] ? "var(--fg-1)" : "var(--fg-4)" }}>
+                          {rBy[m.id] ? _fmtBRLShort(rBy[m.id]) : "—"}
+                        </td>
+                      ))}
+                      <td className="num mono" style={{ color: "var(--fg-2)" }}>{rDays}</td>
+                      <td className="num">{rOrders}</td>
+                      <td className="num" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{_fmtBRL(rTotal)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

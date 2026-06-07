@@ -474,17 +474,6 @@ function Recipes({ scope }) {
         <div>
           <div className="h-eyebrow" style={{ marginBottom: 6, display: "flex", alignItems: "center", gap: 10 }}>
             {items.length} {labelPlural} · {activeOpLabel} · {activeCatLabel}
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-              padding: "2px 7px", borderRadius: 99,
-              color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-              background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-              border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-            }} title={source === "db" ? `${isPrep ? "Preparos" : "Fichas técnicas"} no Supabase` : "Modo MOCK"}>
-              <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-              {source === "db" ? "Supabase" : "Mock"}
-            </span>
           </div>
           <h1 className="h-title">Fichas técnicas</h1>
         </div>

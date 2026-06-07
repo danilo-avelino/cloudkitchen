@@ -261,17 +261,6 @@ function Finance() {
             <select className="select" value={period} onChange={(e) => setPeriod(e.target.value)}>
               {periodOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-              padding: "2px 7px", borderRadius: 99,
-              color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-              background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-              border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-            }} title={source === "db" ? "Dados do Supabase" : "Modo MOCK"}>
-              <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-              {source === "db" ? "Supabase" : "Mock"}
-            </span>
             {tab === "entries"   && <button className="btn" data-variant="primary" data-size="sm" onClick={() => setDraftOpen(true)}><I.Plus size={13} />Novo lançamento</button>}
             {tab === "checklist" && <button className="btn" data-variant="primary" data-size="sm" onClick={() => setAddingChecklist(true)}><I.Plus size={13} />Adicionar item</button>}
           </div>
@@ -516,7 +505,9 @@ function FinanceTabs({ tab, setTab, checklist, period }) {
     if (u.level === "overdue") overdue++;
     else if (u.level === "soon") soon++;
   }
-  const count = overdue + soon;
+  // Prioriza vencidos: se houver atrasado, o badge mostra só a quantia de vencidos
+  // (vermelho). Sem vencidos, cai para os próximos do vencimento (amarelo).
+  const count = overdue > 0 ? overdue : soon;
   const tone = overdue > 0 ? "crit" : "warn";
   const badgeStyle = tone === "crit"
     ? { background: "var(--crit-soft)", color: "var(--crit)", border: "1px solid var(--crit-line)" }

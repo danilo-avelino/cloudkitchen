@@ -116,7 +116,7 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     { id: "requests",   label: "Requisições",     icon: I.Request,     pulse: pendingReq || null },
     { id: "purchases",  label: "Compras",         icon: I.ShoppingList },
     { id: "cmv",        label: "CMV & margem",    icon: I.CMV },
-    { id: "finance",    label: "Financeiro",      icon: I.Finance, badge: (financeOverdue + financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
+    { id: "finance",    label: "Financeiro",      icon: I.Finance, badge: (financeOverdue || financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
     { id: "dre",        label: "DRE & Fechamento", icon: I.Lock },
     { id: "settings",   label: "Configurações",   icon: I.Settings },
   ].filter((item) => has(item.id));
@@ -130,8 +130,8 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     <aside style={sb.aside}>
       {/* Tenant header */}
       <div style={sb.tenant}>
-        <div style={sb.tenantMark}>
-          <I.Logo size={14} />
+        <div style={{ ...sb.tenantMark, width: 40, height: 40, background: "transparent", border: "none" }}>
+          <img src={import.meta.env.BASE_URL + "icon.png"} alt="" style={{ width: 40, height: 40, objectFit: "contain" }} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
           <div style={sb.tenantName}>{tenantName}</div>

@@ -1495,17 +1495,6 @@ function StockHistoryModal({ onClose }) {
       subtitle={
         <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
           {loading ? "carregando…" : `${filtered.length} ${filtered.length === 1 ? "movimentação" : "movimentações"} · ${periodLabel}`}
-          <span style={{
-            display: "inline-flex", alignItems: "center", gap: 4,
-            fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-            padding: "2px 7px", borderRadius: 99,
-            color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-            background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-            border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-          }}>
-            <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-            {source === "db" ? "Supabase" : "Mock"}
-          </span>
         </span>
       }
       onClose={onClose}
@@ -2660,17 +2649,6 @@ function SuppliersView() {
       <div className="card-header">
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <h3 className="card-title">Fornecedores</h3>
-          <span style={{
-            display: "inline-flex", alignItems: "center", gap: 4,
-            fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-            padding: "2px 7px", borderRadius: 99,
-            color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-            background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-            border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-          }}>
-            <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-            {source === "db" ? "Supabase" : "Mock"}
-          </span>
         </div>
         <button className="btn" data-variant="primary" data-size="sm" onClick={() => setEditing({})}>
           <I.Plus size={13} />Novo fornecedor

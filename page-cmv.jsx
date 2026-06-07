@@ -64,9 +64,18 @@ function getDateRange(period) {
 
 // Agrega revenue_entries (rev/day/op) + stock_movements (cogs/day/op)
 // em rows { date, op, revenue, cogs } prontos para o heatmap/tabela.
-function buildDailyRows(revenueEntries, movements) {
+// `sharedSplits` = { [requestId]: [{ slug, pct }] }: para movimentos de uma requisição
+// "Uso compartilhado", o custo é rateado entre as operações pelos pcts (em vez de cair
+// inteiro na operação primária do movimento). Sem tocar no estoque.
+function buildDailyRows(revenueEntries, movements, sharedSplits = {}) {
   const acc = {};
   const key = (d, op) => `${d}|${op}`;
+  const addCogs = (d, op, cost) => {
+    if (!d || !op || op === "—" || !cost) return;
+    const k = key(d, op);
+    if (!acc[k]) acc[k] = { date: d, op, revenue: 0, cogs: 0 };
+    acc[k].cogs += cost;
+  };
   for (const re of revenueEntries) {
     const d = String(re.date || "").slice(0, 10);
     const op = re.op;
@@ -81,11 +90,15 @@ function buildDailyRows(revenueEntries, movements) {
     if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
     if (mv.composeCmv === false) continue; // respeita flag "não compõe CMV"
     const d = _spDay(mv.at);
-    const op = mv.op;
-    if (!d || !op || op === "—") continue;
-    const k = key(d, op);
-    if (!acc[k]) acc[k] = { date: d, op, revenue: 0, cogs: 0 };
-    acc[k].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+    if (!d) continue;
+    const cost = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+    const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
+    if (splits && splits.length > 0) {
+      const totalPct = splits.reduce((s, x) => s + (x.pct || 0), 0) || 1;
+      for (const sp of splits) addCogs(d, sp.slug, cost * ((sp.pct || 0) / totalPct));
+    } else {
+      addCogs(d, mv.op, cost);
+    }
   }
   return Object.values(acc).sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -106,7 +119,26 @@ function excludedImpact(movements, fromDate, toDate) {
   return { count: set.size, total };
 }
 
+// Consolida consumo por item (out/loss/expiration que compõem CMV) no período,
+// opcionalmente filtrado por operação (slug). Retorna itens ordenados por custo desc,
+// com qty e custo total acumulados. Base da aba "Por item".
+function buildItemRows(movements, opFilter) {
+  const acc = {};
+  for (const mv of movements) {
+    if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
+    if (mv.composeCmv === false) continue;
+    if (opFilter && opFilter !== "all" && mv.op !== opFilter) continue;
+    const id = mv.itemId || mv.item;
+    if (!acc[id]) acc[id] = { id, name: mv.item, unit: mv.unit, category: mv.categoryName, qty: 0, cost: 0 };
+    acc[id].qty  += Math.abs(Number(mv.delta) || 0);
+    acc[id].cost += Math.abs(Number(mv.delta) || 0) * (Number(mv.unitCost) || 0);
+  }
+  return Object.values(acc).sort((a, b) => b.cost - a.cost);
+}
+
 function CMV({ setPage }) {
+  const [view, setView] = useState("consolidado"); // consolidado | items
+  const [opFilter, setOpFilter] = useState("all");  // all | <operation slug>
   const [period, setPeriod] = useState("mtd"); // mtd | today | yesterday | 7d | 30d
   const dbStatus = useDbStatus?.() || { isOnline: false, state: "offline" };
   const [tenantId, setTenantId] = useState(null);
@@ -120,6 +152,9 @@ function CMV({ setPage }) {
   // Heatmap fixo · últimos 7 dias (independe do filtro de período de KPI).
   const [heatRevenue, setHeatRevenue] = useState([]);
   const [heatMovements, setHeatMovements] = useState([]);
+
+  // Splits de rateio das requisições "Uso compartilhado" → { [requestId]: [{op, pct}] }
+  const [sharedSplits, setSharedSplits] = useState({});
 
   useEffect(() => {
     if (dbStatus.state === "checking") return;
@@ -154,21 +189,44 @@ function CMV({ setPage }) {
           : dbListStockMovements?.(tid, heatFromIso, heatToIso, { limit: 10000 }) || { data: [] }),
       ]);
       if (cancelled) return;
+      const movsData = movRes.data || [];
+      const heatMovsData = heatMovRes.data ?? movsData;
+
+      // Splits das requisições compartilhadas que aparecem nos movimentos (KPI + heatmap).
+      const reqIds = [...movsData, ...heatMovsData]
+        .filter((m) => m.referenceType === "kitchen_request" && m.referenceId)
+        .map((m) => m.referenceId);
+      const splitsRes = await dbListSharedSplits?.(tid, reqIds) || { data: {} };
+      if (cancelled) return;
+
       setSource("db");
       setRevenueEntries(revRes.data || []);
-      setMovements(movRes.data || []);
+      setMovements(movsData);
       setTopConsumed(consRes.data || []);
       setHeatRevenue(heatRevRes.data ?? revRes.data ?? []);
-      setHeatMovements(heatMovRes.data ?? movRes.data ?? []);
+      setHeatMovements(heatMovsData);
+      setSharedSplits(splitsRes.data || {});
       setLoading(false);
       setPageLoading(false);
     })();
     return () => { cancelled = true; };
   }, [dbStatus.state, dbStatus.isOnline, period]);
 
+  // Resolve splits (op uuid → slug/name/color) usando as operações carregadas no MOCK.
+  const sharedSplitsResolved = useMemo(() => {
+    const out = {};
+    for (const [reqId, splits] of Object.entries(sharedSplits)) {
+      out[reqId] = splits.map((s) => {
+        const op = MOCK.opById(s.op);
+        return { slug: op?.slug || s.op, name: op?.name || "—", color: op?.color || "var(--fg-3)", pct: s.pct };
+      });
+    }
+    return out;
+  }, [sharedSplits]);
+
   const daily = useMemo(
-    () => buildDailyRows(revenueEntries, movements),
-    [revenueEntries, movements],
+    () => buildDailyRows(revenueEntries, movements, sharedSplitsResolved),
+    [revenueEntries, movements, sharedSplitsResolved],
   );
 
   // Custo líquido dos ajustes de inventário no período (perdas − sobras).
@@ -195,6 +253,54 @@ function CMV({ setPage }) {
     }
     return total;
   }, [movements]);
+
+  // CMV compartilhado por operação · no período de KPI. Combina, por operação:
+  //  1) Uso compartilhado (kitchen_requests) — rateado pelos splits (pct).
+  //  2) Ajustes de inventário (perdas − sobras) + desperdício sem operação — rateados
+  //     por faturamento, igual ao "Resultado por operação" (byOp.cogsAdjust).
+  const sharedCmv = useMemo(() => {
+    const byOpMap = {};
+    const ensure = (slug, name, color) => {
+      if (!byOpMap[slug]) {
+        const op = MOCK.opById(slug);
+        byOpMap[slug] = { slug, name: name || op?.name || "—", color: color || op?.color || "var(--fg-3)", cost: 0 };
+      }
+      return byOpMap[slug];
+    };
+
+    // 1) Uso compartilhado — rateado pelos splits
+    let splitsTotal = 0;
+    for (const mv of movements) {
+      if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
+      if (mv.composeCmv === false) continue;
+      const splits = mv.referenceId ? sharedSplitsResolved[mv.referenceId] : null;
+      if (!splits || splits.length === 0) continue;
+      const cost = Math.abs(Number(mv.delta) || 0) * (Number(mv.unitCost) || 0);
+      if (!cost) continue;
+      splitsTotal += cost;
+      const totalPct = splits.reduce((s, x) => s + (x.pct || 0), 0) || 1;
+      for (const sp of splits) ensure(sp.slug, sp.name, sp.color).cost += cost * ((sp.pct || 0) / totalPct);
+    }
+
+    // 2) Ajustes de inventário + desperdício compartilhado — rateados por faturamento
+    const sharedRevCost = adjustNetCost + wasteSharedCost;
+    const revByOp = {};
+    let totalRev = 0;
+    for (const r of daily) { revByOp[r.op] = (revByOp[r.op] || 0) + r.revenue; totalRev += r.revenue; }
+    if (totalRev > 0 && sharedRevCost !== 0) {
+      for (const [slug, rev] of Object.entries(revByOp)) {
+        if (rev <= 0) continue;
+        ensure(slug).cost += sharedRevCost * (rev / totalRev);
+      }
+    }
+
+    const total = splitsTotal + sharedRevCost;
+    const rows = Object.values(byOpMap)
+      .filter((r) => Math.abs(r.cost) > 0.005)
+      .map((r) => ({ ...r, pct: total !== 0 ? (r.cost / total) * 100 : 0 }))
+      .sort((a, b) => b.cost - a.cost);
+    return { total, rows };
+  }, [movements, sharedSplitsResolved, daily, adjustNetCost, wasteSharedCost]);
 
   // Totais consolidados do período (consumo + ajustes + desperdício como custo compartilhado)
   const totals = useMemo(() => {
@@ -243,9 +349,39 @@ function CMV({ setPage }) {
     })).sort((a, b) => b.cmv - a.cmv);
   }, [daily, adjustNetCost, wasteSharedCost]);
 
+  // Operações disponíveis no período (derivadas dos movimentos) — alimentam o filtro da aba "Por item".
+  const availableOps = useMemo(() => {
+    const seen = new Map();
+    for (const mv of movements) {
+      if (!mv.operationId || mv.op === "—") continue;
+      if (!seen.has(mv.op)) seen.set(mv.op, { slug: mv.op, name: mv.operationName, color: mv.operationColor });
+    }
+    return [...seen.values()].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  }, [movements]);
+
+  // Consolidado de consumo por item, filtrado pela operação selecionada.
+  const itemRows = useMemo(() => buildItemRows(movements, opFilter), [movements, opFilter]);
+  const itemTotalCost = useMemo(() => itemRows.reduce((s, r) => s + r.cost, 0), [itemRows]);
+
+  // CMV % do escopo filtrado (operação) — reusa totais/por operação já computados.
+  const itemScope = useMemo(() => {
+    if (opFilter === "all") {
+      return { cmv: totals.cmv, revenue: totals.revenue, cogs: totals.cogsConsumo, hasData: totals.revenue > 0 || totals.cogsConsumo > 0 };
+    }
+    const o = byOp.find((x) => x.op === opFilter);
+    const cogsConsumo = itemRows.reduce((s, r) => s + r.cost, 0);
+    if (!o) return { cmv: 0, revenue: 0, cogs: cogsConsumo, hasData: cogsConsumo > 0 };
+    return { cmv: o.revenue > 0 ? (cogsConsumo / o.revenue) * 100 : 0, revenue: o.revenue, cogs: cogsConsumo, hasData: o.revenue > 0 || cogsConsumo > 0 };
+  }, [opFilter, totals, byOp, itemRows]);
+
+  // Reseta o filtro de operação se ela some do período (ex.: troca de período).
+  useEffect(() => {
+    if (opFilter !== "all" && !availableOps.some((o) => o.slug === opFilter)) setOpFilter("all");
+  }, [availableOps, opFilter]);
+
   // Heatmap · sempre últimos 7 dias, operações derivadas dos dados
   const heat = useMemo(() => {
-    const rows7 = buildDailyRows(heatRevenue, heatMovements);
+    const rows7 = buildDailyRows(heatRevenue, heatMovements, sharedSplitsResolved);
     const dates = [...new Set(rows7.map((r) => r.date))].sort();
     const ops   = [...new Set(rows7.map((r) => r.op))];
     const dayLabel = (iso) => {
@@ -262,7 +398,7 @@ function CMV({ setPage }) {
       return { op, values };
     });
     return { days: dates.map(dayLabel), rows };
-  }, [heatRevenue, heatMovements]);
+  }, [heatRevenue, heatMovements, sharedSplitsResolved]);
 
   const periodLabel = {
     mtd: "mês atual até hoje",
@@ -309,20 +445,47 @@ function CMV({ setPage }) {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <CmvPeriodTabs value={period} onChange={setPeriod} />
-          <span style={{
-            display: "inline-flex", alignItems: "center", gap: 4,
-            fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-            padding: "2px 7px", borderRadius: 99,
-            color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-            background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-            border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-          }} title={source === "db" ? "CMV calculado em tempo real do Supabase" : (source === "offline" ? "Sem conexão com o banco" : "Carregando…")}>
-            <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-            {source === "db" ? "Supabase" : (source === "loading" ? "Carregando…" : "Offline")}
-          </span>
+          {loading && (
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
+              padding: "3px 9px", borderRadius: 99,
+              color: "var(--accent-bright)", background: "var(--accent-soft)",
+              border: "1px solid var(--accent-line)", whiteSpace: "nowrap",
+            }} title="Buscando dados do período selecionado">
+              <span aria-hidden="true" style={{
+                width: 10, height: 10, borderRadius: "50%",
+                border: "1.5px solid var(--line-strong)", borderTopColor: "var(--accent-bright)",
+                animation: "pl-spin 0.9s linear infinite",
+              }} />
+              Atualizando…
+            </span>
+          )}
         </div>
       </div>
 
+      {/* Conteúdo dependente do período · vira skeleton enquanto recarrega ao trocar o filtro */}
+      {loading ? (
+        <CmvLoadingSkeleton />
+      ) : (
+      <>
+
+      {/* Alterna entre a visão consolidada e o consolidado por item */}
+      <CmvViewTabs value={view} onChange={setView} />
+
+      {view === "items" ? (
+        <CmvItemsView
+          rows={itemRows}
+          totalCost={itemTotalCost}
+          scope={itemScope}
+          availableOps={availableOps}
+          opFilter={opFilter}
+          onOpFilter={setOpFilter}
+          periodLabel={periodLabel}
+          source={source}
+        />
+      ) : (
+      <>
       {/* KPI consolidado */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
         <CmvKpiCard
@@ -435,7 +598,8 @@ function CMV({ setPage }) {
       </div>
 
       {/* Por operação · faturamento × custo × CMV × margem */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12, alignItems: "start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div className="card">
           <div className="card-header">
             <h3 className="card-title">Resultado por operação</h3>
@@ -482,6 +646,9 @@ function CMV({ setPage }) {
           </table>
         </div>
 
+        <CmvSharedBox data={sharedCmv} periodLabel={periodLabel} source={source} />
+        </div>
+
         {/* Top consumos · maior R$ saído do estoque */}
         <div className="card">
           <div className="card-header">
@@ -525,11 +692,48 @@ function CMV({ setPage }) {
           </div>
         </div>
       </div>
+      </>
+      )}
+      </>
+      )}
     </div>
   );
 }
 
 // ===== Sub-components =====
+// Skeleton do conteúdo enquanto recarrega ao trocar o período (mesmo padrão do dashboard:
+// os dados somem e dão lugar a placeholders). O cabeçalho/filtros permanecem visíveis.
+function CmvLoadingSkeleton() {
+  const skel = (w, h, extra) => <div className="skel" style={{ width: w, height: h, ...(extra || {}) }} />;
+  const card = (children) => (
+    <div style={{ padding: 16, background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 6, display: "flex", flexDirection: "column", gap: 12 }}>
+      {children}
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20, animation: "fadeUp 200ms ease both" }}>
+      {skel(180, 32, { borderRadius: 6 })}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="kpi" style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+            {skel(60, 9)}
+            {skel(110, 24)}
+            {skel(80, 9)}
+          </div>
+        ))}
+      </div>
+      {card(<>{skel(140, 12)}{skel("100%", 200, { borderRadius: 4 })}</>)}
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12, alignItems: "start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {card(<>{skel(160, 12)}{Array.from({ length: 4 }).map((_, i) => <div key={i} className="skel" style={{ width: "100%", height: 26, borderRadius: 4 }} />)}</>)}
+          {card(<>{skel(140, 12)}{Array.from({ length: 3 }).map((_, i) => <div key={i} className="skel" style={{ width: "100%", height: 30, borderRadius: 4 }} />)}</>)}
+        </div>
+        {card(<>{skel(140, 12)}{Array.from({ length: 6 }).map((_, i) => <div key={i} className="skel" style={{ width: "100%", height: 30, borderRadius: 4 }} />)}</>)}
+      </div>
+    </div>
+  );
+}
+
 function CmvPeriodTabs({ value, onChange }) {
   const opts = [
     { id: "today",     label: "Hoje" },
@@ -553,6 +757,211 @@ function CmvPeriodTabs({ value, onChange }) {
           }}>{o.label}</button>
         );
       })}
+    </div>
+  );
+}
+
+// Alterna entre a visão consolidada (heatmap + por operação) e o consolidado por item.
+function CmvViewTabs({ value, onChange }) {
+  const opts = [
+    { id: "consolidado", label: "Consolidado" },
+    { id: "items",       label: "Por item" },
+  ];
+  return (
+    <div style={{ display: "inline-flex", padding: 2, background: "var(--bg-2)", borderRadius: 6, border: "1px solid var(--line)", alignSelf: "flex-start" }}>
+      {opts.map((o) => {
+        const active = o.id === value;
+        return (
+          <button key={o.id} onClick={() => onChange(o.id)} style={{
+            padding: "6px 16px", fontSize: 12.5,
+            background: active ? "var(--bg-3)" : "transparent",
+            border: "none", borderRadius: 4, cursor: "pointer",
+            color: active ? "var(--fg-0)" : "var(--fg-2)",
+            fontWeight: active ? 500 : 400,
+            letterSpacing: "-0.005em",
+          }}>{o.label}</button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Box "CMV compartilhado" · quanto cada operação paga do custo de uso compartilhado
+// (rateado pelos splits) e sua participação %. Reflete o período de KPI selecionado.
+function CmvSharedBox({ data, periodLabel, source }) {
+  const rows = data.rows;
+  const max = rows.length > 0 ? rows[0].cost : 0;
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">CMV compartilhado</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+            Uso compartilhado e ajustes de inventário rateados entre operações · {periodLabel}
+          </span>
+        </div>
+        {data.total > 0 && (
+          <span className="mono" style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500 }}>{_fmtBRLc(data.total)}</span>
+        )}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {rows.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+            {source === "db" ? "Sem consumo compartilhado no período" : (source === "loading" ? "Carregando…" : "DB offline")}
+          </div>
+        ) : rows.map((r, i) => {
+          const w = max > 0 ? (r.cost / max) * 100 : 0;
+          return (
+            <div key={r.slug} style={{ padding: "10px 16px", borderBottom: i < rows.length - 1 ? "1px solid var(--line-soft)" : "none" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: 50, background: r.color, flexShrink: 0 }} />
+                  <span style={{ color: "var(--fg-0)", fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</span>
+                </span>
+                <span style={{ display: "inline-flex", alignItems: "baseline", gap: 8, flexShrink: 0 }}>
+                  <span className="mono" style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>{_fmtBRLc(r.cost)}</span>
+                  <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", minWidth: 42, textAlign: "right" }}>{r.pct.toFixed(1)}%</span>
+                </span>
+              </div>
+              <div style={{ position: "relative", height: 6, background: "var(--bg-3)", borderRadius: 4, overflow: "hidden" }}>
+                <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${w}%`, background: r.color }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Aba "Por item" · consolidado de consumo por insumo no período, filtrável por operação.
+// Mostra CMV do escopo, custo consumido e a tabela TOP 10 (% do total + valor R$).
+function CmvItemsView({ rows, totalCost, scope, availableOps, opFilter, onOpFilter, periodLabel, source }) {
+  const top  = rows.slice(0, 10);
+  const rest = rows.slice(10);
+  const restCost  = rest.reduce((s, r) => s + r.cost, 0);
+  const tone = cmvTone(scope.cmv);
+  const maxCost = top.length > 0 ? top[0].cost : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Filtro por operação */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase", marginRight: 2 }}>
+          Operação
+        </span>
+        <div style={{ display: "flex", padding: 2, background: "var(--bg-2)", borderRadius: 4, border: "1px solid var(--line)", flexWrap: "wrap" }}>
+          {[{ slug: "all", name: "Todas", color: null }, ...availableOps].map((o) => {
+            const active = o.slug === opFilter;
+            return (
+              <button key={o.slug} onClick={() => onOpFilter(o.slug)} style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "5px 12px", fontSize: 12,
+                background: active ? "var(--bg-3)" : "transparent",
+                border: "none", borderRadius: 2, cursor: "pointer",
+                color: active ? "var(--fg-0)" : "var(--fg-2)",
+                fontWeight: active ? 500 : 400,
+              }}>
+                {o.color && <span style={{ width: 6, height: 6, borderRadius: 50, background: o.color }} />}
+                {o.name}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* KPIs do escopo filtrado */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+        <CmvKpiCard
+          label="CMV %"
+          value={scope.hasData && scope.revenue > 0 ? `${scope.cmv.toFixed(1)}%` : "—"}
+          sub={scope.revenue > 0 ? tone.label : "sem faturamento"}
+          tone={scope.revenue > 0 ? tone : null}
+          hero
+        />
+        <CmvKpiCard
+          label="Custo consumido"
+          value={_fmtBRLci(totalCost)}
+          sub="saídas × custo unitário"
+        />
+        <CmvKpiCard
+          label="Faturamento"
+          value={scope.revenue > 0 ? _fmtBRLci(scope.revenue) : "—"}
+          sub={opFilter === "all" ? "todas as operações" : "operação selecionada"}
+        />
+        <CmvKpiCard
+          label="Itens consumidos"
+          value={rows.length || "—"}
+          sub={`distintos · ${periodLabel}`}
+        />
+      </div>
+
+      {/* Tabela consolidada por item */}
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h3 className="card-title">Consolidado por item · TOP 10 mais consumidos</h3>
+            <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+              Participação no custo total de consumo · {periodLabel}
+            </span>
+          </div>
+        </div>
+        <table className="table">
+          <thead>
+            <tr>
+              <th style={{ width: 36 }}>#</th>
+              <th>Item</th>
+              <th className="num">Qtd.</th>
+              <th className="num">Valor</th>
+              <th className="num">% do total</th>
+              <th style={{ width: 160 }}>Participação</th>
+            </tr>
+          </thead>
+          <tbody>
+            {top.length === 0 ? (
+              <tr><td colSpan={6} className="dim" style={{ textAlign: "center", padding: 24 }}>
+                {source === "db" ? "Sem consumo no período" : (source === "loading" ? "Carregando…" : "DB offline")}
+              </td></tr>
+            ) : top.map((r, i) => {
+              const pct = totalCost > 0 ? (r.cost / totalCost) * 100 : 0;
+              const w   = maxCost > 0 ? (r.cost / maxCost) * 100 : 0;
+              return (
+                <tr key={r.id}>
+                  <td className="mono" style={{ color: "var(--fg-3)", fontSize: 11.5 }}>{i + 1}</td>
+                  <td>
+                    <div style={{ color: "var(--fg-0)", fontWeight: 500, fontSize: 12.5 }}>{r.name}</div>
+                    {r.category && (
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 2 }}>
+                        {r.category}
+                      </div>
+                    )}
+                  </td>
+                  <td className="num mono" style={{ color: "var(--fg-1)", fontSize: 12 }}>
+                    {(Number(r.qty) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 })} {r.unit}
+                  </td>
+                  <td className="num mono" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{_fmtBRLc(r.cost)}</td>
+                  <td className="num mono" style={{ color: "var(--fg-0)" }}>{pct.toFixed(1)}%</td>
+                  <td>
+                    <div style={{ position: "relative", height: 7, background: "var(--bg-3)", borderRadius: 4, overflow: "hidden", minWidth: 120 }}>
+                      <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${w}%`, background: CMV_SKY }} />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {rest.length > 0 && (
+              <tr>
+                <td className="mono" style={{ color: "var(--fg-3)", fontSize: 11.5 }}>—</td>
+                <td className="dim" style={{ fontSize: 12 }}>+ {rest.length} {rest.length === 1 ? "outro item" : "outros itens"}</td>
+                <td />
+                <td className="num mono dim">{_fmtBRLc(restCost)}</td>
+                <td className="num mono dim">{totalCost > 0 ? ((restCost / totalCost) * 100).toFixed(1) : "0.0"}%</td>
+                <td />
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

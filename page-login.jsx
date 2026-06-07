@@ -172,13 +172,8 @@ function LoginPage({ onLogin }) {
       }}>
         {/* Logo / Header */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
-          <div style={{
-            width: 36, height: 36, borderRadius: 6,
-            background: "linear-gradient(135deg, var(--accent-bright), #1aa39e)",
-            display: "grid", placeItems: "center", color: "#02100a",
-          }}>
-            <I.Logo size={18} />
-          </div>
+          <img src={import.meta.env.BASE_URL + "icon.png"} alt="Cloud Kitchen"
+               style={{ width: 40, height: 40, objectFit: "contain", borderRadius: 8 }} />
           <div>
             <div style={{ fontSize: 17, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.01em" }}>Cloud Kitchen</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>

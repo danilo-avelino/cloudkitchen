@@ -22,14 +22,6 @@ const Icon = ({ d, size = 16, stroke = 1.5, fill, children, style }) => (
 );
 
 const I = {
-  Logo: (p) => (
-    <Icon {...p}>
-      <rect x="3" y="3" width="7" height="7" rx="1" />
-      <rect x="14" y="3" width="7" height="7" rx="1" />
-      <rect x="3" y="14" width="7" height="7" rx="1" />
-      <path d="M14 14 L21 21 M21 14 L14 21" />
-    </Icon>
-  ),
   Dashboard: (p) => (
     <Icon {...p}>
       <rect x="3" y="3" width="8" height="8" rx="1" />

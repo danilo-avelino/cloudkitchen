@@ -153,17 +153,6 @@ function OperationsTab() {
           Pausar uma operação não exclui histórico — apenas oculta da consolidação.
         </p>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{
-            display: "inline-flex", alignItems: "center", gap: 5,
-            fontFamily: "var(--mono)", fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase",
-            padding: "3px 9px", borderRadius: 99,
-            color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-            background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-            border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-          }} title={source === "db" ? `Carregado do Supabase · tenant ${tenantId?.slice(0, 8)}` : "Modo MOCK · operações não persistem"}>
-            <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-            {source === "db" ? "Supabase" : "Mock"}
-          </span>
           <button className="btn" data-variant="primary" data-size="sm" onClick={() => setEditing({ initial: null })}>
             <I.Plus size={13} />Nova operação
           </button>
@@ -554,17 +543,6 @@ function UsersTab() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13 }}>{users.length} usuários ativos</p>
-          <span style={{
-            display: "inline-flex", alignItems: "center", gap: 4,
-            fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase",
-            padding: "2px 7px", borderRadius: 99,
-            color: source === "db" ? "var(--ok)" : "var(--fg-3)",
-            background: source === "db" ? "var(--accent-soft)" : "var(--bg-2)",
-            border: `1px solid ${source === "db" ? "var(--accent-line)" : "var(--line)"}`,
-          }} title={source === "db" ? "Membros do Supabase" : (loadError || "DB offline")}>
-            <span style={{ width: 5, height: 5, borderRadius: 50, background: source === "db" ? "var(--ok)" : "var(--fg-3)" }} />
-            {source === "db" ? "Supabase" : (source === "loading" ? "Carregando…" : "Offline")}
-          </span>
         </div>
         <button className="btn" data-variant="primary" data-size="sm" onClick={() => setEditing({})}>
           <I.Plus size={13} />Convidar usuário
