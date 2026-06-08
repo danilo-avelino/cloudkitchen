@@ -10,10 +10,29 @@ const TWEAK_DEFAULS = /*EDITMODE-BEGIN*/{
   "density": "default"
 }/*EDITMODE-END*/;
 
+// Roteamento por hash (#/faturamento, #/estoque…). Hash evita config de SPA
+// fallback no host — funciona em qualquer estático sem 404 no refresh.
+const PAGE_SLUGS = {
+  dashboard: "dashboard",
+  stock:     "estoque",
+  recipes:   "fichas-tecnicas",
+  revenue:   "faturamento",
+  requests:  "requisicoes",
+  purchases: "compras",
+  cmv:       "cmv",
+  finance:   "financeiro",
+  dre:       "dre",
+  settings:  "configuracoes",
+  saas:      "admin",
+};
+const SLUG_TO_PAGE = Object.fromEntries(Object.entries(PAGE_SLUGS).map(([id, s]) => [s, id]));
+const _hashSlug = () => window.location.hash.replace(/^#\/?/, "").split(/[/?#]/)[0].trim();
+const pageFromHash = () => { try { return SLUG_TO_PAGE[_hashSlug()] || null; } catch { return null; } };
+
 export function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULS);
   const [scope, setScope] = useState("all");
-  const [pageRaw, setPageRaw] = useState("dashboard");
+  const [pageRaw, setPageRaw] = useState(() => pageFromHash() || "dashboard");
   const [opMenuOpen, setOpMenuOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
   // Quando o link de recuperação de senha é aberto (?reset=1), forçamos a tela
@@ -54,9 +73,30 @@ export function App() {
   const allowedPages = typeof getAllowedModules === "function" ? getAllowedModules(user) : ["dashboard"];
   const page = allowedPages.includes(pageRaw) ? pageRaw : (allowedPages[0] || "dashboard");
   const setPage = (next) => {
-    if (allowedPages.includes(next)) { setPageRaw(next); return; }
-    window.showToast?.("Sem acesso a esse módulo. Fale com o admin.", { tone: "warn", ttl: 3500 });
+    if (!allowedPages.includes(next)) {
+      window.showToast?.("Sem acesso a esse módulo. Fale com o admin.", { tone: "warn", ttl: 3500 });
+      return;
+    }
+    setPageRaw(next);
+    const slug = PAGE_SLUGS[next] || next;
+    if (_hashSlug() !== slug) window.location.hash = `/${slug}`; // empurra entrada no histórico (voltar/avançar)
   };
+
+  // URL → estado: back/forward do browser e edição manual da hash.
+  useEffect(() => {
+    const onHash = () => { const id = pageFromHash(); if (id) setPageRaw(id); };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  // Estado → URL: mantém a hash em sincronia com a página efetiva (já passada pelo
+  // gate de acesso). replaceState para não poluir o histórico em auto-correções
+  // (hash vazia no load, slug inválido, ou redirect por falta de módulo).
+  useEffect(() => {
+    if (!user) return;
+    const slug = PAGE_SLUGS[page] || page;
+    if (_hashSlug() !== slug) window.history.replaceState(null, "", `#/${slug}`);
+  }, [page, user]);
 
   const handleLogout = () => {
     clearStoredSession();
