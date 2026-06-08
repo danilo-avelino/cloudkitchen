@@ -429,10 +429,12 @@ function computeKpi(scope, dbData = {}, period = "7d") {
   const stockValue = stockFiltered.reduce((s, it) => s + (Math.max(0, it.qty || 0) * (it.cost || 0)), 0);
   const stockSub   = stockValue > 0 ? `${stockFiltered.length} SKUs em estoque` : "sem itens";
 
-  // CMV do estoque = saídas de estoque (out + perdas + ajuste negativo) ÷ faturamento.
-  // Mesma base do KPI "Saídas de estoque" (stockFlows.saidas).
+  // CMV do estoque = consumo (out/loss/expiration) + ajuste negativo (perda) ÷ faturamento.
+  // Só perdas: sobras de contagem não abatem o CMV. Respeita compose_cmv (insumos marcados
+  // "não compõe CMV", ex.: embalagens, ficam de fora). Alinhado ao CMV & margem.
   let saidasValue = 0;
   for (const mv of (dbData.periodMovements || [])) {
+    if (mv.composeCmv === false) continue;
     const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
     if (mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration") saidasValue += value;
     else if (mv.kind === "adjust" && (mv.delta || 0) < 0) saidasValue += value;

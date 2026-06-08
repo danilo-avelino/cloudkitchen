@@ -1,6 +1,6 @@
 // CMV & margem — real-only.
 // CMV = Σ(saídas de estoque kind=out × custo unitário, ignorando insumos com compose_cmv=false)
-//     + Σ(ajustes de inventário no período × custo unitário, sinal -delta) → custo compartilhado
+//     + Σ(ajustes de inventário no período × custo unitário, só perdas Δ<0) → custo compartilhado
 //     ÷ Σ(faturamento de revenue_entries no período)
 // Agrupado por (data, operação) para alimentar heatmap e tabela por operação.
 // Ajustes de inventário não têm operação, então entram só nos totais/byOp (rateio por
@@ -229,16 +229,18 @@ function CMV({ setPage }) {
     [revenueEntries, movements, sharedSplitsResolved],
   );
 
-  // Custo líquido dos ajustes de inventário no período (perdas − sobras).
-  // delta<0 (falta) aumenta CMV; delta>0 (sobra) reduz CMV. Respeita compose_cmv.
-  const adjustNetCost = useMemo(() => {
-    let net = 0;
+  // Custo dos ajustes de inventário que compõem CMV — só perdas (delta<0).
+  // Sobras (delta>0) NÃO abatem o CMV: contagem pra cima é correção de saldo /
+  // estoque inicial, não ganho operacional. Alinhado ao Dashboard. Respeita compose_cmv.
+  const adjustLossCost = useMemo(() => {
+    let total = 0;
     for (const mv of movements) {
       if (mv.kind !== "adjust") continue;
       if (mv.composeCmv === false) continue;
-      net += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+      if (Number(mv.delta || 0) >= 0) continue; // sobras não compõem CMV
+      total += Math.abs(Number(mv.delta || 0)) * Number(mv.unitCost || 0);
     }
-    return net;
+    return total;
   }, [movements]);
 
   // Desperdício compartilhado (loss/expiration sem operação) — rateado por faturamento.
@@ -256,7 +258,7 @@ function CMV({ setPage }) {
 
   // CMV compartilhado por operação · no período de KPI. Combina, por operação:
   //  1) Uso compartilhado (kitchen_requests) — rateado pelos splits (pct).
-  //  2) Ajustes de inventário (perdas − sobras) + desperdício sem operação — rateados
+  //  2) Ajustes de inventário (só perdas Δ<0) + desperdício sem operação — rateados
   //     por faturamento, igual ao "Resultado por operação" (byOp.cogsAdjust).
   const sharedCmv = useMemo(() => {
     const byOpMap = {};
@@ -283,7 +285,7 @@ function CMV({ setPage }) {
     }
 
     // 2) Ajustes de inventário + desperdício compartilhado — rateados por faturamento
-    const sharedRevCost = adjustNetCost + wasteSharedCost;
+    const sharedRevCost = adjustLossCost + wasteSharedCost;
     const revByOp = {};
     let totalRev = 0;
     for (const r of daily) { revByOp[r.op] = (revByOp[r.op] || 0) + r.revenue; totalRev += r.revenue; }
@@ -300,25 +302,25 @@ function CMV({ setPage }) {
       .map((r) => ({ ...r, pct: total !== 0 ? (r.cost / total) * 100 : 0 }))
       .sort((a, b) => b.cost - a.cost);
     return { total, rows };
-  }, [movements, sharedSplitsResolved, daily, adjustNetCost, wasteSharedCost]);
+  }, [movements, sharedSplitsResolved, daily, adjustLossCost, wasteSharedCost]);
 
   // Totais consolidados do período (consumo + ajustes + desperdício como custo compartilhado)
   const totals = useMemo(() => {
     const rev         = daily.reduce((s, r) => s + r.revenue, 0);
     const cogsConsumo = daily.reduce((s, r) => s + r.cogs, 0);
-    const cogs        = cogsConsumo + adjustNetCost + wasteSharedCost;
+    const cogs        = cogsConsumo + adjustLossCost + wasteSharedCost;
     return {
       revenue: rev,
       cogs,
       cogsConsumo,
-      cogsAdjust: adjustNetCost,
+      cogsAdjust: adjustLossCost,
       cogsWasteShared: wasteSharedCost,
       cmv:    rev > 0 ? (cogs / rev) * 100 : 0,
       margin: rev > 0 ? ((rev - cogs) / rev) * 100 : 0,
       days:   new Set(daily.map((r) => r.date)).size,
       opsCount: new Set(daily.map((r) => r.op)).size,
     };
-  }, [daily, adjustNetCost, wasteSharedCost]);
+  }, [daily, adjustLossCost, wasteSharedCost]);
 
   const excluded = useMemo(() => {
     const { fromDate, toDate } = getDateRange(period);
@@ -334,7 +336,7 @@ function CMV({ setPage }) {
       m[r.op].cogs    += r.cogs;
     });
     const totalRev = Object.values(m).reduce((s, r) => s + r.revenue, 0);
-    const sharedCost = adjustNetCost + wasteSharedCost;
+    const sharedCost = adjustLossCost + wasteSharedCost;
     if (totalRev > 0 && sharedCost !== 0) {
       for (const r of Object.values(m)) {
         const share = sharedCost * (r.revenue / totalRev);
@@ -347,7 +349,7 @@ function CMV({ setPage }) {
       cmv:    o.revenue > 0 ? (o.cogs / o.revenue) * 100 : 0,
       margin: o.revenue > 0 ? ((o.revenue - o.cogs) / o.revenue) * 100 : 0,
     })).sort((a, b) => b.cmv - a.cmv);
-  }, [daily, adjustNetCost, wasteSharedCost]);
+  }, [daily, adjustLossCost, wasteSharedCost]);
 
   // Operações disponíveis no período (derivadas dos movimentos) — alimentam o filtro da aba "Por item".
   const availableOps = useMemo(() => {
