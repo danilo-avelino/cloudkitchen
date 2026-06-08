@@ -1878,6 +1878,7 @@ function mapFinanceEntryFromDb(row) {
     status: row.status,
     auto: row.auto_source || row.auto || undefined,
     checklistItemId: row.checklist_item_id || null,
+    counterpartyId: row.counterparty_id || null,
   };
 }
 
@@ -1991,6 +1992,35 @@ async function dbListFinanceEntries(tenantId, period) {
   return { data: (data || []).map(mapFinanceEntryFromDb), source: "db", error: null };
 }
 
+// Lançamentos numa faixa de competências [startPeriod .. endPeriod] (YYYY-MM).
+// Usado pela conciliação p/ trazer candidatos de meses anteriores (boleto pago num
+// mês com competência em mês anterior).
+async function dbListFinanceEntriesRange(tenantId, startPeriod, endPeriod) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const startRange = financePeriodRange(startPeriod);
+  const endRange = financePeriodRange(endPeriod);
+  if (!startRange || !endRange) return { data: [], source: "db", error: null };
+  const { data, error } = await _client
+    .from("finance_entries")
+    .select("*, subcategory:dre_subcategories(id, name, category_id)")
+    .eq("tenant_id", tenantId)
+    .gte("competence_date", startRange.start)
+    .lte("competence_date", endRange.end)
+    .order("competence_date", { ascending: false });
+  if (error) return { data: null, source: "mock", error };
+  return { data: (data || []).map(mapFinanceEntryFromDb), source: "db", error: null };
+}
+
+// Ids de lançamentos já vinculados (conciliação confirmada) — pra não oferecer
+// como candidato algo que já foi conciliado em outro mês.
+async function dbListReconciledEntryIds(tenantId) {
+  if (!isDbOnline() || !_client) return { data: [], error: null };
+  const { data, error } = await _client.from("reconciliation_links")
+    .select("finance_entry_id").eq("tenant_id", tenantId).eq("state", "confirmed");
+  if (error) return { data: [], error };
+  return { data: (data || []).map((r) => r.finance_entry_id), error: null };
+}
+
 async function dbInsertFinanceEntry(tenantId, draft) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   const { data, error } = await _client.from("finance_entries").insert({
@@ -2003,6 +2033,7 @@ async function dbInsertFinanceEntry(tenantId, draft) {
     status:            draft.status || "pending",
     notes:             draft.notes || null,
     checklist_item_id: draft.checklistItemId || null,
+    counterparty_id:   draft.counterpartyId || null,
   }).select().single();
   return { data, error };
 }
@@ -2015,6 +2046,10 @@ async function dbUpdateFinanceEntry(id, patch) {
   if (patch.comp !== undefined) update.competence_date = patch.comp;
   if (patch.paid !== undefined) update.payment_date = patch.paid;
   if (patch.status !== undefined) update.status = patch.status;
+  // `cat` no front é o subcategory_id — o update precisa mapeá-lo (o insert já fazia),
+  // senão trocar a subcategoria não persiste.
+  if (patch.cat !== undefined && patch.cat) update.subcategory_id = patch.cat;
+  if (patch.counterpartyId !== undefined) update.counterparty_id = patch.counterpartyId || null;
   const { data, error } = await _client
     .from("finance_entries")
     .update(update)
@@ -2028,6 +2063,209 @@ async function dbDeleteFinanceEntry(id) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
   const { error } = await _client.from("finance_entries").delete().eq("id", id);
   return { error };
+}
+
+// =====================================================================
+// CONCILIAÇÃO BANCÁRIA · contas, transações, vínculos, memória, aliases
+// (camada sobre finance_entries; ver migration bank_reconciliation)
+// =====================================================================
+function mapBankTxFromDb(row) {
+  return {
+    id:           row.id,
+    accountId:    row.account_id,
+    externalId:   row.external_id,
+    idemHash:     row.idempotency_hash,
+    date:         row.transaction_date ? String(row.transaction_date).slice(0, 10) : null,
+    settledDate:  row.settled_date ? String(row.settled_date).slice(0, 10) : null,
+    amount:       Number(row.amount) || 0,
+    direction:    row.direction,                 // 'debit' | 'credit'
+    rawDesc:      row.raw_description || "",
+    nameNorm:     row.counterparty_name_norm || null,
+    document:     row.counterparty_document || null,
+    identifiers:  row.identifiers || {},
+    bankStatus:   row.bank_status,
+    state:        row.state,                      // unidentified|suggested|reconciled|created|ignored
+    links:        (row.reconciliation_links || []).map((l) => ({
+      id: l.id, financeEntryId: l.finance_entry_id, state: l.state,
+      score: l.score != null ? Number(l.score) : null, method: l.match_method,
+      relationType: l.relation_type,
+    })),
+  };
+}
+
+async function dbListBankAccounts(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client.from("bank_accounts")
+    .select("id, provider, external_id, label, is_active, last_synced_at")
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: true });
+  return { data, source: error ? "mock" : "db", error };
+}
+
+async function dbUpsertBankAccount(tenantId, acc) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("bank_accounts").upsert({
+    tenant_id:   tenantId,
+    provider:    acc.provider || "manual",
+    external_id: acc.externalId || null,
+    label:       acc.label,
+    is_active:   acc.isActive ?? true,
+  }, { onConflict: "tenant_id,provider,external_id" }).select().single();
+  return { data, error };
+}
+
+// Bulk upsert idempotente por idempotency_hash (re-import nunca duplica).
+async function dbUpsertBankTransactions(tenantId, accountId, txs) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!txs?.length) return { data: [], error: null };
+  const rows = txs.map((t) => ({
+    tenant_id:              tenantId,
+    account_id:             accountId,
+    external_id:            t.externalId || null,
+    idempotency_hash:       t.idemHash,
+    transaction_date:       t.date,
+    settled_date:           t.settledDate || null,
+    amount:                 Number(t.amount) || 0,
+    direction:              t.direction,
+    raw_description:        t.rawDesc || "",
+    counterparty_name_norm: t.nameNorm || null,
+    counterparty_document:  t.document || null,
+    identifiers:            t.identifiers || {},
+    bank_status:            t.bankStatus || "settled",
+    // Estado inicial: a página pode forçar (ex.: memória "ignorar"); senão, entradas
+    // (créditos) nascem ignoradas (faturamento não vem por aqui) e saídas, pendentes.
+    state:                  t.state || (t.direction === "credit" ? "ignored" : "unidentified"),
+  }));
+  // ignoreDuplicates: mantém o estado/conciliação de transações já existentes
+  // (não reseta state em re-import); só insere as novas.
+  const { data, error } = await _client.from("bank_transactions")
+    .upsert(rows, { onConflict: "tenant_id,idempotency_hash", ignoreDuplicates: true })
+    .select();
+  return { data, error };
+}
+
+async function dbListBankTransactions(tenantId, { period, accountId } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  let q = _client.from("bank_transactions")
+    .select("*, reconciliation_links(id, finance_entry_id, state, score, match_method, relation_type)")
+    .eq("tenant_id", tenantId)
+    .order("transaction_date", { ascending: false });
+  if (accountId) q = q.eq("account_id", accountId);
+  if (period) {
+    const range = financePeriodRange(period);
+    if (range) q = q.gte("transaction_date", range.start).lte("transaction_date", range.end);
+  }
+  const { data, error } = await q;
+  if (error) return { data: null, source: "mock", error };
+  return { data: (data || []).map(mapBankTxFromDb), source: "db", error: null };
+}
+
+async function dbUpdateBankTransactionState(id, state) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("bank_transactions").update({ state }).eq("id", id);
+  return { error };
+}
+
+// Exclui transações por id (links conciliados caem por ON DELETE CASCADE).
+// Usado pelo "Limpar conciliações pendentes" — a página passa só os ids pendentes.
+async function dbDeleteBankTransactions(ids) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  if (!ids?.length) return { error: null };
+  const { error } = await _client.from("bank_transactions").delete().in("id", ids);
+  return { error };
+}
+
+async function dbInsertReconciliationLink(tenantId, link) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data: { user } = {} } = await _client.auth.getUser();
+  const { data, error } = await _client.from("reconciliation_links").insert({
+    tenant_id:           tenantId,
+    bank_transaction_id: link.bankTransactionId,
+    finance_entry_id:    link.financeEntryId,
+    relation_type:       link.relationType || "one_to_one",
+    state:               link.state || "confirmed",
+    score:               link.score ?? null,
+    match_method:        link.method || "manual",
+    author_id:           user?.id || null,
+    confirmed_at:        (link.state || "confirmed") === "confirmed" ? new Date().toISOString() : null,
+  }).select().single();
+  return { data, error };
+}
+
+async function dbDeleteReconciliationLinksForTx(bankTransactionId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("reconciliation_links")
+    .delete().eq("bank_transaction_id", bankTransactionId);
+  return { error };
+}
+
+async function dbListReconciliationMemory(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client.from("reconciliation_memory")
+    .select("id, signature, action, subcategory_id, counterparty_id, document, name_norm, direction, sample_label, confidence, occurrences")
+    .eq("tenant_id", tenantId);
+  if (error) return { data: null, source: "mock", error };
+  return {
+    data: (data || []).map((m) => ({
+      id: m.id, signature: m.signature, action: m.action,
+      subcategoryId: m.subcategory_id, counterpartyId: m.counterparty_id,
+      document: m.document, nameNorm: m.name_norm, direction: m.direction,
+      sampleLabel: m.sample_label,
+      confidence: Number(m.confidence) || 0.5, occurrences: m.occurrences || 1,
+    })),
+    source: "db", error: null,
+  };
+}
+
+// Aprendizado: sobe occurrences/confidence se a assinatura já existe (UNIQUE tenant+signature).
+// Guarda os sinais (documento, nome normalizado, direção) e um rótulo legível do gasto.
+async function dbUpsertReconciliationMemory(tenantId, mem) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const signals = {
+    action:          mem.action,
+    subcategory_id:  mem.subcategoryId ?? null,
+    counterparty_id: mem.counterpartyId ?? null,
+    document:        mem.document ?? null,
+    name_norm:       mem.nameNorm ?? null,
+    direction:       mem.direction ?? null,
+    sample_label:    mem.sampleLabel ?? null,
+  };
+  const { data: existing } = await _client.from("reconciliation_memory")
+    .select("id, occurrences, confidence")
+    .eq("tenant_id", tenantId).eq("signature", mem.signature).maybeSingle();
+  if (existing) {
+    const occurrences = (existing.occurrences || 1) + 1;
+    const confidence = Math.min(0.99, (Number(existing.confidence) || 0.5) + 0.1);
+    const { data, error } = await _client.from("reconciliation_memory").update({
+      ...signals, confidence, occurrences,
+      last_applied_at: new Date().toISOString().slice(0, 10),
+    }).eq("id", existing.id).select().single();
+    return { data, error };
+  }
+  const { data, error } = await _client.from("reconciliation_memory").insert({
+    tenant_id: tenantId, signature: mem.signature, ...signals,
+    confidence: mem.confidence ?? 0.7,
+  }).select().single();
+  return { data, error };
+}
+
+async function dbListCounterpartyAliases(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client.from("counterparty_aliases")
+    .select("id, counterparty_id, alias_text, document")
+    .eq("tenant_id", tenantId);
+  return { data, source: error ? "mock" : "db", error };
+}
+
+async function dbInsertCounterpartyAlias(tenantId, alias) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("counterparty_aliases").upsert({
+    tenant_id:       tenantId,
+    counterparty_id: alias.counterpartyId,
+    alias_text:      alias.aliasText,
+    document:        alias.document || null,
+  }, { onConflict: "tenant_id,alias_text" }).select().single();
+  return { data, error };
 }
 
 async function dbListClosingChecklist(tenantId, _period) {
@@ -2520,7 +2758,11 @@ Object.assign(window, {
   dbListInventories, dbInsertInventory, dbUpdateInventory, dbDeleteInventory,
   dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
   dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin,
-  dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
+  dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbListFinanceEntriesRange, dbListReconciledEntryIds, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
+  dbListBankAccounts, dbUpsertBankAccount, dbUpsertBankTransactions, dbListBankTransactions, dbUpdateBankTransactionState,
+  dbInsertReconciliationLink, dbDeleteReconciliationLinksForTx, dbDeleteBankTransactions,
+  dbListReconciliationMemory, dbUpsertReconciliationMemory,
+  dbListCounterpartyAliases, dbInsertCounterpartyAlias,
   dbGetStockValueSnapshots,
   dbListClosingChecklist, dbUpdateClosingChecklistItem, dbInsertClosingChecklistItem, dbDeleteClosingChecklistItem,
   dbListClosedPeriods, dbClosePeriod, dbReopenPeriod,

@@ -271,6 +271,7 @@ function Finance() {
       <div style={{ flex: 1, overflow: "auto" }}>
         {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} onEdit={setEditingEntry} onDelete={setConfirmDeleteEntry} />}
         {tab === "checklist" && <ChecklistView checklist={checklistForPeriod} subcategories={subcategories} onFill={setFillItem} onEdit={setEditingChecklistItem} onDelete={setConfirmDeleteChecklist} period={period} />}
+        {tab === "reconcile" && window.Conciliacao && <window.Conciliacao period={period} />}
       </div>
 
       {draftOpen  && <EntryDraft  categories={categories} subcategories={subcategories} onClose={() => setDraftOpen(false)} onSave={addEntry} period={period} />}
@@ -515,6 +516,7 @@ function FinanceTabs({ tab, setTab, checklist, period }) {
   const tabs = [
     { id: "entries",   label: "Lançamentos" },
     { id: "checklist", label: "Checklist de fechamento", count },
+    { id: "reconcile", label: "Conciliação bancária" },
   ];
   return (
     <div style={{ display: "flex", gap: 0, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
