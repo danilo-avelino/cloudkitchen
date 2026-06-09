@@ -39,6 +39,7 @@ function Dashboard({ scope, setPage }) {
     cmvDaily: [],
     requests: [],
     cmvMovements: [], // saídas (kind=out) do mês até hoje, p/ CMV real por operação
+    sharedSplits: {}, // { [requestId]: [{op, pct}] } · rateio das requisições de uso compartilhado
     periodMovements: [], // movimentações dentro do range do filtro de período (entradas/saídas KPIs)
     dreCategories: [],
     dreSubcategories: [],
@@ -121,6 +122,14 @@ function Dashboard({ scope, setPage }) {
         dbListFinanceEntries?.(tid, currentPeriod) || { data: null },
       ]);
       if (cancelled) return;
+      // Splits das requisições de uso compartilhado que aparecem nas saídas do MTD —
+      // p/ ratear o CMV por operação pelos pct (em vez de 100% na operação primária).
+      const cmvMovs = movRes.data || [];
+      const reqIds = cmvMovs
+        .filter((mv) => mv.referenceType === "kitchen_request" && mv.referenceId)
+        .map((mv) => mv.referenceId);
+      const splitsRes = await dbListSharedSplits?.(tid, reqIds) || { data: {} };
+      if (cancelled) return;
       setDbData({
         revenue:          revRes.data || [],
         revenuePrev:      revPrevRes.data || [],
@@ -129,7 +138,8 @@ function Dashboard({ scope, setPage }) {
         todayConsumption: consRes.data || [],
         cmvDaily:         cmvRes.data || [],
         requests:         reqRes.data || [],
-        cmvMovements:     movRes.data || [],
+        cmvMovements:     cmvMovs,
+        sharedSplits:     splitsRes.data || {},
         periodMovements:  periodMovRes.data || [],
         dreCategories:    dreCatRes.data || [],
         dreSubcategories: dreSubRes.data || [],
@@ -259,8 +269,8 @@ function Dashboard({ scope, setPage }) {
 
       {/* CMV + Ranking */}
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12 }}>
-        <CmvByOpCard setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
-        <RankingCard cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} dbOnline={dbStatus.isOnline} />
+        <CmvByOpCard setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbStatus.isOnline} />
+        <RankingCard cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbStatus.isOnline} />
       </div>
 
       {/* Estoque por categoria */}
@@ -566,7 +576,7 @@ function Spark({ accent }) {
   );
 }
 
-function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false }) {
+function CmvByOpCard({ setPage, cmvDaily = [], movements = [], sharedSplits = {}, dbOnline = false }) {
   // CMV real por operação no MTD = COGS ÷ faturamento. Faturamento vem de cmv_daily;
   // COGS é recalculado aqui a partir de stock_movements porque revenue_entries.cogs é
   // hoje apenas um placeholder. Mesma fórmula do módulo CMV: consumo = out + loss/
@@ -574,29 +584,48 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
   // + desperdício sem operação) rateado proporcionalmente ao faturamento.
   const data = useMemo(() => {
     const m = {};
+    const ensure = (key) => {
+      if (!m[key]) m[key] = { op: key, revenue: 0, cogs: 0, sharedAdjCogs: 0, sharedUseCogs: 0 };
+      return m[key];
+    };
     for (const row of cmvDaily) {
       if (!row.op) continue;
-      if (!m[row.op]) m[row.op] = { op: row.op, revenue: 0, cogs: 0, sharedCogs: 0 };
-      m[row.op].revenue += row.revenue || 0;
+      ensure(row.op).revenue += row.revenue || 0;
     }
     // Consumo por operação: saídas (out) + desperdício COM operação (loss/expiration),
-    // excluindo itens desmarcados do CMV (compose_cmv=false). Mesmo critério do módulo CMV.
+    // excluindo compose_cmv=false. Uso compartilhado (requisição com splits) é rateado
+    // pelos pct entre as operações; o resto cai 100% na operação do movimento. Mesmo
+    // critério do módulo CMV (buildDailyRows).
     for (const mv of movements) {
       if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
       if (mv.composeCmv === false) continue;
-      const key = mv.op;
-      if (!key || key === "—") continue;
-      if (!m[key]) m[key] = { op: key, revenue: 0, cogs: 0, sharedCogs: 0 };
-      // delta vem positivo no mapping; custo da saída = |qty| × unit_cost
-      m[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+      const cost = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+      if (!cost) continue;
+      const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
+      if (splits && splits.length > 0) {
+        const totalPct = splits.reduce((s, x) => s + (x.pct || 0), 0) || 1;
+        for (const sp of splits) {
+          const slug = MOCK.opById(sp.op)?.slug || sp.op;
+          if (!slug || slug === "—") continue;
+          const part = cost * ((sp.pct || 0) / totalPct);
+          const r = ensure(slug);
+          r.cogs          += part;
+          r.sharedUseCogs += part; // compõe o segmento cinza "compartilhado"
+        }
+      } else {
+        const key = mv.op;
+        if (!key || key === "—") continue;
+        ensure(key).cogs += cost;
+      }
     }
     // Custo compartilhado (sem operação) rateado por faturamento: ajustes de inventário
-    // (perdas − sobras) + desperdício sem operação. Mesmo critério do módulo CMV.
+    // (só perdas Δ<0; sobras não compõem CMV) + desperdício sem operação. Mesmo critério do módulo CMV.
     let sharedCost = 0;
     for (const mv of movements) {
       if (mv.composeCmv === false) continue;
       if (mv.kind === "adjust") {
-        sharedCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+        if (Number(mv.delta || 0) >= 0) continue; // sobras não compõem CMV
+        sharedCost += Math.abs(Number(mv.delta || 0)) * Number(mv.unitCost || 0);
       } else if ((mv.kind === "loss" || mv.kind === "expiration") && (!mv.op || mv.op === "—")) {
         sharedCost += Math.abs(Number(mv.delta) || 0) * Number(mv.unitCost || 0);
       }
@@ -605,8 +634,8 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
     if (totalRev > 0 && sharedCost !== 0) {
       for (const r of Object.values(m)) {
         const share = sharedCost * (r.revenue / totalRev);
-        r.cogs       += share;
-        r.sharedCogs += share;
+        r.cogs          += share;
+        r.sharedAdjCogs += share;
       }
     }
     return Object.values(m)
@@ -614,14 +643,15 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
       .map((r) => {
         const opMeta = MOCK.opById(r.op);
         const real = r.revenue > 0 ? (r.cogs / r.revenue) * 100 : 0;
-        // shared em pp · clampa em [0, real] p/ não estourar a barra quando sobra > perda
-        const sharedPP = r.revenue > 0
-          ? Math.max(0, Math.min(real, (Math.max(0, r.sharedCogs) / r.revenue) * 100))
-          : 0;
-        return { op: r.op, real, goal: opMeta?.cmvGoal ?? 30, shared: sharedPP };
+        // Segmento cinza = uso compartilhado (splits) + ajustes/desperdício sem op.
+        // Em pp, clampado em [0, real] p/ não estourar a barra.
+        const usePP = r.revenue > 0 ? (Math.max(0, r.sharedUseCogs) / r.revenue) * 100 : 0;
+        const adjPP = r.revenue > 0 ? (Math.max(0, r.sharedAdjCogs) / r.revenue) * 100 : 0;
+        const sharedPP = Math.max(0, Math.min(real, usePP + adjPP));
+        return { op: r.op, real, goal: opMeta?.cmvGoal ?? 30, shared: sharedPP, usePP, adjPP };
       })
       .sort((a, b) => a.real - b.real);
-  }, [cmvDaily, movements]);
+  }, [cmvDaily, movements, sharedSplits]);
   const max = 45;
 
   // Faixas absolutas de cor (espelha cmvTone do page-cmv)
@@ -659,8 +689,8 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
                 <span style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>{op.name}</span>
               </div>
               <div style={{ position: "relative", height: 8, background: "var(--bg-3)", borderRadius: 4, overflow: "hidden" }}
-                   title={`CMV ${row.real.toFixed(1)}% · ${row.shared.toFixed(1)}pp compartilhado (ajustes de inventário)`}>
-                {/* Custo compartilhado (ajustes rateados) · slate suave com listras diagonais */}
+                   title={`CMV ${row.real.toFixed(1)}% · ${row.shared.toFixed(1)}pp compartilhado (${row.usePP.toFixed(1)}pp uso compartilhado + ${row.adjPP.toFixed(1)}pp ajustes de inventário)`}>
+                {/* Custo compartilhado (uso compartilhado rateado + ajustes) · slate suave com listras diagonais */}
                 <div style={{
                   position: "absolute", left: 0, top: 0, height: "100%",
                   width: `${(row.shared / max) * 100}%`,
@@ -697,7 +727,7 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], dbOnline = false 
   );
 }
 
-function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
+function RankingCard({ cmvDaily = [], movements = [], sharedSplits = {}, dbOnline = false }) {
   const ranking = useMemo(() => {
     // Margem de contribuição (R$) = faturamento − COGS real das saídas de estoque.
     // revenue_entries.cogs é placeholder (zero); o COGS real vem de stock_movements
@@ -705,25 +735,42 @@ function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
     // (out + loss/expiration com operação, excluindo compose_cmv=false; ajustes +
     // desperdício sem operação rateados pelo faturamento).
     const byOp = {};
+    const ensure = (key) => {
+      if (!byOp[key]) byOp[key] = { op: key, revenue: 0, cogs: 0 };
+      return byOp[key];
+    };
     for (const row of cmvDaily) {
       if (!row.op) continue;
-      if (!byOp[row.op]) byOp[row.op] = { op: row.op, revenue: 0, cogs: 0 };
-      byOp[row.op].revenue += row.revenue || 0;
+      ensure(row.op).revenue += row.revenue || 0;
     }
+    // Uso compartilhado (requisição com splits) rateado pelos pct; o resto cai 100% na op.
     for (const mv of movements) {
       if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
       if (mv.composeCmv === false) continue;
-      const key = mv.op;
-      if (!key || key === "—") continue;
-      if (!byOp[key]) byOp[key] = { op: key, revenue: 0, cogs: 0 };
-      byOp[key].cogs += Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+      const cost = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
+      if (!cost) continue;
+      const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
+      if (splits && splits.length > 0) {
+        const totalPct = splits.reduce((s, x) => s + (x.pct || 0), 0) || 1;
+        for (const sp of splits) {
+          const slug = MOCK.opById(sp.op)?.slug || sp.op;
+          if (!slug || slug === "—") continue;
+          ensure(slug).cogs += cost * ((sp.pct || 0) / totalPct);
+        }
+      } else {
+        const key = mv.op;
+        if (!key || key === "—") continue;
+        ensure(key).cogs += cost;
+      }
     }
-    // Custo compartilhado (sem operação) rateado por faturamento: ajustes + desperdício sem op.
+    // Custo compartilhado (sem operação) rateado por faturamento: ajustes (só perdas Δ<0;
+    // sobras não compõem CMV) + desperdício sem op.
     let sharedCost = 0;
     for (const mv of movements) {
       if (mv.composeCmv === false) continue;
       if (mv.kind === "adjust") {
-        sharedCost += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+        if (Number(mv.delta || 0) >= 0) continue; // sobras não compõem CMV
+        sharedCost += Math.abs(Number(mv.delta || 0)) * Number(mv.unitCost || 0);
       } else if ((mv.kind === "loss" || mv.kind === "expiration") && (!mv.op || mv.op === "—")) {
         sharedCost += Math.abs(Number(mv.delta) || 0) * Number(mv.unitCost || 0);
       }
@@ -738,7 +785,7 @@ function RankingCard({ cmvDaily = [], movements = [], dbOnline = false }) {
       .filter((r) => r.revenue > 0 || r.cogs > 0)
       .map((r) => ({ op: r.op, contribution: r.revenue - r.cogs }))
       .sort((a, b) => b.contribution - a.contribution);
-  }, [cmvDaily, movements]);
+  }, [cmvDaily, movements, sharedSplits]);
 
   const fmtBRL = (v) => `R$ ${Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 

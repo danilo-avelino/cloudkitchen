@@ -1695,10 +1695,10 @@ function AllocationPanel({ item, onClose }) {
   const suggestedMaxWeekly  = suggestedMin != null ? Math.ceil(suggestedMin * 1.3) : null;
   const suggestedMaxMonthly = consumption7d?.hasData ? Math.ceil(consumption7d.daily * 35) : null;
 
-  const fmtTime = (iso) => {
+  const fmtDate = (iso) => {
     if (!iso) return "—";
     const d = new Date(iso);
-    return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+    return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}`;
   };
   const fmtDelta = (m) => {
     const sign = m.kind === "in" ? "+" : "−";
@@ -1912,7 +1912,7 @@ function AllocationPanel({ item, onClose }) {
             const isIn = m.kind === "in";
             return (
               <div key={m.id || i} style={{ display: "grid", gridTemplateColumns: "44px 70px 1fr", gap: 8, alignItems: "center" }}>
-                <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)" }}>{fmtTime(m.at)}</span>
+                <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)" }}>{fmtDate(m.at)}</span>
                 <span className="mono" style={{ fontSize: 11, color: isIn ? "var(--ok)" : "var(--fg-1)", fontWeight: 500 }}>
                   {fmtDelta(m)} {item.unit}
                 </span>
@@ -3262,7 +3262,8 @@ function WastesView({ tenantId, items, onApplied }) {
       const c = Math.abs(Number(mv.delta) || 0) * Number(mv.unitCost || 0);
       if (mv.kind === "out") cogsOut += c;
       else if (mv.kind === "loss" || mv.kind === "expiration") cogsWaste += c;
-      else if (mv.kind === "adjust") cogsAdjust += -Number(mv.delta || 0) * Number(mv.unitCost || 0);
+      // ajuste: só perdas (Δ<0) compõem CMV; sobras não abatem o CMV
+      else if (mv.kind === "adjust" && Number(mv.delta || 0) < 0) cogsAdjust += c;
     }
     return cogsOut + cogsWaste + cogsAdjust;
   }, [allMovements]);
