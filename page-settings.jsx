@@ -16,6 +16,7 @@ function Settings() {
           {[
             ["operations",   "Operações"],
             ["users",        "Usuários & permissões"],
+            ["integrations", "Integrações"],
             ["billing",      "Plano & cobrança"],
           ].map(([id, label]) => {
             const active = tab === id;
@@ -35,6 +36,7 @@ function Settings() {
       <div style={{ flex: 1, overflow: "auto", padding: "24px 28px 32px" }}>
         {tab === "operations"   && <OperationsTab />}
         {tab === "users"        && <UsersTab />}
+        {tab === "integrations" && <IntegrationsTab />}
         {tab === "billing"      && <BillingTab />}
       </div>
     </div>
@@ -888,6 +890,219 @@ function BillingTab() {
         </div>
       </div>
     </div>
+  );
+}
+
+// Catálogo de integrações disponíveis. Por enquanto é só front: vincular uma
+// integração apenas registra o link na operação — a conexão/sincronização real
+// virá com o backend (por isso o badge "Em breve" na aba).
+const INTEGRATION_CATALOG = [
+  { id: "ifood",    label: "iFood",    category: "Delivery",    color: "#ea1d2c", accountLabel: "Handle / loja", placeholder: "@minhamarca" },
+  { id: "rappi",    label: "Rappi",    category: "Delivery",    color: "#ff5a1f", accountLabel: "ID da loja",    placeholder: "store_123" },
+  { id: "food99",   label: "99Food",   category: "Delivery",    color: "#ffca00", accountLabel: "ID da loja",    placeholder: "loja_123" },
+  { id: "whatsapp", label: "WhatsApp", category: "Pedidos",     color: "#25d366", accountLabel: "Número",        placeholder: "+55 11 90000-0000" },
+  { id: "stone",    label: "Stone",    category: "Pagamentos",  color: "#00a868", accountLabel: "Stone code",    placeholder: "Código do ponto" },
+  { id: "anotaai",  label: "Anota AI", category: "Cardápio",    color: "#7c3aed", accountLabel: "Subdomínio",    placeholder: "minhaloja" },
+];
+const integrationById = (id) => INTEGRATION_CATALOG.find((c) => c.id === id);
+
+function IntegrationsTab() {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const [ops, setOps]       = useState(MOCK.OPERATIONS.filter((o) => o.id !== "all"));
+  const [links, setLinks]   = useState({}); // { [opId]: [{ id, account }] }
+  const [adding, setAdding] = useState(null); // operação em configuração
+  const [tabLoading, setTabLoading] = useState(true);
+
+  // Mesma fonte da aba Operações: usa as operações reais do tenant quando online.
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setTabLoading(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ctx = await dbGetCurrentContext();
+        if (cancelled) return;
+        const tid = ctx?.tenant?.id || null;
+        if (!tid) return;
+        const { data, source: src } = await dbListOperations(tid);
+        if (cancelled) return;
+        if (src === "db") {
+          setOps((data || []).map((row) => ({
+            id: row.id, slug: row.slug, name: row.name,
+            short: row.short_label, color: row.color, iFood: row.ifood_handle,
+          })));
+        }
+      } finally {
+        if (!cancelled) setTabLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.state, dbStatus.isOnline]);
+
+  const addLink = (opId, link) => {
+    setLinks((cur) => ({ ...cur, [opId]: [...(cur[opId] || []), link] }));
+    const cat = integrationById(link.id);
+    window.showToast?.(`${cat?.label || "Integração"} vinculada · em breve`, { tone: "ok" });
+  };
+  const removeLink = (opId, catalogId) => {
+    setLinks((cur) => ({ ...cur, [opId]: (cur[opId] || []).filter((l) => l.id !== catalogId) }));
+  };
+
+  if (tabLoading) return <PageLoading label="Carregando integrações…" variant="table" hint="" />;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13, maxWidth: 620 }}>
+          Conecte plataformas externas — delivery, pagamentos e pedidos — a cada operação.
+          Cada integração fica vinculada a uma marca específica.
+        </p>
+        <span className="badge" data-tone="warn">Em breve</span>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {ops.map((o) => {
+          const opLinks = links[o.id] || [];
+          return (
+            <div key={o.id} className="card">
+              <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 50, background: o.color }} />
+                    <div>
+                      <div style={{ color: "var(--fg-0)", fontWeight: 500 }}>{o.name}</div>
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>OPER-{o.short}</div>
+                    </div>
+                  </div>
+                  <button className="btn" data-variant="primary" data-size="sm" onClick={() => setAdding(o)}>
+                    <I.Plus size={13} />Adicionar integração
+                  </button>
+                </div>
+
+                {opLinks.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: "var(--fg-3)", padding: "4px 0" }}>
+                    Nenhuma integração vinculada ainda.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {opLinks.map((l) => {
+                      const cat = integrationById(l.id);
+                      if (!cat) return null;
+                      return (
+                        <div key={l.id} style={{
+                          display: "flex", alignItems: "center", gap: 10,
+                          padding: "8px 10px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4,
+                        }}>
+                          <span style={{
+                            width: 26, height: 26, borderRadius: 6, flexShrink: 0,
+                            background: cat.color, color: "#fff", fontSize: 12, fontWeight: 600,
+                            display: "grid", placeItems: "center",
+                          }}>{cat.label[0]}</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 12.5, color: "var(--fg-1)", fontWeight: 500 }}>
+                              {cat.label} <span style={{ color: "var(--fg-3)", fontWeight: 400 }}>· {cat.category}</span>
+                            </div>
+                            {l.account && (
+                              <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", marginTop: 1 }}>{l.account}</div>
+                            )}
+                          </div>
+                          <span className="badge" data-tone="warn">Em breve</span>
+                          <button className="btn" data-variant="ghost" data-size="sm"
+                                  onClick={() => removeLink(o.id, l.id)}
+                                  title="Remover integração"
+                                  style={{ padding: "3px 6px", color: "var(--crit)" }}>
+                            <I.Trash size={11} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {adding && (
+        <IntegrationModal
+          operation={adding}
+          existing={(links[adding.id] || []).map((l) => l.id)}
+          onClose={() => setAdding(null)}
+          onAdd={(link) => { addLink(adding.id, link); setAdding(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function IntegrationModal({ operation, existing, onClose, onAdd }) {
+  const [selected, setSelected] = useState(null);
+  const [account, setAccount]   = useState("");
+  const cat = selected ? integrationById(selected) : null;
+
+  const pick = (id) => {
+    setSelected(id);
+    setAccount("");
+  };
+
+  return (
+    <Modal title="Adicionar integração" subtitle={`${operation.name} · OPER-${operation.short}`} onClose={onClose} width={520}
+      footer={<>
+        <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!selected}
+                onClick={() => onAdd({ id: selected, account: account.trim() || null })}>
+          Vincular à operação
+        </button>
+      </>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            Plataforma
+          </span>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
+            {INTEGRATION_CATALOG.map((c) => {
+              const linked = existing.includes(c.id);
+              const on = selected === c.id;
+              return (
+                <button
+                  key={c.id} type="button"
+                  disabled={linked}
+                  onClick={() => pick(c.id)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "8px 10px", borderRadius: 4, textAlign: "left",
+                    cursor: linked ? "not-allowed" : "pointer",
+                    opacity: linked ? 0.45 : 1,
+                    background:   on ? "var(--accent-soft)" : "var(--bg-2)",
+                    border: `1px solid ${on ? "var(--accent-line)" : "var(--line)"}`,
+                    color: on ? "var(--fg-0)" : "var(--fg-2)",
+                    transition: "all 120ms ease",
+                  }}>
+                  <span style={{
+                    width: 22, height: 22, borderRadius: 5, flexShrink: 0,
+                    background: c.color, color: "#fff", fontSize: 11, fontWeight: 600,
+                    display: "grid", placeItems: "center",
+                  }}>{c.label[0]}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 500 }}>{c.label}</div>
+                    <div style={{ fontSize: 10, color: "var(--fg-3)" }}>{linked ? "vinculado" : c.category}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {cat && (
+          <FormRow label={cat.accountLabel} hint="opcional">
+            <input className="input mono" autoFocus value={account}
+                   onChange={(e) => setAccount(e.target.value)}
+                   placeholder={cat.placeholder} />
+          </FormRow>
+        )}
+      </div>
+    </Modal>
   );
 }
 
