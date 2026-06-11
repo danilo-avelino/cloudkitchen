@@ -1703,12 +1703,20 @@ function CategoryStructureModal({ categories, subcategories, entries, onClose, h
 function NewCategoryRow({ onCancel, onSave }) {
   const [name, setName] = useState("");
   const [kind, setKind] = useState("expense");
+  // Guard síncrono contra duplo clique — onSave dispara insert no banco e a linha
+  // fecha logo após; sem isso, 2 cliques no mesmo tick criam categorias duplicadas.
+  const submittedRef = useRef(false);
+  const submit = () => {
+    if (!name.trim() || submittedRef.current) return;
+    submittedRef.current = true;
+    onSave({ name, kind });
+  };
   return (
     <div className="card" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, background: "var(--bg-2)" }}>
       <input className="input" autoFocus value={name}
              placeholder="Nome da categoria"
              onChange={(e) => setName(e.target.value)}
-             onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onSave({ name, kind }); if (e.key === "Escape") onCancel(); }}
+             onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onCancel(); }}
              style={{ flex: 1 }} />
       <select className="select" value={kind} onChange={(e) => setKind(e.target.value)} style={{ width: 160 }}>
         <option value="expense">Despesa</option>
@@ -1718,7 +1726,7 @@ function NewCategoryRow({ onCancel, onSave }) {
       <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
       <button className="btn" data-variant="primary" data-size="sm"
               disabled={!name.trim()}
-              onClick={() => onSave({ name, kind })}>
+              onClick={submit}>
         <I.Check size={11} />Criar
       </button>
     </div>
@@ -1729,6 +1737,14 @@ function NewSubcategoryRow({ categoryId, onCancel, onSave }) {
   const DRE_SUB_COLORS = window.DRE_SUB_COLORS;
   const [name, setName] = useState("");
   const [color, setColor] = useState(DRE_SUB_COLORS?.[0] || "#2d8c66");
+  // Guard síncrono contra duplo clique — onSave dispara insert no banco e a linha
+  // fecha logo após; sem isso, 2 cliques no mesmo tick criam subcategorias duplicadas.
+  const submittedRef = useRef(false);
+  const submit = () => {
+    if (!name.trim() || submittedRef.current) return;
+    submittedRef.current = true;
+    onSave({ name, category: categoryId, color });
+  };
   return (
     <div style={{
       marginTop: 8, padding: "8px 10px",
@@ -1740,12 +1756,12 @@ function NewSubcategoryRow({ categoryId, onCancel, onSave }) {
       <input className="input" autoFocus value={name}
              placeholder="Nome da subcategoria"
              onChange={(e) => setName(e.target.value)}
-             onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) onSave({ name, category: categoryId, color }); if (e.key === "Escape") onCancel(); }}
+             onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onCancel(); }}
              style={{ flex: 1 }} />
       <button className="btn" data-size="sm" onClick={onCancel}>Cancelar</button>
       <button className="btn" data-variant="primary" data-size="sm"
               disabled={!name.trim()}
-              onClick={() => onSave({ name, category: categoryId, color })}>
+              onClick={submit}>
         <I.Check size={11} />Criar
       </button>
     </div>

@@ -215,6 +215,9 @@ function OperationModal({ initial, tenantId, dbOnline, onClose, onSave, onDelete
   const [color, setColor] = useState(initial?.color || "#2d8c66");
   const [iFood, setIFood] = useState(initial?.iFood || "");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Guard contra duplo clique — onSave é async (insere/atualiza operação no banco).
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   // Turnos (apenas ao editar uma operação existente — precisa do id pra linkar)
   const [shifts, setShifts] = useState([]);
   const [shiftsLoading, setShiftsLoading] = useState(false);
@@ -266,6 +269,17 @@ function OperationModal({ initial, tenantId, dbOnline, onClose, onSave, onDelete
   };
 
   const valid = name.trim() && short.trim();
+  const save = async () => {
+    if (savingRef.current || !valid) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onSave({ name: name.trim(), short: short.trim().toUpperCase(), color, iFood: iFood.trim() || null });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
   return (
     <Modal title={initial ? "Editar operação" : "Nova operação"} onClose={onClose}
       footer={
@@ -279,10 +293,10 @@ function OperationModal({ initial, tenantId, dbOnline, onClose, onSave, onDelete
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
-                    onClick={() => onSave({ name: name.trim(), short: short.trim().toUpperCase(), color, iFood: iFood.trim() || null })}>
-              {initial ? "Salvar alterações" : "Criar operação"}
+            <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || saving}
+                    onClick={save}>
+              {saving ? "Salvando…" : initial ? "Salvar alterações" : "Criar operação"}
             </button>
           </div>
         </div>

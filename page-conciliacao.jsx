@@ -310,6 +310,8 @@ function Conciliacao({ period }) {
   const [cfg] = useState({ autoMin: 0.85, ambiguousMin: 0.55, dateWindowDays: 3, valueTolerance: 0, lookbackMonths: 2 });
 
   const [filter, setFilter] = useState("pending");
+  const [txSearch, setTxSearch] = useState("");        // busca por descrição/valor na lista
+  const [sortBy, setSortBy] = useState("suggested");   // ordenação da lista
   const [importing, setImporting] = useState(false);
   const [pickerTx, setPickerTx] = useState(null);     // transação no modal "Buscar"
   const [compare, setCompare] = useState(null);       // { tx, cand } no modal "Conciliar"
@@ -428,10 +430,32 @@ function Conciliacao({ period }) {
     else if (filter === "resolved") list = txView.filter((t) => t.resolved);
     else if (filter === "ignored") list = txView.filter((t) => t.state === "ignored");
     else list = txView;
-    // Quem tem candidato a match vem primeiro; ordem cronológica preservada dentro
-    // de cada grupo (sort estável; txView já vem por data desc do banco).
-    return [...list].sort((a, b) => (b.top ? 1 : 0) - (a.top ? 1 : 0));
-  }, [txView, filter]);
+    // Busca por descrição ou valor (mesma lógica do modal "Buscar"): texto casa por
+    // substring na descrição; dígitos casam pelos centavos do valor ou pelo CNPJ/CPF.
+    const q = txSearch.trim();
+    if (q) {
+      const qLower = q.toLowerCase();
+      const qDigits = q.replace(/\D/g, "");
+      list = list.filter((t) => {
+        if ((t.rawDesc || "").toLowerCase().includes(qLower)) return true;
+        if (qDigits.length < 2) return false;
+        const cents = String(Math.round((Number(t.amount) || 0) * 100));
+        if (cents.startsWith(qDigits) || cents.includes(qDigits)) return true;
+        return (t.document || "").replace(/\D/g, "").includes(qDigits);
+      });
+    }
+    // Ordenação. "suggested" (default): quem tem candidato a match vem primeiro,
+    // preservando a ordem cronológica (data desc) dentro de cada grupo. Demais
+    // critérios são estáveis, então empates mantêm a ordem por data do banco.
+    const sorters = {
+      suggested:  (a, b) => (b.top ? 1 : 0) - (a.top ? 1 : 0),
+      value_desc: (a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0),
+      value_asc:  (a, b) => (Number(a.amount) || 0) - (Number(b.amount) || 0),
+      name_asc:   (a, b) => (a.rawDesc || "").localeCompare(b.rawDesc || "", "pt-BR", { sensitivity: "base" }),
+      name_desc:  (a, b) => (b.rawDesc || "").localeCompare(a.rawDesc || "", "pt-BR", { sensitivity: "base" }),
+    };
+    return [...list].sort(sorters[sortBy] || sorters.suggested);
+  }, [txView, filter, txSearch, sortBy]);
 
   // ---------- Ações ----------
   async function ensureAccount() {
@@ -647,7 +671,7 @@ function Conciliacao({ period }) {
         </div>
       </div>
 
-      {/* Filtros */}
+      {/* Filtros + busca */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {[["pending", "Não conciliadas"], ["resolved", "Conciliadas"], ["ignored", "Ignoradas"], ["all", "Todas"]].map(([id, label]) => {
           const active = filter === id;
@@ -662,13 +686,36 @@ function Conciliacao({ period }) {
             }}>{label}<span style={{ fontFamily: "var(--mono)", color: "var(--fg-3)", marginLeft: 6, fontSize: 10 }}>{c ?? 0}</span></button>
           );
         })}
+        <span style={{ flex: 1 }} />
+        <select className="select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}
+                title="Ordenar a lista" style={{ width: 200, fontSize: 12 }}>
+          <option value="suggested">Sugeridos primeiro</option>
+          <option value="value_desc">Valor · maior → menor</option>
+          <option value="value_asc">Valor · menor → maior</option>
+          <option value="name_asc">Descrição · A → Z</option>
+          <option value="name_desc">Descrição · Z → A</option>
+        </select>
+        <div style={{ position: "relative", width: 280, maxWidth: "40%" }}>
+          <I.Search size={12} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--fg-3)", pointerEvents: "none" }} />
+          <input className="input" value={txSearch} onChange={(e) => setTxSearch(e.target.value)}
+                 placeholder="Buscar por descrição ou valor…"
+                 style={{ width: "100%", paddingLeft: 28, paddingRight: txSearch ? 26 : 10, fontSize: 12 }} />
+          {txSearch && (
+            <button onClick={() => setTxSearch("")} title="Limpar busca"
+                    style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+                             background: "none", border: "none", color: "var(--fg-3)", cursor: "pointer",
+                             fontSize: 15, lineHeight: 1, padding: 2 }}>×</button>
+          )}
+        </div>
       </div>
 
       {/* Lista */}
       {visible.length === 0 ? (
         <div className="card" style={{ padding: "40px 24px", textAlign: "center" }}>
           <div style={{ fontSize: 13.5, color: "var(--fg-1)", marginBottom: 6 }}>
-            {txs.length === 0 ? "Nenhuma transação importada neste período" : "Nada neste filtro"}
+            {txs.length === 0 ? "Nenhuma transação importada neste período"
+              : txSearch.trim() ? `Nada encontrado para "${txSearch.trim()}"`
+              : "Nada neste filtro"}
           </div>
           <div style={{ fontSize: 12, color: "var(--fg-3)", maxWidth: 520, margin: "0 auto" }}>
             Importe o extrato OFX/CSV da conta (Stone, Itaú, etc.) em <strong style={{ color: "var(--accent-bright)" }}>Importar extrato</strong>.

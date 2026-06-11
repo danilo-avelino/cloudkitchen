@@ -641,6 +641,11 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   const [confirmDup, setConfirmDup] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Guard contra duplo clique no "Salvar" — onSave (upsert) é async e o modal fica
+  // montado durante o insert; sem isso, o 2º clique lança o faturamento em dobro
+  // (a checagem hasDuplicate não pega porque entries ainda não refez o fetch).
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   // Se o usuário mudar op/data depois de confirmar, exigir nova confirmação
   useEffect(() => { setConfirmDup(false); }, [op, date]);
   // Ao trocar de operação, descarta o turno se ele não pertencer à operação selecionada
@@ -678,6 +683,7 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   const hasDuplicate = duplicates.length > 0;
 
   const submit = async () => {
+    if (savingRef.current) return;
     if (!valid) {
       const reasons = [];
       if (!op) reasons.push("operação");
@@ -694,6 +700,8 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
     }
     const cleanMethods = {};
     methods.forEach((m) => { cleanMethods[m.id] = _parseNum(methodVals[m.id]); });
+    savingRef.current = true;
+    setSaving(true);
     try {
       await onSave({
         id: initial?.id,
@@ -707,6 +715,9 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
     } catch (e) {
       console.error("[revenue] onSave threw:", e);
       window.showToast?.(`Erro ao salvar: ${e?.message || e}`, { tone: "crit", ttl: 5000 });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
     }
   };
 
@@ -744,9 +755,9 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
                 Excluir
               </button>
             )}
-            <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid}>
-              {initial ? "Salvar alterações" : "Salvar lançamento"}
+            <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid || saving}>
+              {saving ? "Salvando…" : initial ? "Salvar alterações" : "Salvar lançamento"}
             </button>
           </div>
         </div>
@@ -935,9 +946,9 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
           width={460}
           onClose={() => setConfirmDup(false)}
           footer={<>
-            <button className="btn" data-size="sm" onClick={() => setConfirmDup(false)}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" onClick={submit}>
-              Adicionar mesmo assim
+            <button className="btn" data-size="sm" onClick={() => setConfirmDup(false)} disabled={saving}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={saving}>
+              {saving ? "Salvando…" : "Adicionar mesmo assim"}
             </button>
           </>}
         >

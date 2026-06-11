@@ -2330,8 +2330,12 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
   const totalCost = selectedItems.reduce((s, it) => s + it._estCost, 0);
   const totalItems = selectedItems.length;
 
+  // Guard síncrono contra duplo clique — onConfirm (persistList) cria a lista no banco
+  // e o modal fecha logo após; sem isso, 2 cliques no mesmo tick geram listas duplicadas.
+  const submittedRef = useRef(false);
   const submit = () => {
-    if (totalItems === 0) return;
+    if (totalItems === 0 || submittedRef.current) return;
+    submittedRef.current = true;
     onConfirm([...selectedIds]);
   };
 

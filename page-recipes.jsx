@@ -1441,8 +1441,12 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
   const parsedQty  = parseFloat(String(qtyVal).replace(",", "."));
   const valid = name.trim() && Number.isFinite(parsedQty) && parsedQty > 0 && parsedCost >= 0;
 
+  // Guard síncrono contra duplo clique — onSubmit (onAddItem) insere item no banco
+  // e o modal fecha logo em seguida; sem isso, 2 cliques no mesmo tick duplicam o insumo.
+  const submittedRef = useRef(false);
   const submit = () => {
-    if (!valid) return;
+    if (!valid || submittedRef.current) return;
+    submittedRef.current = true;
     const qtyDisplay = `${String(qtyVal).replace(".", ",")}${unit ? " " + unit : ""}`;
     const arr = [name.trim(), qtyDisplay, parsedCost];
     // Preserva stock_item_id e source_prep_id quando origem é selecionada

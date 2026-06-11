@@ -414,6 +414,9 @@ function ChecklistItemDraft({ categories, subcategories, onClose, onSave, onDele
     : "");
   const [required, setReq]    = useState(initial?.required ?? true);
   const [source, setSource]   = useState(initial?.source && initial.source !== "Manual" ? initial.source : "");
+  // Guard contra duplo clique — onSave é async (insere/atualiza item no banco).
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const valid = label.trim() && cat;
   const buildPatch = () => ({
@@ -423,6 +426,17 @@ function ChecklistItemDraft({ categories, subcategories, onClose, onSave, onDele
     expected: _parseBR(expected),
     required, source: source.trim() || "Manual",
   });
+  const save = async () => {
+    if (savingRef.current || !valid) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onSave(buildPatch());
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
 
   return (
     <ModalShell
@@ -435,16 +449,16 @@ function ChecklistItemDraft({ categories, subcategories, onClose, onSave, onDele
         <div style={{ display: "flex", justifyContent: "space-between", width: "100%", gap: 8 }}>
           <div>
             {isEditing && onDelete && (
-              <button className="btn" data-variant="danger" data-size="sm" onClick={onDelete}>
+              <button className="btn" data-variant="danger" data-size="sm" onClick={onDelete} disabled={saving}>
                 <I.Trash size={11} />Excluir
               </button>
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" disabled={!valid}
-                    onClick={() => onSave(buildPatch())}>
-              {isEditing ? "Salvar alterações" : "Adicionar item"}
+            <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || saving}
+                    onClick={save}>
+              {saving ? "Salvando…" : isEditing ? "Salvar alterações" : "Adicionar item"}
             </button>
           </div>
         </div>
@@ -955,6 +969,11 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
   const [paid, setPaid] = useState(initial?.paid || todayStr);
   const [status, setStatus] = useState(initial?.status || "paid");
   const [touched, setTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // Guard síncrono contra duplo clique no "Salvar" — onSave pode ser async
+  // (ex.: createEntry da Conciliação faz vários awaits antes de fechar o modal);
+  // sem isso, o 2º clique lança o gasto duas vezes.
+  const savingRef = useRef(false);
   const isEditing = !!initial;
 
   const sub = pickable.find((x) => x.id === cat);
@@ -975,13 +994,21 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
     errs.comp  && "Data de competência obrigatória",
   ].filter(Boolean);
 
-  const save = () => {
+  const save = async () => {
+    if (savingRef.current) return;
     if (Object.values(errs).some(Boolean)) {
       setTouched(true);
       window.showToast?.(`Faltam campos: ${errorMessages.join(", ")}`, { tone: "warn", ttl: 4000 });
       return;
     }
-    onSave({ cat, desc, value: parsedValue, comp, paid, status });
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onSave({ cat, desc, value: parsedValue, comp, paid, status });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
 
   const errBorder = { borderColor: "var(--crit)", boxShadow: "0 0 0 1px var(--crit-line) inset" };
@@ -995,15 +1022,15 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
         <div style={{ display: "flex", justifyContent: "space-between", width: "100%", gap: 8 }}>
           <div>
             {isEditing && onDelete && (
-              <button className="btn" data-variant="danger" data-size="sm" onClick={onDelete}>
+              <button className="btn" data-variant="danger" data-size="sm" onClick={onDelete} disabled={saving}>
                 <I.Trash size={11} />Excluir
               </button>
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" onClick={save}>
-              {isEditing ? "Salvar alterações" : "Salvar lançamento"}
+            <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={save} disabled={saving}>
+              {saving ? "Salvando…" : isEditing ? "Salvar alterações" : "Salvar lançamento"}
             </button>
           </div>
         </div>
@@ -1075,11 +1102,22 @@ function FillDraft({ item, categories, subcategories, period, onClose, onSave })
   const [comp, setComp] = useState(`${period}-${dueDay}`);
   const [paid, setPaid] = useState(`${period}-${dueDay}`);
   const [status, setStatus] = useState("paid");
+  // Guard contra duplo clique — onSave (fillChecklistItem) é async e insere lançamento.
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
-  const save = () => {
+  const save = async () => {
+    if (savingRef.current) return;
     const v = _parseBR(value);
     if (!v) return;
-    onSave({ item, value: v, comp, paid, status });
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onSave({ item, value: v, comp, paid, status });
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
 
   return (
@@ -1088,8 +1126,8 @@ function FillDraft({ item, categories, subcategories, period, onClose, onSave })
       subtitle={`Pré-cadastrado · ${parent?.name || ""} → ${sub?.name || ""}`}
       onClose={onClose}
       footer={<>
-        <button className="btn" data-size="sm" onClick={onClose}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" onClick={save}>Confirmar e adicionar à DRE</button>
+        <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" onClick={save} disabled={saving}>{saving ? "Salvando…" : "Confirmar e adicionar à DRE"}</button>
       </>}
     >
       <div style={{ background: "var(--bg-2)", border: "1px solid var(--line)", padding: 14, borderRadius: 4, marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
