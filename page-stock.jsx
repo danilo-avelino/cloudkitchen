@@ -3146,17 +3146,26 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
 // Saídas categorizadas (Vencido / Danificado / Estragado / Fora de uso) que
 // dão baixa no estoque e pesam no CMV. Toda movimentação aqui é gravada como
 // kind='loss' ou 'expiration' em stock_movements, com loss_reason setado.
+// Ajustes de inventário pra baixo (kind='adjust', delta<0) também aparecem
+// aqui como "Extravio" — só exibição; continuam gravados como adjust.
 
 const WASTE_REASONS = [
   { code: "vencido",      label: "Vencido",       kind: "expiration", color: "var(--crit)",  desc: "Insumo passou da validade" },
   { code: "danificado",   label: "Danificado",    kind: "loss",       color: "var(--warn)",  desc: "Quebra, embalagem rompida, contaminação física" },
   { code: "estragado",    label: "Estragado",     kind: "loss",       color: "var(--crit)",  desc: "Apodreceu / fermentou / mofou antes do vencimento" },
   { code: "fora_de_uso",  label: "Fora de uso",   kind: "loss",       color: "var(--fg-2)",  desc: "Descarte por descontinuação, recall, troca de receita" },
+  { code: "extravio",     label: "Extravio",      kind: "adjust",     color: "#a78bfa",      desc: "Falta apurada no inventário/ajuste (contagem menor que o sistema)", auto: true },
 ];
 
 function wasteReasonMeta(code) {
   return WASTE_REASONS.find((r) => r.code === code) || { code, label: code || "—", kind: "loss", color: "var(--fg-2)" };
 }
+
+// Movimento que conta como desperdício na aba: perdas/vencidos + ajustes pra baixo.
+const isWasteMovement = (m) =>
+  m.kind === "loss" || m.kind === "expiration" || (m.kind === "adjust" && Number(m.delta || 0) < 0);
+// Normaliza ajuste negativo pra exibição: ganha o motivo sintético "extravio".
+const asWasteMovement = (m) => (m.kind === "adjust" ? { ...m, lossReason: "extravio" } : m);
 
 function WastesView({ tenantId, items, onApplied }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
@@ -3220,8 +3229,8 @@ function WastesView({ tenantId, items, onApplied }) {
         setOperations(opsRes.data || []);
         const movs = movRes.data || [];
         setAllMovements(movs);
-        setMovements(movs.filter((m) => m.kind === "loss" || m.kind === "expiration"));
-        setPrevWastes((prevRes.data || []).filter((m) => m.kind === "loss" || m.kind === "expiration"));
+        setMovements(movs.filter(isWasteMovement).map(asWasteMovement));
+        setPrevWastes((prevRes.data || []).filter(isWasteMovement).map(asWasteMovement));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -3360,7 +3369,7 @@ function WastesView({ tenantId, items, onApplied }) {
       const movRes = await dbListStockMovements(tenantId, fromIso, toIso, { limit: 10000 });
       const movs = movRes.data || [];
       setAllMovements(movs);
-      setMovements(movs.filter((m) => m.kind === "loss" || m.kind === "expiration"));
+      setMovements(movs.filter(isWasteMovement).map(asWasteMovement));
     }
   };
 
@@ -3439,7 +3448,7 @@ function WastesView({ tenantId, items, onApplied }) {
           <h3 className="card-title">Por motivo</h3>
           <span className="card-sub">Distribuição em R$ no período</span>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 0 }}>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${WASTE_REASONS.length}, 1fr)`, gap: 0 }}>
           {WASTE_REASONS.map((r, i) => {
             const entry = byReason.find((b) => b.code === r.code) || { total: 0, count: 0 };
             const pct   = totals.total > 0 ? (entry.total / totals.total) * 100 : 0;
@@ -3639,7 +3648,7 @@ function WastesView({ tenantId, items, onApplied }) {
                   <td className="num">R$ {fmtBR(m.unitCost)}</td>
                   <td className="num" style={{ color: "var(--crit)" }}>R$ {fmtBR(cost)}</td>
                   <td className="dim" style={{ fontSize: 11.5, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.notes || ""}>
-                    {m.notes || "—"}
+                    {m.notes ? (m.notes.startsWith("inventory:") ? "Apurado no inventário" : m.notes) : "—"}
                   </td>
                 </tr>
               );
@@ -3774,8 +3783,9 @@ function WasteEntryModal({ items, operations, tenantId, onClose, onApplied }) {
     >
       {/* Motivo · radio cards */}
       <div className="h-eyebrow" style={{ marginBottom: 8 }}>Motivo · obrigatório</div>
+      {/* "extravio" é automático (vem do inventário) — não é lançável manualmente */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
-        {WASTE_REASONS.map((r) => {
+        {WASTE_REASONS.filter((r) => !r.auto).map((r) => {
           const active = reason === r.code;
           return (
             <button key={r.code} type="button" onClick={() => setReason(r.code)} style={{
