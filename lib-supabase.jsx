@@ -627,23 +627,35 @@ async function dbApplyStockMovement(tenantId, itemId, deltaQty, kind = "out", re
 // `fromIso` / `toIso` são timestamps ISO; `toIso` opcional (sem limite superior).
 async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, stockItemId = null } = {}) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
-  let q = _client
-    .from("stock_movements")
-    .select(`
-      id, kind, qty, unit_cost, notes, performed_at,
-      reference_type, reference_id, loss_reason,
-      stock_item:stock_items(id, name, unit, compose_cmv, category:stock_categories(id, name)),
-      operation:operations(id, slug, name, short_label, color)
-    `)
-    .eq("tenant_id", tenantId)
-    .order("performed_at", { ascending: false })
-    .limit(limit);
-  if (stockItemId) q = q.eq("stock_item_id", stockItemId);
-  if (fromIso) q = q.gte("performed_at", fromIso);
-  if (toIso)   q = q.lt("performed_at", toIso);
-  const { data, error } = await q;
+  // PostgREST corta a resposta em 1000 linhas (max-rows) mesmo com .limit() maior.
+  // Como a ordenação é DESC, o corte descarta silenciosamente os dias mais antigos
+  // da janela (bug do CMV de qui 04/06 zerado) — então busca em páginas via .range().
+  const PAGE = 1000;
+  const rows = [];
+  let error = null;
+  for (let offset = 0; offset < limit; offset += PAGE) {
+    let q = _client
+      .from("stock_movements")
+      .select(`
+        id, kind, qty, unit_cost, notes, performed_at,
+        reference_type, reference_id, loss_reason,
+        stock_item:stock_items(id, name, unit, compose_cmv, category:stock_categories(id, name)),
+        operation:operations(id, slug, name, short_label, color)
+      `)
+      .eq("tenant_id", tenantId)
+      .order("performed_at", { ascending: false })
+      .order("id", { ascending: false })
+      .range(offset, Math.min(offset + PAGE, limit) - 1);
+    if (stockItemId) q = q.eq("stock_item_id", stockItemId);
+    if (fromIso) q = q.gte("performed_at", fromIso);
+    if (toIso)   q = q.lt("performed_at", toIso);
+    const { data, error: pageError } = await q;
+    if (pageError) { error = pageError; break; }
+    rows.push(...(data || []));
+    if (!data || data.length < Math.min(PAGE, limit - offset)) break; // última página
+  }
   if (error) return { data: null, source: "mock", error };
-  const mapped = (data || []).map((m) => ({
+  const mapped = rows.map((m) => ({
     id:    m.id,
     at:    m.performed_at,
     kind:  m.kind,

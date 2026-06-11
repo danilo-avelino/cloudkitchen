@@ -48,6 +48,10 @@ function Requests({ scope }) {
     catch { return new Set(); }
   });
   const [showHistory, setShowHistory] = useState(false);
+  // Requisições com avanço de status em andamento — bloqueia duplo clique em
+  // "Separar"/"Confirmar entrega" (ref p/ guard síncrono + state p/ desabilitar o botão).
+  const advancingRef = useRef(new Set());
+  const [advancingIds, setAdvancingIds] = useState(() => new Set());
 
   // Persiste o conjunto de impressas para que o ✅ sobreviva ao reload da página.
   useEffect(() => {
@@ -139,11 +143,17 @@ function Requests({ scope }) {
   ];
 
   const advance = async (id) => {
+    // Guard síncrono (ref) contra duplo clique — o state ainda não re-renderizou
+    // entre os dois cliques; o ref bloqueia na hora.
+    if (advancingRef.current.has(id)) return;
     const order = ["pending", "separated", "delivered"];
     const cur = items.find((r) => r.id === id);
     if (!cur) return;
     const next = order[Math.min(order.indexOf(cur.status) + 1, order.length - 1)];
     if (next === cur.status) return;
+    advancingRef.current.add(id);
+    setAdvancingIds(new Set(advancingRef.current));
+    try {
 
     const nowIso = new Date().toISOString();
     const stampPatch = next === "separated" ? { separatedAt: nowIso }
@@ -197,6 +207,11 @@ function Requests({ scope }) {
     } else {
       const label = { separated: "separada" }[next] || next;
       window.showToast(`Requisição ${id} ${label}`, { tone: "ok" });
+    }
+
+    } finally {
+      advancingRef.current.delete(id);
+      setAdvancingIds(new Set(advancingRef.current));
     }
   };
 
@@ -384,6 +399,7 @@ function Requests({ scope }) {
                         r={r}
                         onAdvance={() => advance(r.id)}
                         canAdvance={col.id !== "delivered"}
+                        advancing={advancingIds.has(r.id)}
                         onEdit={col.id === "pending" ? () => setEditingReq(r) : null}
                         onPrint={col.id === "pending" ? () => setPrintingReq(r) : null}
                         printed={printedIds.has(r.id)}
@@ -449,7 +465,7 @@ function Requests({ scope }) {
                           </>
                         )}
                         {r.status !== "delivered" && (
-                          <button className="btn" data-variant="ghost" data-size="sm" onClick={() => advance(r.id)}>Avançar <I.ChevronR size={11} /></button>
+                          <button className="btn" data-variant="ghost" data-size="sm" disabled={advancingIds.has(r.id)} onClick={() => advance(r.id)}>Avançar <I.ChevronR size={11} /></button>
                         )}
                       </div>
                     </td>
@@ -687,7 +703,7 @@ function RequestsHistoryModal({ requests = [], onClose }) {
   );
 }
 
-function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint, printed }) {
+function RequestCard({ r, onAdvance, canAdvance, advancing, onEdit, onPrint, printed }) {
   const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
   const op = MOCK.opById(r.op);
   return (
@@ -769,9 +785,9 @@ function RequestCard({ r, onAdvance, canAdvance, onEdit, onPrint, printed }) {
             </button>
           )}
           {canAdvance && (
-            <button className="btn" data-variant="primary" data-size="sm" onClick={onAdvance}
+            <button className="btn" data-variant="primary" data-size="sm" onClick={onAdvance} disabled={advancing}
                     style={{ flex: 1, justifyContent: "center" }}>
-              {r.status === "pending" ? "Separar" : "Confirmar entrega"}
+              {advancing ? "Processando…" : r.status === "pending" ? "Separar" : "Confirmar entrega"}
             </button>
           )}
         </div>
