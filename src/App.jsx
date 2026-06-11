@@ -26,6 +26,8 @@ const PAGE_SLUGS = {
   saas:      "admin",
 };
 const SLUG_TO_PAGE = Object.fromEntries(Object.entries(PAGE_SLUGS).map(([id, s]) => [s, id]));
+// Rota standalone (tela cheia, sem shell): página mobile de lançamento de requisição.
+const MOBILE_SLUG = "mobile";
 const _hashSlug = () => window.location.hash.replace(/^#\/?/, "").split(/[/?#]/)[0].trim();
 const pageFromHash = () => { try { return SLUG_TO_PAGE[_hashSlug()] || null; } catch { return null; } };
 
@@ -33,6 +35,7 @@ export function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULS);
   const [scope, setScope] = useState("all");
   const [pageRaw, setPageRaw] = useState(() => pageFromHash() || "dashboard");
+  const [rawHash, setRawHash] = useState(_hashSlug);
   const [opMenuOpen, setOpMenuOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
   // Quando o link de recuperação de senha é aberto (?reset=1), forçamos a tela
@@ -72,6 +75,9 @@ export function App() {
   // Gate de acesso a páginas — se o usuário não tem o módulo, redireciona p/ um permitido
   const allowedPages = typeof getAllowedModules === "function" ? getAllowedModules(user) : ["dashboard"];
   const page = allowedPages.includes(pageRaw) ? pageRaw : (allowedPages[0] || "dashboard");
+  // Usuário "só-mobile": único módulo permitido é "requests" → entra direto na tela
+  // mobile e não vê o "Abrir app completo" (não há mais nada pra abrir).
+  const mobileOnly = allowedPages.length === 1 && allowedPages[0] === "requests";
   const setPage = (next) => {
     if (!allowedPages.includes(next)) {
       window.showToast?.("Sem acesso a esse módulo. Fale com o admin.", { tone: "warn", ttl: 3500 });
@@ -84,7 +90,7 @@ export function App() {
 
   // URL → estado: back/forward do browser e edição manual da hash.
   useEffect(() => {
-    const onHash = () => { const id = pageFromHash(); if (id) setPageRaw(id); };
+    const onHash = () => { setRawHash(_hashSlug()); const id = pageFromHash(); if (id) setPageRaw(id); };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -92,11 +98,18 @@ export function App() {
   // Estado → URL: mantém a hash em sincronia com a página efetiva (já passada pelo
   // gate de acesso). replaceState para não poluir o histórico em auto-correções
   // (hash vazia no load, slug inválido, ou redirect por falta de módulo).
+  // Usuário só-mobile: força a rota standalone #/mobile ao logar / no load.
+  useEffect(() => {
+    if (!user || !mobileOnly) return;
+    if (rawHash !== MOBILE_SLUG) window.location.hash = `/${MOBILE_SLUG}`;
+  }, [user, mobileOnly, rawHash]);
+
   useEffect(() => {
     if (!user) return;
+    if (rawHash === MOBILE_SLUG || mobileOnly) return; // rota standalone — não força sync com a página do shell
     const slug = PAGE_SLUGS[page] || page;
     if (_hashSlug() !== slug) window.history.replaceState(null, "", `#/${slug}`);
-  }, [page, user]);
+  }, [page, user, rawHash, mobileOnly]);
 
   const handleLogout = () => {
     clearStoredSession();
@@ -135,6 +148,21 @@ export function App() {
         <Toasts toasts={toasts} />
       </>
     );
+  }
+
+  // Rota standalone (#/mobile): tela cheia de lançamento de requisição, sem o shell.
+  // Entra aqui pela hash #/mobile OU quando o usuário é só-mobile (entra direto).
+  // Exige acesso ao módulo "requests"; senão volta pro app normal.
+  if (rawHash === MOBILE_SLUG || mobileOnly) {
+    if (allowedPages.includes("requests")) {
+      return (
+        <>
+          <MobileRequests user={user} onLogout={handleLogout} canOpenApp={!mobileOnly} />
+          <Toasts toasts={toasts} />
+        </>
+      );
+    }
+    window.location.hash = `/${PAGE_SLUGS[page] || "dashboard"}`;
   }
 
   return <AppShell

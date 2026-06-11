@@ -65,6 +65,7 @@ async function bootstrap() {
   await import("../page-recipes.jsx");
   await import("../page-revenue.jsx");
   await import("../page-requests.jsx");
+  await import("../page-mobile-requests.jsx");
   await import("../page-purchases.jsx");
   await import("../page-shopping.jsx");
   await import("../page-cmv.jsx");

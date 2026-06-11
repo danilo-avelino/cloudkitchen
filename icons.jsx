@@ -275,6 +275,12 @@ const I = {
       <circle cx="12" cy="9" r="2.5" />
     </Icon>
   ),
+  // Estrela · passe fill="currentColor" para a versão preenchida (favoritado)
+  Star: (p) => (
+    <Icon {...p}>
+      <path d="M12 3 l2.6 5.3 5.9 0.86 -4.27 4.16 1 5.88 -5.23 -2.75 -5.23 2.75 1 -5.88 -4.27 -4.16 5.9 -0.86 Z" />
+    </Icon>
+  ),
 };
 
 window.I = I;

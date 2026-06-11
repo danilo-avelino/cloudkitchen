@@ -1022,6 +1022,46 @@ async function dbDeleteKitchenRequest(id) {
 }
 
 // =====================================================================
+// FAVORITOS de insumos por usuário (página mobile de requisições)
+// A RLS (user_favorite_items_own) já restringe ao usuário logado + tenant.
+// Fail-soft: se o DB/tabela não estiver disponível, retorna { error } e a
+// página esconde a seção de favoritos sem quebrar o lançamento.
+// =====================================================================
+async function dbListFavoriteItems(tenantId) {
+  if (!isDbOnline() || !_client) return { data: [], error: new Error("DB offline") };
+  const { data, error } = await _client
+    .from("user_favorite_items")
+    .select("stock_item_id")
+    .eq("tenant_id", tenantId);
+  if (error) return { data: [], error };
+  return { data: (data || []).map((r) => r.stock_item_id), error: null };
+}
+
+async function dbAddFavoriteItem(tenantId, stockItemId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data: userData } = await _client.auth.getUser();
+  const userId = userData?.user?.id;
+  if (!userId) return { error: new Error("Sessão inválida") };
+  const { error } = await _client
+    .from("user_favorite_items")
+    .upsert(
+      { user_id: userId, tenant_id: tenantId, stock_item_id: stockItemId },
+      { onConflict: "user_id,tenant_id,stock_item_id", ignoreDuplicates: true },
+    );
+  return { error: error || null };
+}
+
+async function dbRemoveFavoriteItem(tenantId, stockItemId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client
+    .from("user_favorite_items")
+    .delete()
+    .eq("tenant_id", tenantId)
+    .eq("stock_item_id", stockItemId);
+  return { error: error || null };
+}
+
+// =====================================================================
 // PURCHASE ORDERS · pedidos / listas de compras
 // =====================================================================
 function mapPurchaseOrderFromDb(row) {
@@ -2748,6 +2788,7 @@ Object.assign(window, {
   dbListRevenueEntries, dbInsertRevenueEntry, dbUpdateRevenueEntry, dbDeleteRevenueEntry,
   dbListKitchenRequests, dbInsertKitchenRequest, dbUpdateKitchenRequestStatus, dbDeleteKitchenRequest,
   dbReplaceKitchenRequestItems,
+  dbListFavoriteItems, dbAddFavoriteItem, dbRemoveFavoriteItem,
   dbListPurchaseOrders, dbInsertPurchaseOrder, dbDeletePurchaseOrder,
   dbUpdatePurchaseOrderItem, dbDeletePurchaseOrderItem,
   dbListGoodsReceipts, dbInsertGoodsReceipt,
