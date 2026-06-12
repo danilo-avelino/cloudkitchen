@@ -1617,6 +1617,7 @@ function AllocationPanel({ item, onClose }) {
   const [movements, setMovements] = useState(null);
   const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
   const [consumption7d, setConsumption7d] = useState(null);
+  const [showHistory, setShowHistory] = useState(false); // modal "Ver histórico" do item
   // Modo de auto min/max: 'off' | 'weekly' | 'monthly'
   const [autoMinMode, setAutoMinMode] = useState(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
   const [savingAutoMin, setSavingAutoMin] = useState(false);
@@ -1902,7 +1903,13 @@ function AllocationPanel({ item, onClose }) {
       </div>
 
       <div style={{ padding: "16px 18px", borderTop: "1px solid var(--line-soft)", marginTop: "auto" }}>
-        <div className="h-eyebrow" style={{ marginBottom: 10 }}>Movimentações recentes</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <span className="h-eyebrow">Movimentações recentes</span>
+          <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setShowHistory(true)}
+                  title="Ver todas as movimentações deste item">
+            <I.Clock size={12} />Ver histórico
+          </button>
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 11.5 }}>
           {movements == null ? (
             <span style={{ color: "var(--fg-3)", fontSize: 11 }}>Carregando…</span>
@@ -1924,7 +1931,195 @@ function AllocationPanel({ item, onClose }) {
           })}
         </div>
       </div>
+
+      {showHistory && (
+        <ItemHistoryModal item={item} onClose={() => setShowHistory(false)} />
+      )}
     </div>
+  );
+}
+
+// Histórico completo de movimentações de UM item · filtros de período (incl.
+// "Tudo") + seleção de intervalo personalizado por data. Lê do Supabase via
+// dbListStockMovements com stockItemId; offline mostra aviso (sem dados reais).
+function ItemHistoryModal({ item, onClose }) {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const [period, setPeriod] = useState("30d"); // today|yesterday|7d|30d|all|custom
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [movements, setMovements] = useState(null);
+  const [error, setError] = useState(null);
+
+  const range = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (period === "today") return { from: startOfToday, to: null };
+    if (period === "yesterday") {
+      const y = new Date(startOfToday); y.setDate(y.getDate() - 1);
+      return { from: y, to: startOfToday };
+    }
+    if (period === "7d")  { const c = new Date(now); c.setDate(c.getDate() - 7);  return { from: c, to: null }; }
+    if (period === "30d") { const c = new Date(now); c.setDate(c.getDate() - 30); return { from: c, to: null }; }
+    if (period === "all") return { from: null, to: null };
+    // custom · datas inclusivas (to = dia seguinte 00:00 para incluir o dia inteiro)
+    const from = customFrom ? new Date(`${customFrom}T00:00:00`) : null;
+    let to = null;
+    if (customTo) { to = new Date(`${customTo}T00:00:00`); to.setDate(to.getDate() + 1); }
+    return { from, to };
+  }, [period, customFrom, customTo]);
+
+  useEffect(() => {
+    if (!dbStatus.isOnline || !item.id) { setMovements([]); return; }
+    setMovements(null); setError(null);
+    let cancelled = false;
+    (async () => {
+      const ctx = await dbGetCurrentContext();
+      if (cancelled) return;
+      const tid = ctx?.tenant?.id;
+      if (!tid) { setMovements([]); return; }
+      const res = await dbListStockMovements(
+        tid,
+        range.from?.toISOString() || null,
+        range.to?.toISOString() || null,
+        { stockItemId: item.id, limit: 5000 },
+      );
+      if (cancelled) return;
+      if (res.error) { setError(res.error.message || "Falha ao carregar"); setMovements([]); return; }
+      setMovements(res.data || []);
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline, item.id, range.from, range.to]);
+
+  const fmtAt = (iso) => {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    const dow = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"][d.getDay()];
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${dow} ${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const kindLabel = (k) => k === "in" ? "Entrada"
+                        : k === "loss" ? "Perda"
+                        : k === "expiration" ? "Vencimento"
+                        : k === "adjust" ? "Ajuste"
+                        : "Saída";
+  const kindTone = (k) => k === "in" ? "ok"
+                       : (k === "loss" || k === "expiration") ? "crit"
+                       : k === "adjust" ? "warn"
+                       : "neutral";
+  const fmtRefRow = (m) => {
+    if (m.ref && m.ref !== "—") return m.ref;
+    if (m.referenceType === "kitchen_request") return "Requisição";
+    if (m.kind === "in") return "Entrada";
+    return "—";
+  };
+
+  const summary = useMemo(() => {
+    const s = { in: 0, out: 0, loss: 0, net: 0 };
+    (movements || []).forEach((m) => {
+      const bucket = m.kind === "in" ? "in"
+                   : (m.kind === "loss" || m.kind === "expiration") ? "loss"
+                   : "out";
+      s[bucket] += 1;
+      s.net += Number(m.delta) || 0;
+    });
+    return s;
+  }, [movements]);
+
+  const count = movements?.length ?? 0;
+  const periodLabel = {
+    today: "hoje", yesterday: "ontem", "7d": "últimos 7 dias",
+    "30d": "últimos 30 dias", all: "todo o período", custom: "período personalizado",
+  }[period];
+
+  return (
+    <Modal
+      title={`Histórico · ${item.name}`}
+      subtitle={movements == null ? "carregando…" : `${count} ${count === 1 ? "movimentação" : "movimentações"} · ${periodLabel}`}
+      onClose={onClose}
+      width={780}
+    >
+      {/* Filtros */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+        padding: "8px 10px", background: "var(--bg-2)",
+        border: "1px solid var(--line)", borderRadius: 4, marginBottom: 12,
+      }}>
+        <Tabs value={period} onChange={setPeriod} options={[
+          { id: "today",     label: "Hoje" },
+          { id: "yesterday", label: "Ontem" },
+          { id: "7d",        label: "7 dias" },
+          { id: "30d",       label: "30 dias" },
+          { id: "all",       label: "Tudo" },
+          { id: "custom",    label: "Personalizado" },
+        ]} />
+        <span style={{ flex: 1 }} />
+        <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-2)", display: "flex", gap: 12 }}>
+          <span><span style={{ color: "var(--ok)" }}>{summary.in}</span> entradas</span>
+          <span><span style={{ color: "var(--fg-0)" }}>{summary.out}</span> saídas</span>
+          <span><span style={{ color: "var(--crit)" }}>{summary.loss}</span> perdas</span>
+        </span>
+      </div>
+
+      {period === "custom" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, fontSize: 12, color: "var(--fg-2)" }}>
+          <span>De</span>
+          <input type="date" className="input" value={customFrom} max={customTo || undefined}
+                 onChange={(e) => setCustomFrom(e.target.value)} />
+          <span>até</span>
+          <input type="date" className="input" value={customTo} min={customFrom || undefined}
+                 onChange={(e) => setCustomTo(e.target.value)} />
+          {(!customFrom && !customTo) && (
+            <span style={{ fontSize: 11, color: "var(--fg-3)" }}>selecione as datas (vazio = sem limite)</span>
+          )}
+        </div>
+      )}
+
+      {error && (
+        <div style={{
+          padding: "10px 12px", marginBottom: 12,
+          background: "var(--crit-soft)", border: "1px solid var(--crit)", borderRadius: 4,
+          fontSize: 12, color: "var(--crit)",
+        }}>
+          Erro ao carregar do Supabase: {error}
+        </div>
+      )}
+
+      <div style={{ maxHeight: 460, overflow: "auto" }}>
+        <table className="table" data-density="compact">
+          <thead style={{ position: "sticky", top: 0, background: "var(--bg-1)", zIndex: 1 }}>
+            <tr>
+              <th>Quando</th>
+              <th>Tipo</th>
+              <th className="num">Delta</th>
+              <th>Operação</th>
+              <th>Ref.</th>
+            </tr>
+          </thead>
+          <tbody>
+            {movements == null ? (
+              <tr><td colSpan={5} className="dim" style={{ textAlign: "center", padding: 32 }}>Carregando movimentações…</td></tr>
+            ) : count === 0 ? (
+              <tr><td colSpan={5} className="dim" style={{ textAlign: "center", padding: 32 }}>
+                {dbStatus.isOnline ? "Nenhuma movimentação no período selecionado." : "Histórico disponível apenas com banco conectado."}
+              </td></tr>
+            ) : movements.map((m) => {
+              const isIn = m.kind === "in";
+              return (
+                <tr key={m.id ?? `${m.at}-${m.delta}`}>
+                  <td className="mono" style={{ fontSize: 11, whiteSpace: "nowrap" }}>{fmtAt(m.at)}</td>
+                  <td><span className="badge" data-tone={kindTone(m.kind)}>{kindLabel(m.kind)}</span></td>
+                  <td className="num" style={{ color: isIn ? "var(--ok)" : "var(--fg-0)", whiteSpace: "nowrap" }}>
+                    {isIn ? "+" : "−"}{Math.abs(Number(m.delta) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 3 })} {item.unit}
+                  </td>
+                  <td style={{ color: "var(--fg-2)", fontSize: 11.5 }}>{m.operationName || m.operationShort || (isIn ? "—" : "—")}</td>
+                  <td style={{ color: "var(--fg-2)", fontSize: 11.5, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fmtRefRow(m)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Modal>
   );
 }
 
