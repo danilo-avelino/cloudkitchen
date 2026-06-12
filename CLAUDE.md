@@ -113,5 +113,6 @@ Sem USAGE em `public`, edge functions caem em 500 com `permission denied for sch
 - Vale também para criar PR, push de branch, merge, e qualquer ação visível fora do working tree local.
 
 ---
+7. Botões. Em todos os novos botões devemos adicionar um guard de duplo-clique e aviso de Carregando
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

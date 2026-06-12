@@ -22,10 +22,12 @@ yarn-error.log
 
 # Vite build
 dist/
+dist_*/
 .vite/
 
 # Diretórios temporários
 .DS_Store
+.vs/
 .vscode/
 .idea/
 *.swp
