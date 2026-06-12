@@ -1,0 +1,961 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>Cloud Kitchen — Largue as planilhas. Gestão para dark kitchens e delivery.</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Sistema + método validado de gestão para dark kitchens e delivery: estoque, lista de compras automática, CMV diário por marca, ficha técnica que se atualiza sozinha e DRE automática." />
+<meta property="og:title" content="Cloud Kitchen — Largue as planilhas." />
+<meta property="og:description" content="Não vendemos só um sistema: entramos na sua operação para aplicar um método validado de gestão de dark kitchens e delivery." />
+<meta property="og:image" content="shots/dashboard.png" />
+<link rel="icon" type="image/png" href="icon.png" />
+
+<!-- Links antigos do app apontavam para a raiz com hash (#/mobile, #/dashboard…).
+     Agora a raiz é a página de vendas e o app vive em app/ — redireciona preservando a rota. -->
+<script>
+(function () {
+  var m = window.location.hash.match(/^#\/?([a-z-]+)/);
+  var slugs = ["dashboard","estoque","fichas-tecnicas","faturamento","requisicoes","compras","cmv","financeiro","dre","configuracoes","admin","mobile"];
+  if (m && slugs.indexOf(m[1]) !== -1) window.location.replace("app/" + window.location.hash);
+})();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<!-- ============================================================
+     CONTATO · troque aqui o e-mail / WhatsApp dos CTAs
+     e a URL do app (botão Entrar)
+     ============================================================ -->
+<script>
+  const CONTATO = {
+    email: "danilocaioavelino@gmail.com",
+    assunto: "Demonstração Cloud Kitchen",
+    // formato wa.me: 55 + DDD + número, só dígitos. Deixe "" para esconder o botão.
+    whatsapp: "",
+    // URL do app (botão Entrar) — relativa à landing; o deploy publica o app em app/
+    app: "app/",
+  };
+</script>
+
+<style>
+/* ====== tokens (mesmos do produto) ====== */
+:root {
+  --bg-0: #07080a;
+  --bg-1: #0c0e11;
+  --bg-2: #131619;
+  --bg-3: #1a1e22;
+  --line: #1f2328;
+  --line-soft: #15181c;
+  --line-strong: #2a2f35;
+
+  --fg-0: #f3f5f7;
+  --fg-1: #c8ccd1;
+  --fg-2: #8a9098;
+  --fg-3: #5a6068;
+  --fg-4: #3a4048;
+
+  --accent-bright: #2d8c66;
+  --accent-soft: rgba(45, 140, 102, 0.12);
+  --accent-line: rgba(45, 140, 102, 0.32);
+
+  --ok: #2d8c66;   --ok-soft: rgba(45,140,102,0.10);  --ok-line: rgba(45,140,102,0.28);
+  --warn: #c2843a; --warn-soft: rgba(194,132,58,0.10); --warn-line: rgba(194,132,58,0.28);
+  --crit: #b04545; --crit-soft: rgba(176,69,69,0.10);  --crit-line: rgba(176,69,69,0.28);
+  --info: #3d6cb0; --info-soft: rgba(61,108,176,0.10); --info-line: rgba(61,108,176,0.28);
+
+  --sans: "Inter Tight", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --wrap: 1140px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg-0);
+  color: var(--fg-1);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.6;
+  letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: var(--accent-soft); color: var(--fg-0); }
+a { color: inherit; }
+img { display: block; }
+
+.wrap { max-width: var(--wrap); margin: 0 auto; padding: 0 24px; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ====== primitivas ====== */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent-bright);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  display: flex; align-items: center; gap: 10px;
+}
+.eyebrow::before { content: ""; width: 22px; height: 1px; background: var(--accent-line); }
+
+h1, h2, h3 { color: var(--fg-0); font-weight: 500; margin: 0; }
+h1 { font-size: clamp(38px, 5.6vw, 62px); line-height: 1.04; letter-spacing: -0.03em; }
+h2 { font-size: clamp(26px, 3.4vw, 36px); line-height: 1.12; letter-spacing: -0.022em; }
+
+.lead { font-size: 17px; color: var(--fg-2); line-height: 1.65; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 11px 20px;
+  font-size: 14px; font-weight: 500; letter-spacing: -0.005em;
+  font-family: var(--sans);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-2);
+  color: var(--fg-0);
+  border-radius: 6px;
+  text-decoration: none;
+  transition: background 120ms ease, border-color 120ms ease, filter 120ms ease;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--bg-3); border-color: var(--fg-4); }
+.btn.primary { background: var(--accent-bright); border-color: var(--accent-bright); color: #02100a; }
+.btn.primary:hover { filter: brightness(1.1); }
+.btn .arr { font-family: var(--mono); font-size: 13px; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 7px;
+  font-family: var(--mono); font-size: 10px;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  border: 1px solid; border-radius: 2px; white-space: nowrap;
+}
+.badge.dim { color: var(--fg-3); border-color: var(--line-strong); background: var(--bg-2); }
+
+/* ====== header ====== */
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  background: rgba(7,8,10,0.86);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line-soft);
+}
+.topbar-in { display: flex; align-items: center; gap: 28px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; margin-right: auto; }
+.brand img { width: 34px; height: 34px; object-fit: contain; }
+.brand b { font-size: 15.5px; font-weight: 600; color: var(--fg-0); letter-spacing: -0.01em; }
+.brand span { font-family: var(--mono); font-size: 9.5px; color: var(--fg-3); letter-spacing: 0.1em; text-transform: uppercase; margin-top: 3px; }
+.nav { display: flex; align-items: center; gap: 24px; }
+.nav a { font-size: 13.5px; color: var(--fg-2); text-decoration: none; transition: color 120ms; }
+.nav a:hover { color: var(--fg-0); }
+.topbar .btn { padding: 7px 14px; font-size: 13px; }
+.nav-toggle { display: none; background: none; border: 1px solid var(--line); color: var(--fg-1); border-radius: 6px; padding: 6px 10px; font-family: var(--mono); font-size: 12px; cursor: pointer; }
+
+/* ====== hero ====== */
+.hero { padding: 88px 0 0; position: relative; overflow: hidden; }
+.hero::before {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(640px 320px at 78% -10%, rgba(45,140,102,0.07), transparent 70%),
+    radial-gradient(520px 300px at 8% 8%, rgba(61,108,176,0.04), transparent 70%);
+  pointer-events: none;
+}
+.hero-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 4fr); gap: 48px; align-items: end; position: relative; }
+.hero h1 { margin: 18px 0 0; }
+.hero .lead { margin: 22px 0 0; max-width: 580px; }
+.hero-ctas { display: flex; gap: 12px; margin-top: 32px; flex-wrap: wrap; }
+.hero-side {
+  border-left: 1px solid var(--line);
+  padding-left: 28px;
+  display: flex; flex-direction: column; gap: 22px;
+  padding-bottom: 6px;
+}
+.hero-fact b { display: block; font-size: 15px; font-weight: 500; color: var(--fg-0); letter-spacing: -0.01em; }
+.hero-fact span { font-size: 13px; color: var(--fg-3); }
+.hero-fact .mono-tag { font-family: var(--mono); font-size: 10px; color: var(--accent-bright); letter-spacing: 0.08em; text-transform: uppercase; display: block; margin-bottom: 4px; }
+
+/* ====== moldura de print real ====== */
+.shot {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-1);
+  overflow: hidden;
+  box-shadow: 0 30px 80px -30px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.015) inset;
+}
+.shot-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-2);
+}
+.shot-bar .dots { display: flex; gap: 5px; }
+.shot-bar .dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--bg-3); border: 1px solid var(--line-strong); }
+.shot-bar .url {
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-3);
+  background: var(--bg-1); border: 1px solid var(--line-soft);
+  padding: 3px 12px; border-radius: 4px;
+  margin: 0 auto;
+}
+/* aspect-ratio fixa a altura antes do lazy-load — evita layout shift nas âncoras */
+.shot img { width: 100%; height: auto; aspect-ratio: 1440 / 880; object-fit: cover; }
+.shot-cap {
+  display: flex; align-items: baseline; gap: 10px;
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-3);
+  letter-spacing: 0.05em; text-transform: uppercase;
+  margin-top: 14px;
+}
+.shot-cap::before { content: "▸"; color: var(--accent-bright); }
+.hero-shot-wrap { position: relative; margin-top: 64px; }
+
+/* celular com print real */
+.phone {
+  width: 264px; flex-shrink: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 26px;
+  background: var(--bg-1);
+  padding: 9px;
+  box-shadow: 0 30px 70px -30px rgba(0,0,0,0.7);
+}
+.phone img { width: 100%; height: auto; border-radius: 17px; aspect-ratio: 390 / 844; object-fit: cover; }
+
+/* requisições: print desktop + celular lado a lado */
+.req-duo { display: flex; gap: 28px; align-items: flex-start; }
+.req-duo .req-main { flex: 1; min-width: 0; }
+.req-duo .phone { margin-top: 36px; }
+
+/* ====== seções ====== */
+section { padding: 96px 0; }
+section.tight { padding: 72px 0; }
+.sec-head { max-width: 680px; }
+.sec-head h2 { margin-top: 16px; }
+.sec-head p { margin: 14px 0 0; color: var(--fg-2); font-size: 15.5px; }
+
+/* faixa de fatos */
+.facts { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--bg-1); }
+.facts-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+.fact { padding: 26px 24px; border-left: 1px solid var(--line); }
+.fact:first-child { border-left: 0; }
+.fact .k { font-family: var(--mono); font-size: 10px; color: var(--accent-bright); letter-spacing: 0.1em; text-transform: uppercase; }
+.fact b { display: block; font-size: 15.5px; font-weight: 500; color: var(--fg-0); margin-top: 8px; letter-spacing: -0.01em; line-height: 1.35; }
+.fact span { display: block; font-size: 12.5px; color: var(--fg-3); margin-top: 6px; }
+
+/* blocos de módulo */
+.mod { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; margin-top: 80px; }
+.mod.flip > .mod-txt { order: 2; }
+.mod.wide { grid-template-columns: 1fr; gap: 32px; }
+.mod.wide .mod-txt { max-width: 640px; }
+.mod-num { font-family: var(--mono); font-size: 11px; color: var(--fg-4); letter-spacing: 0.1em; }
+.mod-txt h3 { font-size: clamp(20px, 2.4vw, 26px); margin-top: 10px; letter-spacing: -0.018em; line-height: 1.2; }
+.mod-txt p { color: var(--fg-2); margin: 14px 0 0; }
+.mod-list { list-style: none; margin: 20px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.mod-list li { display: flex; gap: 11px; font-size: 13.5px; color: var(--fg-1); }
+.mod-list li::before { content: "—"; color: var(--accent-bright); font-family: var(--mono); flex-shrink: 0; }
+
+/* método (implantação) */
+.steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 56px; counter-reset: step; }
+.step { background: var(--bg-1); padding: 28px 24px 32px; }
+.step::before {
+  counter-increment: step;
+  content: "0" counter(step);
+  font-family: var(--mono); font-size: 11px;
+  color: var(--accent-bright); letter-spacing: 0.1em;
+}
+.step b { display: block; font-size: 15.5px; font-weight: 500; color: var(--fg-0); margin-top: 14px; letter-spacing: -0.01em; }
+.step p { margin: 8px 0 0; font-size: 13px; color: var(--fg-2); line-height: 1.55; }
+
+/* inteligência (ml) */
+.ml-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 64px; align-items: center; }
+.ml-log {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-0);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+}
+.ml-log .hd {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-2);
+  font-size: 10px; color: var(--fg-3);
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.ml-log .hd::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-bright); }
+.ml-line { display: flex; gap: 14px; padding: 13px 16px; border-bottom: 1px solid var(--line-soft); align-items: baseline; }
+.ml-line:last-child { border-bottom: 0; }
+.ml-line .tag {
+  flex-shrink: 0; width: 92px;
+  font-size: 9.5px; color: var(--accent-bright);
+  letter-spacing: 0.06em; text-transform: uppercase;
+}
+.ml-line .tx { color: var(--fg-1); font-size: 11.5px; line-height: 1.5; }
+.ml-line .tx em { color: var(--fg-3); font-style: normal; }
+
+/* grade de módulos menores */
+.grid-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 64px; }
+.gcard { background: var(--bg-1); padding: 26px 24px; display: flex; flex-direction: column; gap: 10px; min-height: 168px; }
+.gcard:hover { background: var(--bg-2); }
+.gcard .gn { font-family: var(--mono); font-size: 10px; color: var(--fg-4); letter-spacing: 0.1em; }
+.gcard b { font-size: 15px; font-weight: 500; color: var(--fg-0); letter-spacing: -0.01em; }
+.gcard p { margin: 0; font-size: 13px; color: var(--fg-2); line-height: 1.55; }
+
+/* para quem */
+.who-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 56px; }
+.who {
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-1);
+  padding: 28px 26px 30px;
+}
+.who .wt { font-family: var(--mono); font-size: 10px; color: var(--accent-bright); letter-spacing: 0.1em; text-transform: uppercase; }
+.who b { display: block; font-size: 17px; font-weight: 500; color: var(--fg-0); margin-top: 12px; letter-spacing: -0.012em; }
+.who p { margin: 10px 0 0; font-size: 13.5px; color: var(--fg-2); line-height: 1.6; }
+
+/* segurança */
+.sec-dark { background: var(--bg-1); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.sec-grid2 { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 64px; align-items: start; }
+.sec-bullets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.sec-bullets li { display: flex; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--line-soft); }
+.sec-bullets li:last-child { border-bottom: 0; }
+.sec-bullets .bi { font-family: var(--mono); font-size: 10px; color: var(--fg-4); padding-top: 3px; flex-shrink: 0; width: 24px; }
+.sec-bullets b { display: block; font-size: 14.5px; font-weight: 500; color: var(--fg-0); letter-spacing: -0.008em; }
+.sec-bullets p { margin: 4px 0 0; font-size: 13px; color: var(--fg-2); line-height: 1.55; }
+
+/* CTA final */
+.cta-final {
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background:
+    radial-gradient(560px 240px at 85% 0%, rgba(45,140,102,0.10), transparent 70%),
+    var(--bg-1);
+  padding: 64px 56px;
+  display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 4fr);
+  gap: 40px; align-items: center;
+}
+.cta-final h2 { font-size: clamp(24px, 3vw, 32px); }
+.cta-final p { color: var(--fg-2); margin: 14px 0 0; max-width: 480px; }
+.cta-actions { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
+.cta-actions .btn { justify-content: center; padding: 13px 22px; }
+.cta-note { font-family: var(--mono); font-size: 10px; color: var(--fg-3); text-align: center; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* footer */
+footer { border-top: 1px solid var(--line); padding: 40px 0 48px; }
+.foot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.foot img { width: 28px; height: 28px; object-fit: contain; opacity: 0.85; }
+.foot .fb b { font-size: 13.5px; font-weight: 600; color: var(--fg-0); display: block; }
+.foot .fb span { font-size: 11.5px; color: var(--fg-3); }
+.foot .fr { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--fg-4); letter-spacing: 0.05em; }
+
+/* reveal on scroll */
+.rv { opacity: 0; transform: translateY(14px); transition: opacity 520ms cubic-bezier(0.2,0.7,0.2,1), transform 520ms cubic-bezier(0.2,0.7,0.2,1); }
+.rv.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .rv { opacity: 1; transform: none; transition: none; }
+  html { scroll-behavior: auto; }
+}
+
+/* ====== responsivo ====== */
+@media (max-width: 980px) {
+  section { padding: 72px 0; }
+  .hero { padding-top: 56px; }
+  .hero-grid { grid-template-columns: 1fr; gap: 36px; }
+  .hero-side { border-left: 0; border-top: 1px solid var(--line); padding: 24px 0 0; flex-direction: row; flex-wrap: wrap; gap: 24px 40px; }
+  .facts-grid { grid-template-columns: 1fr 1fr; }
+  .fact:nth-child(3) { border-left: 0; }
+  .fact:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .mod { grid-template-columns: 1fr; gap: 28px; margin-top: 64px; }
+  .mod.flip > .mod-txt { order: 0; }
+  .req-duo { flex-direction: column; align-items: center; }
+  .req-duo .req-main { width: 100%; }
+  .req-duo .phone { margin-top: 0; }
+  .ml-grid { grid-template-columns: 1fr; gap: 36px; }
+  .grid-cards { grid-template-columns: 1fr 1fr; }
+  .steps { grid-template-columns: 1fr 1fr; }
+  .who-grid { grid-template-columns: 1fr; }
+  .sec-grid2 { grid-template-columns: 1fr; gap: 36px; }
+  .cta-final { grid-template-columns: 1fr; padding: 44px 32px; }
+  .nav { display: none; position: absolute; top: 60px; left: 0; right: 0; flex-direction: column; align-items: stretch; gap: 0; background: var(--bg-1); border-bottom: 1px solid var(--line); padding: 8px 0; }
+  .nav.open { display: flex; }
+  .nav a { padding: 12px 24px; border-bottom: 1px solid var(--line-soft); }
+  .nav a:last-child { border-bottom: 0; }
+  .nav-toggle { display: block; }
+}
+@media (max-width: 560px) {
+  .grid-cards, .steps { grid-template-columns: 1fr; }
+  .facts-grid { grid-template-columns: 1fr; }
+  .fact { border-left: 0; border-top: 1px solid var(--line); }
+  .fact:first-child { border-top: 0; }
+  .topbar .btn { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ===================== TOPBAR ===================== -->
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="#">
+      <img src="logo.png" alt="Cloud Kitchen" />
+      <b>Cloud Kitchen</b>
+      <span>sistema + método</span>
+    </a>
+    <nav class="nav" id="nav">
+      <a href="#modulos">O sistema</a>
+      <a href="#inteligencia">Inteligência</a>
+      <a href="#metodo">O método</a>
+      <a href="#para-quem">Para quem</a>
+      <a href="#seguranca">Segurança</a>
+    </nav>
+    <a class="btn js-app" href="app/">Entrar</a>
+    <a class="btn primary" href="#contato">Agendar demonstração</a>
+    <button class="nav-toggle" id="navToggle" aria-label="Abrir menu">menu</button>
+  </div>
+</header>
+
+<!-- ===================== HERO ===================== -->
+<section class="hero">
+  <div class="wrap">
+    <div class="hero-grid">
+      <div>
+        <div class="eyebrow">Gestão de dark kitchens e delivery de alimentos</div>
+        <h1>Largue as planilhas.</h1>
+        <p class="lead">
+          O Cloud Kitchen não é só um sistema. Nós entramos na sua operação para
+          aplicar um método validado de gestão de dark kitchens e delivery:
+          estoque, lista de compras automática, CMV diário por marca e DRE
+          automática — tudo no mesmo lugar, alimentado pela sua rotina.
+        </p>
+        <div class="hero-ctas">
+          <a class="btn primary" href="#contato">Agendar demonstração <span class="arr">→</span></a>
+          <a class="btn" href="#modulos">Ver o sistema por dentro</a>
+        </div>
+      </div>
+      <div class="hero-side">
+        <div class="hero-fact">
+          <span class="mono-tag">sistema + método</span>
+          <b>Não é só software</b>
+          <span>implantamos o método junto com você</span>
+        </div>
+        <div class="hero-fact">
+          <span class="mono-tag">prova real</span>
+          <b>Nascido dentro de uma dark kitchen</b>
+          <span>5 operações rodando no sistema todos os dias</span>
+        </div>
+        <div class="hero-fact">
+          <span class="mono-tag">inteligência</span>
+          <b>Aprende com o seu uso</b>
+          <span>automatiza lançamentos, conciliação e compras</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- print real: dashboard -->
+    <div class="hero-shot-wrap rv">
+      <div class="shot">
+        <div class="shot-bar">
+          <div class="dots"><i></i><i></i><i></i></div>
+          <div class="url">cloud kitchen · #/dashboard</div>
+        </div>
+        <img src="shots/dashboard.png" alt="Dashboard do Cloud Kitchen: faturamento, CMV, valor em estoque e ranking de margem de contribuição por marca" />
+      </div>
+      <div class="shot-cap">Tela real · visão consolidada das 5 operações da cozinha MobyDick, ao vivo</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== FAIXA DE FATOS ===================== -->
+<div class="facts">
+  <div class="wrap">
+    <div class="facts-grid">
+      <div class="fact rv">
+        <div class="k">Custo</div>
+        <b>CMV diário, por marca</b>
+        <span>cada dia e cada operação com sua faixa de meta</span>
+      </div>
+      <div class="fact rv">
+        <div class="k">Resultado</div>
+        <b>DRE automática</b>
+        <span>alimentada pelas vendas, compras e estoque</span>
+      </div>
+      <div class="fact rv">
+        <div class="k">Compras</div>
+        <b>Lista de compras automática</b>
+        <span>gerada pelo consumo e pelos mínimos de cada insumo</span>
+      </div>
+      <div class="fact rv">
+        <div class="k">Rotina</div>
+        <b>Cozinha pede, estoquista separa</b>
+        <span>a entrega baixa o estoque sozinha</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== MÓDULOS (prints reais) ===================== -->
+<section id="modulos">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow">O sistema por dentro</div>
+      <h2>Telas reais, da nossa própria operação.</h2>
+      <p>
+        Os prints abaixo não são maquete: são o Cloud Kitchen rodando na cozinha
+        MobyDick, que opera 5 marcas de delivery. O que você vê é o que sua
+        equipe vai usar.
+      </p>
+    </div>
+
+    <!-- 01 Estoque -->
+    <div class="mod rv">
+      <div class="mod-txt">
+        <div class="mod-num">01 / ESTOQUE</div>
+        <h3>Estoque pensado para restaurante — não para indústria.</h3>
+        <p>
+          Insumo com unidade de cozinha, fornecedor, mínimo e custo pela última
+          compra. Ruptura aparece em vermelho antes de virar falta no serviço,
+          e cada movimentação fica registrada: entrada, saída, ajuste,
+          desperdício.
+        </p>
+        <ul class="mod-list">
+          <li>Custo sempre pela última compra — aumento de fornecedor aparece na hora</li>
+          <li>Inventário com contagem assistida e ajuste auditável</li>
+          <li>Posição do estoque preservada dia a dia, para auditoria</li>
+        </ul>
+      </div>
+      <div>
+        <div class="shot">
+          <div class="shot-bar">
+            <div class="dots"><i></i><i></i><i></i></div>
+            <div class="url">cloud kitchen · #/estoque</div>
+          </div>
+          <img src="shots/estoque.png" loading="lazy" alt="Módulo de estoque: insumos com saldo, última compra, fornecedor e alertas de ruptura" />
+        </div>
+        <div class="shot-cap">Estoque · insumos, fornecedores e rupturas em destaque</div>
+      </div>
+    </div>
+
+    <!-- 02 Requisições (largura cheia: desktop + celular) -->
+    <div class="mod wide rv">
+      <div class="mod-txt">
+        <div class="mod-num">02 / REQUISIÇÕES</div>
+        <h3>O pedido da cozinha digital cai direto na tela do estoquista.</h3>
+        <p>
+          A equipe de cada marca pede pelo celular. O estoquista recebe no
+          kanban, separa e entrega — e a entrega lança a baixa no estoque
+          automaticamente, com rateio entre as operações quando o insumo é
+          compartilhado. Ninguém transcreve pedido de papel.
+        </p>
+        <ul class="mod-list">
+          <li>Fluxo pendente → separada → entregue, com horário e responsável</li>
+          <li>Favoritos por usuário: pedido recorrente em segundos</li>
+          <li>Impressão térmica 80mm do romaneio de separação</li>
+        </ul>
+      </div>
+      <div class="req-duo">
+        <div class="req-main">
+          <div class="shot">
+            <div class="shot-bar">
+              <div class="dots"><i></i><i></i><i></i></div>
+              <div class="url">cloud kitchen · #/requisicoes</div>
+            </div>
+            <img src="shots/requisicoes.png" loading="lazy" alt="Kanban de requisições: pendente, separada e entregue, com rateio entre operações" />
+          </div>
+          <div class="shot-cap">Requisições · kanban do estoquista, com rateio entre marcas no uso compartilhado</div>
+        </div>
+        <div class="phone">
+          <img src="shots/mobile.png" loading="lazy" alt="Tela mobile de nova requisição, usada pela equipe da cozinha" />
+        </div>
+      </div>
+    </div>
+
+    <!-- 03 Ficha técnica -->
+    <div class="mod flip rv">
+      <div class="mod-txt">
+        <div class="mod-num">03 / FICHA TÉCNICA</div>
+        <h3>Ficha técnica que se atualiza sozinha — e avisa quando o CMV foge do padrão.</h3>
+        <p>
+          A ficha é montada com os insumos do estoque. Quando o preço de um
+          insumo muda numa compra, o custo composto e a margem de todas as
+          fichas que o usam são recalculados — e o sistema alerta se o CMV
+          teórico estourar a meta que você definiu.
+        </p>
+        <ul class="mod-list">
+          <li>Custo composto, CMV teórico e margem de contribuição por item</li>
+          <li>Preparos intermediários (sub-receitas) com rendimento</li>
+          <li>Histórico de custo: veja quando e por que o prato encareceu</li>
+        </ul>
+      </div>
+      <div>
+        <div class="shot">
+          <div class="shot-bar">
+            <div class="dots"><i></i><i></i><i></i></div>
+            <div class="url">cloud kitchen · #/fichas-tecnicas</div>
+          </div>
+          <img src="shots/fichas.png" loading="lazy" alt="Ficha técnica com custo composto, CMV teórico contra meta e margem de contribuição" />
+        </div>
+        <div class="shot-cap">Ficha técnica · CMV teórico 30,9% contra meta de 30%, margem por unidade</div>
+      </div>
+    </div>
+
+    <!-- 04 CMV -->
+    <div class="mod rv">
+      <div class="mod-txt">
+        <div class="mod-num">04 / CMV &amp; MARGEM</div>
+        <h3>CMV diário, marca por marca. O problema aparece no dia seguinte — não 40 dias depois.</h3>
+        <p>
+          O CMV é calculado todos os dias a partir das saídas reais de estoque
+          e do faturamento de cada operação. O mapa operação × dia mostra onde
+          a meta estourou — em vermelho, sem maquiagem — para você agir na
+          semana, não no fechamento.
+        </p>
+        <ul class="mod-list">
+          <li>Consolidado da cozinha e aberto por marca</li>
+          <li>Faixas de meta configuráveis, cor por desvio</li>
+          <li>Visão por item: qual insumo está comendo a margem</li>
+        </ul>
+      </div>
+      <div>
+        <div class="shot">
+          <div class="shot-bar">
+            <div class="dots"><i></i><i></i><i></i></div>
+            <div class="url">cloud kitchen · #/cmv</div>
+          </div>
+          <img src="shots/cmv.png" loading="lazy" alt="CMV diário por operação em mapa de calor, com faixas de meta e margem de contribuição" />
+        </div>
+        <div class="shot-cap">CMV &amp; margem · mapa operação × dia: o dia fora da meta fica vermelho</div>
+      </div>
+    </div>
+
+    <!-- 05 Compras -->
+    <div class="mod flip rv">
+      <div class="mod-txt">
+        <div class="mod-num">05 / COMPRAS</div>
+        <h3>Lista de compras automática, recebimento conferido.</h3>
+        <p>
+          O sistema gera a lista a partir do consumo e dos mínimos — agrupada
+          por fornecedor, com estimativa de valor. No recebimento físico, a
+          conferência atualiza saldo e custo de uma vez. Recebimento parcial?
+          A lista sabe o que ainda falta chegar.
+        </p>
+        <ul class="mod-list">
+          <li>Sugestão automática de quantidades por insumo</li>
+          <li>Pedidos por fornecedor em um painel único</li>
+          <li>Cada recebimento reprecifica o estoque pela última compra</li>
+        </ul>
+      </div>
+      <div>
+        <div class="shot">
+          <div class="shot-bar">
+            <div class="dots"><i></i><i></i><i></i></div>
+            <div class="url">cloud kitchen · #/compras</div>
+          </div>
+          <img src="shots/compras.png" loading="lazy" alt="Painel de compras com listas automáticas, recebimentos parciais e total estimado" />
+        </div>
+        <div class="shot-cap">Compras · listas automáticas e recebimentos físicos em um único lugar</div>
+      </div>
+    </div>
+
+    <!-- 06 DRE -->
+    <div class="mod rv">
+      <div class="mod-txt">
+        <div class="mod-num">06 / DRE &amp; FECHAMENTO</div>
+        <h3>DRE automática, alimentada pela sua operação.</h3>
+        <p>
+          Vendas, compras e estoque já estão no sistema — então a DRE se monta
+          sozinha, pelo método contábil: estoque inicial + compras − estoque
+          final. Você acompanha o resultado do mês em andamento e fecha o
+          período com checklist de impeditivos.
+        </p>
+        <ul class="mod-list">
+          <li>CMV real calculado pelo método contábil, sem digitação</li>
+          <li>Estrutura de contas editável, com subcategorias</li>
+          <li>Fechamento mensal validado + comparativo com meses anteriores</li>
+        </ul>
+      </div>
+      <div>
+        <div class="shot">
+          <div class="shot-bar">
+            <div class="dots"><i></i><i></i><i></i></div>
+            <div class="url">cloud kitchen · #/dre</div>
+          </div>
+          <img src="shots/dre.png" loading="lazy" alt="DRE automática com CMV real pelo método contábil e estrutura de contas editável" />
+        </div>
+        <div class="shot-cap">DRE &amp; fechamento · receita, CMV real e resultado, direto da operação</div>
+      </div>
+    </div>
+
+    <!-- demais módulos -->
+    <div class="grid-cards rv">
+      <div class="gcard">
+        <div class="gn">07</div>
+        <b>Faturamento por marca e turno</b>
+        <p>Fechamento de caixa por dia, operação e turno — débito, crédito, PIX, dinheiro e online. A receita alimenta a DRE automaticamente.</p>
+      </div>
+      <div class="gcard">
+        <div class="gn">08</div>
+        <b>Financeiro completo</b>
+        <p>Contas a pagar com vencimento, status e categoria da DRE. Checklist de fechamento para nada ficar de fora do mês.</p>
+      </div>
+      <div class="gcard">
+        <div class="gn">09</div>
+        <b>Inventário &amp; desperdícios</b>
+        <p>Contagem com ajuste auditável e desperdício registrado por motivo — inclusive extravios. Precisão de estoque medida no dashboard.</p>
+      </div>
+      <div class="gcard">
+        <div class="gn">10</div>
+        <b>Conciliação bancária</b>
+        <p>Importe o extrato (OFX/CSV) e concilie as saídas com os lançamentos do financeiro. <span class="badge dim">Stone · em breve</span></p>
+      </div>
+      <div class="gcard">
+        <div class="gn">11</div>
+        <b>Integrações de delivery</b>
+        <p>Vincule plataformas de venda a cada operação para automatizar o faturamento. <span class="badge dim">iFood · em breve</span></p>
+      </div>
+      <div class="gcard">
+        <div class="gn">12</div>
+        <b>Multi-marca &amp; permissões</b>
+        <p>Operações separadas dentro da mesma cozinha, permissões por módulo e troca de conta para grupos com várias unidades.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== INTELIGÊNCIA ===================== -->
+<section id="inteligencia" class="sec-dark">
+  <div class="wrap">
+    <div class="ml-grid">
+      <div class="rv">
+        <div class="eyebrow">Machine learning aplicado</div>
+        <h2 style="margin-top:16px;">Um sistema que aprende com a sua operação.</h2>
+        <p style="color:var(--fg-2); margin:16px 0 0;">
+          O Cloud Kitchen aprende com o seu uso e evolui com o tempo. O que sua
+          equipe faz repetidamente, o sistema passa a fazer sozinho:
+          lançamentos financeiros, classificação de contas na DRE, conciliação
+          bancária, quantidades de estoque e listas de compras.
+        </p>
+        <p style="color:var(--fg-2); margin:12px 0 0;">
+          Quanto mais você opera, menos você digita.
+        </p>
+      </div>
+      <div class="ml-log rv">
+        <div class="hd">aprendizados recentes do sistema</div>
+        <div class="ml-line">
+          <span class="tag">financeiro</span>
+          <span class="tx">Lançamento recorrente detectado — <em>"Monitoramento · R$ 150,00"</em> lançado e classificado sozinho</span>
+        </div>
+        <div class="ml-line">
+          <span class="tag">dre</span>
+          <span class="tx">"Tráfego pago" das marcas classificado em <em>Marketing</em> automaticamente</span>
+        </div>
+        <div class="ml-line">
+          <span class="tag">conciliação</span>
+          <span class="tx">Saída de R$ 800,00 no extrato conciliada com o lançamento correspondente</span>
+        </div>
+        <div class="ml-line">
+          <span class="tag">compras</span>
+          <span class="tx">Sugestão de compra ajustada pelo consumo real das últimas semanas</span>
+        </div>
+        <div class="ml-line">
+          <span class="tag">estoque</span>
+          <span class="tx">Quantidades previstas por insumo refinadas a cada inventário</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== MÉTODO ===================== -->
+<section id="metodo">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow">O método</div>
+      <h2>Não entregamos um login. Implantamos uma gestão.</h2>
+      <p>
+        Sistema sem método vira planilha cara. Por isso a implantação faz parte
+        do produto: entramos na sua operação e aplicamos o método que validamos
+        na nossa própria dark kitchen.
+      </p>
+    </div>
+    <div class="steps rv">
+      <div class="step">
+        <b>Diagnóstico da operação</b>
+        <p>Entendemos suas marcas, cardápio, fornecedores e a rotina atual — mesmo que hoje tudo viva em planilhas e cadernos.</p>
+      </div>
+      <div class="step">
+        <b>Implantação assistida</b>
+        <p>Subimos insumos, fichas técnicas e estrutura de DRE junto com você. Ninguém recebe um sistema vazio para se virar.</p>
+      </div>
+      <div class="step">
+        <b>Rotina na equipe</b>
+        <p>Treinamos cozinha e estoquista no fluxo: requisição, separação, recebimento, inventário. O método vira hábito.</p>
+      </div>
+      <div class="step">
+        <b>Gestão por indicadores</b>
+        <p>Você passa a decidir com CMV diário e DRE em mãos — e acompanhamos os números com você nas primeiras semanas.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== PARA QUEM ===================== -->
+<section id="para-quem" class="tight">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <div class="eyebrow">Para quem</div>
+      <h2>Feito para a realidade de quem vive de delivery.</h2>
+      <p>
+        O Cloud Kitchen nasceu dentro de uma dark kitchen multi-marca em operação —
+        cada módulo resolve um problema que apareceu na prática, não em slide de
+        consultoria.
+      </p>
+    </div>
+    <div class="who-grid">
+      <div class="who rv">
+        <div class="wt">dark kitchens</div>
+        <b>Uma cozinha, várias marcas</b>
+        <p>
+          Estoque central único, requisições por marca e CMV diário aberto por
+          operação — inclusive com rateio dos insumos compartilhados. Você
+          enxerga a margem de cada marca, todos os dias.
+        </p>
+      </div>
+      <div class="who rv">
+        <div class="wt">delivery próprio</div>
+        <b>Restaurantes que operam delivery</b>
+        <p>
+          Controle de insumos, ficha técnica e margem por item de cardápio.
+          As taxas de app entram na DRE — você vê a margem que sobra de
+          verdade.
+        </p>
+      </div>
+      <div class="who rv">
+        <div class="wt">grupos &amp; redes</div>
+        <b>Grupos com várias unidades</b>
+        <p>
+          Cada unidade em uma conta isolada, com troca de conta no mesmo
+          login. Permissões por módulo: a equipe da cozinha não acessa o
+          financeiro.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== SEGURANÇA ===================== -->
+<section id="seguranca" class="sec-dark">
+  <div class="wrap">
+    <div class="sec-grid2">
+      <div class="rv">
+        <div class="eyebrow">Segurança &amp; acesso</div>
+        <h2 style="margin-top:16px;">Seus números, só para quem deve ver.</h2>
+        <p style="color:var(--fg-2); margin:14px 0 0;">
+          Margem e custo são informação sensível. A plataforma foi construída
+          com isolamento de dados por cliente desde a primeira linha — não como
+          camada adicionada depois.
+        </p>
+      </div>
+      <ul class="sec-bullets rv">
+        <li>
+          <span class="bi">01</span>
+          <div>
+            <b>Isolamento por cliente no banco</b>
+            <p>Cada cozinha vive em um ambiente isolado por Row-Level Security no PostgreSQL (Supabase). Um cliente nunca enxerga dados de outro.</p>
+          </div>
+        </li>
+        <li>
+          <span class="bi">02</span>
+          <div>
+            <b>Permissões por módulo</b>
+            <p>Defina quem acessa estoque, financeiro ou DRE. Quem não vê o módulo, não edita o módulo — vale também para a tela mobile.</p>
+          </div>
+        </li>
+        <li>
+          <span class="bi">03</span>
+          <div>
+            <b>Histórico auditável</b>
+            <p>Toda movimentação de estoque registra quem fez, quando e a partir de quê. A posição de cada dia fica preservada.</p>
+          </div>
+        </li>
+        <li>
+          <span class="bi">04</span>
+          <div>
+            <b>No navegador, sem instalação</b>
+            <p>Funciona no computador da gerência e no celular da cozinha. Tema claro e escuro, impressão térmica 80mm para o romaneio.</p>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== CTA FINAL ===================== -->
+<section id="contato">
+  <div class="wrap">
+    <div class="cta-final rv">
+      <div>
+        <div class="eyebrow">Demonstração</div>
+        <h2 style="margin-top:16px;">Veja o método rodando numa dark kitchen de verdade.</h2>
+        <p>
+          Demonstração guiada de 30 minutos com a nossa própria operação:
+          do pedido da cozinha ao DRE fechado. Depois, conversamos sobre a
+          implantação na sua.
+        </p>
+      </div>
+      <div class="cta-actions">
+        <a class="btn primary js-cta-email" href="#">Agendar por e-mail <span class="arr">→</span></a>
+        <a class="btn js-cta-zap" href="#" style="display:none;">Chamar no WhatsApp</a>
+        <span class="cta-note">resposta em até 1 dia útil</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== FOOTER ===================== -->
+<footer>
+  <div class="wrap foot">
+    <img src="logo.png" alt="" />
+    <div class="fb">
+      <b>Cloud Kitchen</b>
+      <span>Sistema + método de gestão para dark kitchens e delivery</span>
+    </div>
+    <div class="fr">© 2026 Cloud Kitchen</div>
+  </div>
+</footer>
+
+<script>
+// CTAs de contato (e-mail / WhatsApp) — configurados no topo do arquivo
+(function () {
+  const mail = "mailto:" + CONTATO.email + "?subject=" + encodeURIComponent(CONTATO.assunto);
+  document.querySelectorAll(".js-cta-email").forEach((a) => { a.href = mail; });
+  document.querySelectorAll(".js-app").forEach((a) => { a.href = CONTATO.app; });
+  if (CONTATO.whatsapp) {
+    const zap = "https://wa.me/" + CONTATO.whatsapp + "?text=" + encodeURIComponent("Olá! Quero agendar uma demonstração do Cloud Kitchen.");
+    document.querySelectorAll(".js-cta-zap").forEach((a) => { a.href = zap; a.style.display = ""; });
+  }
+})();
+
+// menu mobile
+(function () {
+  const t = document.getElementById("navToggle");
+  const n = document.getElementById("nav");
+  t.addEventListener("click", () => n.classList.toggle("open"));
+  n.querySelectorAll("a").forEach((a) => a.addEventListener("click", () => n.classList.remove("open")));
+})();
+
+// reveal on scroll
+(function () {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    document.querySelectorAll(".rv").forEach((el) => el.classList.add("in"));
+    return;
+  }
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+    });
+  }, { threshold: 0.12, rootMargin: "0px 0px -40px 0px" });
+  document.querySelectorAll(".rv").forEach((el) => io.observe(el));
+})();
+</script>
+</body>
+</html>

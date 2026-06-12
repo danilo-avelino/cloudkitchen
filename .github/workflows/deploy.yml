@@ -43,8 +43,16 @@ jobs:
           VITE_APP_VERSION: ${{ github.sha }}
         run: npm run build
 
+      # Raiz do site = página de vendas (landing/); o app fica em /app/.
+      # Os assets do app usam caminho absoluto (BASE_PATH), então funcionam de /app/.
+      - name: Montar site (landing na raiz, app em /app/)
+        run: |
+          mkdir dist/app
+          mv dist/index.html dist/app/index.html
+          cp -r landing/. dist/
+
       - name: Copy SPA fallback
-        run: cp dist/index.html dist/404.html
+        run: cp dist/app/index.html dist/404.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
