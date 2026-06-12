@@ -84,6 +84,10 @@ function computeDreSummary({ entries, categories, subcategories, period, stockSn
   entries.forEach((e) => {
     const sub = findSubcategory(subcategories, e.cat);
     if (!sub) return;
+    // Lançamentos em subs autofeed são ignorados: a linha "Ajuste de estoque"
+    // é calculada abaixo como EI − EF (método contábil). Cobre o mock e os
+    // lançamentos legados do trigger de inventário (lançava sobra como custo).
+    if (sub.autofeed) return;
     if (!byCat[sub.category]) return;
     const cat = findCategory(categories, sub.category);
     if (cat?.kind === "revenue") return;
@@ -116,20 +120,6 @@ function computeDreSummary({ entries, categories, subcategories, period, stockSn
   const revenueCatKey = revenueCatIds[0] || "receita";
   byCat[revenueCatKey] = { total: revenueTotal, bySub: revBySub };
 
-  const sumByKind = (kinds) => categories
-    .filter((c) => kinds.includes(c.kind))
-    .reduce((s, c) => s + (byCat[c.id]?.total || 0), 0);
-
-  const receita    = byCat[revenueCatKey]?.total || 0;
-  const deducoes   = sumByKind(["deduction"]);
-  const receitaLiq = receita - deducoes;
-  const cogs       = sumByKind(["cogs"]);
-  const lucroBruto = receitaLiq - cogs;
-  const opexExpense   = sumByKind(["expense"]);
-  const opexFinancial = sumByKind(["financial"]);
-  const opex       = opexExpense + opexFinancial;
-  const lucroLiq   = lucroBruto - opex;
-
   // CMV real (contábil) = EI + Compras − EF.
   const dbOn = typeof isDbOnline === "function" && isDbOnline();
   const ei = dbOn ? (stockSnapshot.initial || 0) : (MOCK.STOCK_BALANCE?.initial?.value || 0);
@@ -147,12 +137,161 @@ function computeDreSummary({ entries, categories, subcategories, period, stockSn
     }, 0);
   const cmvReal = ei + comprasTotal - ef;
 
+  // Linha autofeed "Ajuste de estoque" = variação do estoque (EI − EF).
+  // Com ela, o Custo de Mercadoria da tabela fecha exato com o CMV real do
+  // quadro contábil: compras + (EI − EF) = EI + compras − EF.
+  const stockDelta = ei > 0 ? ei - ef : 0;
+  const adjustSub = subcategories.find((s) => s.autofeed && cmvCatIds.includes(s.category));
+  if (adjustSub && byCat[adjustSub.category]) {
+    byCat[adjustSub.category].bySub[adjustSub.id] = stockDelta;
+    byCat[adjustSub.category].total += stockDelta;
+  }
+
+  const sumByKind = (kinds) => categories
+    .filter((c) => kinds.includes(c.kind))
+    .reduce((s, c) => s + (byCat[c.id]?.total || 0), 0);
+
+  const receita    = byCat[revenueCatKey]?.total || 0;
+  const deducoes   = sumByKind(["deduction"]);
+  const receitaLiq = receita - deducoes;
+  const cogs       = sumByKind(["cogs"]);
+  const lucroBruto = receitaLiq - cogs;
+  const opexExpense   = sumByKind(["expense"]);
+  const opexFinancial = sumByKind(["financial"]);
+  const opex       = opexExpense + opexFinancial;
+  const lucroLiq   = lucroBruto - opex;
+
   return {
     byCat, revenueCatKey,
     receita, deducoes, receitaLiq, cogs, lucroBruto,
     opex, opexExpense, opexFinancial, lucroLiq,
     ei, ef, comprasTotal, cmvReal,
   };
+}
+
+// ---------- Exportar DRE (PDF via diálogo de impressão) ----------
+// Monta um documento A4 standalone e abre em nova janela com window.print() —
+// o usuário salva como PDF. Documento separado de propósito: o CSS de
+// impressão do app (styles.css) é para cupom térmico 80mm e quebraria a DRE.
+function buildDreExportHtml({ summary, categories, subcategories, periodLabel, entryCount, tenantName, stockSnapshot }) {
+  const fmt = window.fmt;
+  const fmtDate = window.fmtDate;
+  const { byCat, receita, receitaLiq, lucroBruto, lucroLiq, ei, ef, comprasTotal, cmvReal } = summary;
+  const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const pct = (v) => receita > 0 ? ((v / receita) * 100).toFixed(1) + "%" : "—";
+
+  const sorted = [...categories].sort((a, b) => a.order - b.order);
+  const above  = sorted.filter((c) => ["revenue", "deduction", "cogs"].includes(c.kind));
+  const below  = sorted.filter((c) => ["expense", "financial"].includes(c.kind));
+
+  // Mesma lógica de exibição do DreRow: sinal na frente, valor sempre absoluto.
+  const catRows = (cats) => cats.map((c) => {
+    const sign = c.kind === "revenue" ? "+" : "−";
+    const value = byCat[c.id]?.total || 0;
+    const display = sign === "−" && value > 0 ? `−${fmt(value)}` : value < 0 ? `+${fmt(-value)}` : fmt(value);
+    const subRows = Object.entries(byCat[c.id]?.bySub || {})
+      .filter(([, v]) => Math.abs(v) > 0.005)
+      .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+      .map(([subId, val]) => {
+        const sub = subcategories.find((s) => s.id === subId);
+        if (!sub) return "";
+        return `<tr class="sub"><td>${esc(sub.name)}</td><td class="num">${val < 0 ? "+" : ""}${fmt(Math.abs(val))}</td><td class="num">${pct(Math.abs(val))}</td></tr>`;
+      }).join("");
+    return `<tr class="cat"><td>${sign === "−" ? "(−) " : ""}${esc(c.name)}</td><td class="num">${display}</td><td class="num">${pct(value)}</td></tr>${subRows}`;
+  }).join("");
+
+  const totalRow = (label, value, grand) =>
+    `<tr class="total${grand ? " grand" : ""}${value < 0 ? " neg" : ""}"><td>= ${label}</td><td class="num">${fmt(value)}</td><td class="num">${pct(value)}</td></tr>`;
+
+  const now = new Date();
+  const genAt = `${String(now.getDate()).padStart(2, "0")}/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+  const cmvCells = ei > 0
+    ? `<div><span>EI${stockSnapshot?.initialAt ? ` · ${fmtDate(stockSnapshot.initialAt)}` : ""}</span><b>${fmt(ei)}</b></div>
+       <div><span>(+) Compras</span><b>${fmt(comprasTotal)}</b></div>
+       <div><span>EF${stockSnapshot?.finalAt ? ` · ${fmtDate(stockSnapshot.finalAt)}` : ""}</span><b>${fmt(ef)}</b></div>`
+    : `<div><span>(+) Compras · sem inventário inicial</span><b>${fmt(comprasTotal)}</b></div>`;
+
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>DRE ${esc(periodLabel)}${tenantName ? ` · ${esc(tenantName)}` : ""}</title>
+<style>
+  @page { size: A4; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 11px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; color: #16181c; background: #fff; }
+  .toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #f3f4f6; border-bottom: 1px solid #dfe2e6; }
+  .toolbar button { font: 600 12px/1 inherit; padding: 8px 16px; border: 0; border-radius: 5px; background: #1a6d4a; color: #fff; cursor: pointer; }
+  .toolbar span { font-size: 11px; color: #6a7077; }
+  /* largura fixa = área útil do A4 (210 − 2×10mm) p/ a medição de altura no
+     load valer também na impressão · o zoom de auto-ajuste escala a partir dela */
+  main { width: 190mm; margin: 0 auto; padding: 16px 0 0; }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -0.01em; }
+  .meta { font-size: 10.5px; color: #6a7077; margin-top: 4px; }
+  .cmv { display: flex; gap: 24px; align-items: flex-end; border: 1px solid #dfe2e6; border-radius: 5px; padding: 10px 14px; margin: 16px 0 18px; }
+  .cmv .formula { flex: 1; }
+  .cmv .formula em { font-style: normal; font-size: 9px; color: #6a7077; text-transform: uppercase; letter-spacing: 0.06em; display: block; }
+  .cmv .formula b { font-size: 11px; font-weight: 500; }
+  .cmv > div:not(.formula) span { display: block; font-size: 8.5px; color: #6a7077; text-transform: uppercase; letter-spacing: 0.05em; }
+  .cmv > div:not(.formula) b { font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cmv .res b { color: #1a6d4a; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 8.5px; color: #6a7077; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; padding: 6px 8px; border-bottom: 1.5px solid #16181c; }
+  td { padding: 4px 8px; border-bottom: 1px solid #eceef0; vertical-align: baseline; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.cat td:first-child { font-weight: 600; }
+  tr.sub td:first-child { padding-left: 26px; color: #555b62; font-size: 10.5px; }
+  tr.sub td { border-bottom: 1px dotted #eceef0; color: #555b62; }
+  tr.total td { font-weight: 600; background: #f5f6f7; border-bottom: 1px solid #dfe2e6; }
+  tr.total.grand td { font-size: 12px; border-top: 1.5px solid #16181c; border-bottom: 0; background: #eef5f1; }
+  tr.total.neg td { color: #963535; }
+  tr { break-inside: avoid; }
+  footer { margin-top: 12px; font-size: 9.5px; color: #9aa0a6; display: flex; justify-content: space-between; }
+  @media print { .toolbar { display: none; } main { padding: 0; } }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button onclick="window.print()">Imprimir / Salvar PDF</button>
+  <span>No diálogo de impressão, escolha o destino "Salvar como PDF".</span>
+</div>
+<main>
+  <h1>DRE — Demonstração do Resultado</h1>
+  <div class="meta">${tenantName ? `${esc(tenantName)} · ` : ""}Competência ${esc(periodLabel)} · ${entryCount} lançamentos · por data de competência</div>
+  <div class="cmv">
+    <div class="formula">
+      <em>CMV real · método contábil</em>
+      <b>${ei > 0 ? "Estoque inicial + Compras − Estoque final" : "Compras (sem inventário inicial)"}</b>
+    </div>
+    ${cmvCells}
+    <div class="res"><span>= CMV real</span><b>${fmt(cmvReal)}</b></div>
+  </div>
+  <table>
+    <thead><tr><th>Conta</th><th class="num">Valor</th><th class="num">% receita</th></tr></thead>
+    <tbody>
+      ${catRows(above)}
+      ${totalRow("Receita líquida", receitaLiq)}
+      ${totalRow("Lucro bruto", lucroBruto)}
+      ${catRows(below)}
+      ${totalRow("Lucro líquido", lucroLiq, true)}
+    </tbody>
+  </table>
+  <footer><span>Gerado pelo Cloud Kitchen</span><span>${genAt}</span></footer>
+</main>
+<script>
+// Auto-ajuste: se o conteúdo passar da altura útil do A4, encolhe via zoom
+// proporcional para caber em UMA página (piso de 0.5 p/ manter legível).
+window.addEventListener("load", function () {
+  var main = document.querySelector("main");
+  var availPx = (297 - 20) * 96 / 25.4; // altura útil do A4 (margens de 10mm) em px CSS
+  var needPx = main.scrollHeight;
+  if (needPx > availPx) main.style.zoom = Math.max(0.5, (availPx / needPx).toFixed(3));
+  setTimeout(function () { window.print(); }, 300);
+});
+</script>
+</body>
+</html>`;
 }
 
 // Carrega DRE de todos os 12 meses de um ano (paralelo).
@@ -223,6 +362,7 @@ function Dre() {
   const [confirmClosePeriod, setConfirmClosePeriod] = useState(null);
   const [confirmReopenPeriod, setConfirmReopenPeriod] = useState(null);
   const [showStructure, setShowStructure] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const dbStatus = useDbStatus?.() || { isOnline: false, state: "offline" };
   const [tenantId, setTenantId] = useState(null);
@@ -515,6 +655,31 @@ function Dre() {
     window.showToast(`Subcategoria "${sub.name}" excluída (offline)`, { tone: "warn" });
   };
 
+  const exportDre = () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const summary = computeDreSummary({ entries: inPeriod, categories, subcategories, period, stockSnapshot, revenueEntries, source });
+      const periodLabel = periodOptions.find((o) => o.value === period)?.label || period.replace("-", "/");
+      const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
+      const html = buildDreExportHtml({
+        summary, categories, subcategories, periodLabel,
+        entryCount: inPeriod.length, tenantName, stockSnapshot,
+      });
+      const w = window.open("", "_blank");
+      if (!w) {
+        window.showToast("Pop-up bloqueado pelo navegador · permita pop-ups para exportar", { tone: "warn", ttl: 4500 });
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } finally {
+      // janela de impressão já aberta · solta o guard depois de um respiro
+      setTimeout(() => setExporting(false), 800);
+    }
+  };
+
   if (pageLoading) return <PageLoading label="Carregando DRE…" variant="table" />;
 
   const ConfirmDialog = window.ConfirmDialog;
@@ -535,7 +700,9 @@ function Dre() {
                 <button className="btn" data-size="sm" onClick={() => setShowStructure(true)}>
                   <I.Edit size={13} />Editar estrutura
                 </button>
-                <button className="btn" data-size="sm" onClick={() => notImplemented("Exportar DRE em PDF")}>Exportar DRE</button>
+                <button className="btn" data-size="sm" onClick={exportDre} disabled={exporting}>
+                  {exporting ? "Exportando…" : "Exportar DRE"}
+                </button>
               </>
             )}
           </div>
@@ -1692,7 +1859,7 @@ function CategoryStructureModal({ categories, subcategories, entries, onClose, h
           <I.AlertTriangle size={12} style={{ color: "var(--fg-3)", marginTop: 2, flexShrink: 0 }} />
           <span>
             <strong style={{ color: "var(--fg-0)" }}>Receita</strong>, <strong style={{ color: "var(--fg-0)" }}>Deduções</strong> e <strong style={{ color: "var(--fg-0)" }}>CMV</strong> são travadas porque alimentam fórmulas do fechamento contábil.{" "}
-            <strong style={{ color: "var(--fg-0)" }}>Ajuste de estoque</strong> recebe automaticamente o resultado dos inventários finalizados (perda → despesa positiva, sobra → redução).
+            <strong style={{ color: "var(--fg-0)" }}>Ajuste de estoque</strong> é calculado automaticamente como a variação do estoque no mês (estoque inicial − estoque final, dos snapshots) — é o que faz o Custo de Mercadoria bater com o CMV real contábil.
           </span>
         </div>
       </div>
