@@ -1021,6 +1021,8 @@ async function dbUpdateKitchenRequestStatus(id, status, userId) {
   const update = { status };
   if (status === "separated") { update.separated_at = new Date().toISOString(); update.separated_by = userId; }
   if (status === "delivered") { update.delivered_at = new Date().toISOString(); update.delivered_by = userId; }
+  // Voltar para pendente (separada → pendente): limpa o carimbo de separação.
+  if (status === "pending") { update.separated_at = null; update.separated_by = null; }
   const { error } = await _client.from("kitchen_requests").update(update).eq("id", id);
   return { error };
 }

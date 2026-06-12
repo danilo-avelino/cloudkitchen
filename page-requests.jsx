@@ -55,6 +55,11 @@ function Requests({ scope }) {
   // "Separar"/"Confirmar entrega" (ref p/ guard síncrono + state p/ desabilitar o botão).
   const advancingRef = useRef(new Set());
   const [advancingIds, setAdvancingIds] = useState(() => new Set());
+  // Voltar "separada" → "pendente" (clicaram em Separar sem querer). Guard de
+  // duplo-clique + requisição aguardando confirmação no diálogo.
+  const revertingRef = useRef(new Set());
+  const [revertingIds, setRevertingIds] = useState(() => new Set());
+  const [confirmRevert, setConfirmRevert] = useState(null);
 
   // Persiste o conjunto de impressas para que o ✅ sobreviva ao reload da página.
   useEffect(() => {
@@ -181,8 +186,9 @@ function Requests({ scope }) {
 
     if (next === "delivered") {
       // Baixa automática do estoque · cada item da requisição vira saída.
-      // Quando online, a baixa já foi feita pelo DB trigger durante o passo "separated".
-      // O frontend só atualiza qty localmente para refletir na UI.
+      // A baixa acontece NA ENTREGA: no MOCK o front aplica abaixo; no DB o
+      // trigger tg_kitchen_requests_delivery gera as saídas. O frontend só
+      // re-busca qty para refletir na UI.
       let moved = 0, missed = 0;
       const missedNames = [];
       const dbOn = source === "db" && tenantId;
@@ -219,6 +225,31 @@ function Requests({ scope }) {
     } finally {
       advancingRef.current.delete(id);
       setAdvancingIds(new Set(advancingRef.current));
+    }
+  };
+
+  // Volta "separada" → "pendente". Como a baixa só ocorre na entrega, voltar não
+  // mexe no estoque (não há o que estornar). Confirmação é pedida antes, no card.
+  const revert = async (id) => {
+    if (revertingRef.current.has(id)) return;
+    const cur = items.find((r) => r.id === id);
+    if (!cur || cur.status !== "separated") return;
+    revertingRef.current.add(id);
+    setRevertingIds(new Set(revertingRef.current));
+    try {
+      setItems((prev) => prev.map((r) => r.id === id ? { ...r, status: "pending", separatedAt: null } : r));
+      if (source === "db") {
+        const { error } = await dbUpdateKitchenRequestStatus(id, "pending");
+        if (error) {
+          setItems((prev) => prev.map((r) => r.id === id ? { ...r, status: cur.status, separatedAt: cur.separatedAt } : r));
+          window.showToast(`Erro ao voltar para pendente: ${error.message}`, { tone: "crit", ttl: 4500 });
+          return;
+        }
+      }
+      window.showToast(`Requisição ${cur.code || id} voltou para pendente`, { tone: "ok" });
+    } finally {
+      revertingRef.current.delete(id);
+      setRevertingIds(new Set(revertingRef.current));
     }
   };
 
@@ -408,6 +439,8 @@ function Requests({ scope }) {
                         onAdvance={() => advance(r.id)}
                         canAdvance={col.id !== "delivered"}
                         advancing={advancingIds.has(r.id)}
+                        onRevert={col.id === "separated" ? () => setConfirmRevert(r) : null}
+                        reverting={revertingIds.has(r.id)}
                         onEdit={col.id === "pending" ? () => setEditingReq(r) : null}
                         onPrint={col.id === "pending" ? () => setPrintingReq(r) : null}
                         printed={printedIds.has(r.id)}
@@ -513,6 +546,19 @@ function Requests({ scope }) {
       )}
 
       {printingReq && <PrintTicket request={printingReq} userName={memberNames[printingReq.requestedBy] || null} tenantName={tenantName} />}
+
+      {confirmRevert && window.ConfirmDialog && (
+        <window.ConfirmDialog
+          open
+          tone="default"
+          title="Voltar para pendente?"
+          message={`A requisição ${confirmRevert.code || confirmRevert.id} volta para a coluna Pendente e poderá ser separada de novo. O estoque não é afetado (a baixa só ocorre na entrega).`}
+          confirmLabel="Voltar para pendente"
+          cancelLabel="Cancelar"
+          onConfirm={() => { const id = confirmRevert.id; setConfirmRevert(null); revert(id); }}
+          onCancel={() => setConfirmRevert(null)}
+        />
+      )}
 
       {showHistory && (
         <RequestsHistoryModal
@@ -719,7 +765,7 @@ function RequestsHistoryModal({ requests = [], onClose }) {
   );
 }
 
-function RequestCard({ r, userName, onAdvance, canAdvance, advancing, onEdit, onPrint, printed }) {
+function RequestCard({ r, userName, onAdvance, canAdvance, advancing, onRevert, reverting, onEdit, onPrint, printed }) {
   const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
   const op = MOCK.opById(r.op);
   return (
@@ -786,8 +832,15 @@ function RequestCard({ r, userName, onAdvance, canAdvance, advancing, onEdit, on
         <span style={{ flex: 1 }} />
         <span className="mono" style={{ fontSize: 11.5, color: "var(--fg-0)", fontWeight: 500 }}>{r.total}</span>
       </div>
-      {(canAdvance || onEdit || onPrint) && (
+      {(canAdvance || onEdit || onPrint || onRevert) && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {onRevert && (
+            <button className="btn" data-variant="ghost" data-size="sm" onClick={onRevert} disabled={reverting}
+                    title="Voltar esta requisição para Pendente"
+                    style={{ justifyContent: "center", display: "inline-flex", alignItems: "center", gap: 4 }}>
+              {reverting ? "Voltando…" : "↩ Voltar"}
+            </button>
+          )}
           {onPrint && (
             <button className="btn" data-size="sm" onClick={onPrint}
                     title={printed ? "Reimprimir (já impresso)" : "Imprimir (papel térmico)"}
