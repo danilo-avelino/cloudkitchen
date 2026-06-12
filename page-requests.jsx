@@ -38,6 +38,9 @@ function Requests({ scope }) {
     catch { return ""; }
   });
   const [source, setSource]     = useState("mock");
+  // Nome dos membros do tenant por user_id — resolve requested_by (conta logada
+  // que criou a requisição) pra exibição ao lado do solicitante digitado.
+  const [memberNames, setMemberNames] = useState({});
   const [pageLoading, setPageLoading] = useState(true);
   const [view, setView] = useState("kanban"); // kanban | list
   const [creating, setCreating] = useState(false);
@@ -72,11 +75,15 @@ function Requests({ scope }) {
         setTenantId(tid || null);
         if (ctx?.tenant?.name) setTenantName(ctx.tenant.name);
         if (!tid) return;
-        const [reqRes, stockRes] = await Promise.all([
+        const [reqRes, stockRes, memRes] = await Promise.all([
           dbListKitchenRequests(tid, { limit: 100 }),
           dbListStockItems(tid),
+          dbListMembers(tid).catch(() => ({ data: null })),
         ]);
         if (cancelled) return;
+        if (memRes?.data) {
+          setMemberNames(Object.fromEntries(memRes.data.map((m) => [m.userId, m.name])));
+        }
         if (reqRes.data && reqRes.source === "db") {
           setItems(reqRes.data);
           setSource("db");
@@ -397,6 +404,7 @@ function Requests({ scope }) {
                       <RequestCard
                         key={r.id}
                         r={r}
+                        userName={memberNames[r.requestedBy] || null}
                         onAdvance={() => advance(r.id)}
                         canAdvance={col.id !== "delivered"}
                         advancing={advancingIds.has(r.id)}
@@ -443,7 +451,14 @@ function Requests({ scope }) {
                         {isShared ? "🔗 Uso compartilhado" : op.name}
                       </span>
                     </td>
-                    <td className="dim">{r.by}</td>
+                    <td className="dim">
+                      {r.by}
+                      {memberNames[r.requestedBy] && memberNames[r.requestedBy] !== r.by && (
+                        <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", marginTop: 2 }}>
+                          {memberNames[r.requestedBy]}
+                        </div>
+                      )}
+                    </td>
                     <td className="num">{r.itemsCount}</td>
                     <td className="num">{r.total}</td>
                     <td className="dim mono" style={{ fontSize: 11 }}>{r.age}</td>
@@ -489,6 +504,7 @@ function Requests({ scope }) {
       {editingReq && (
         <EditRequestModal
           request={editingReq}
+          userName={memberNames[editingReq.requestedBy] || null}
           stockItems={stockItems}
           onCancel={() => setEditingReq(null)}
           onSubmit={(draft) => handleEditSave(editingReq.id, draft)}
@@ -496,7 +512,7 @@ function Requests({ scope }) {
         />
       )}
 
-      {printingReq && <PrintTicket request={printingReq} tenantName={tenantName} />}
+      {printingReq && <PrintTicket request={printingReq} userName={memberNames[printingReq.requestedBy] || null} tenantName={tenantName} />}
 
       {showHistory && (
         <RequestsHistoryModal
@@ -703,7 +719,7 @@ function RequestsHistoryModal({ requests = [], onClose }) {
   );
 }
 
-function RequestCard({ r, onAdvance, canAdvance, advancing, onEdit, onPrint, printed }) {
+function RequestCard({ r, userName, onAdvance, canAdvance, advancing, onEdit, onPrint, printed }) {
   const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
   const op = MOCK.opById(r.op);
   return (
@@ -716,6 +732,7 @@ function RequestCard({ r, onAdvance, canAdvance, advancing, onEdit, onPrint, pri
         {r.by && (
           <span style={{ fontSize: 11.5, color: "var(--fg-2)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             <span style={{ color: "var(--fg-3)" }}>·</span> {r.by}
+            {userName && userName !== r.by && <span style={{ color: "var(--fg-3)" }}> · {userName}</span>}
           </span>
         )}
         <span style={{ flex: 1 }} />
@@ -799,7 +816,7 @@ function RequestCard({ r, onAdvance, canAdvance, advancing, onEdit, onPrint, pri
 // ===== Cupom térmico para impressão (visível apenas em @media print) =====
 // Renderizado via portal direto no <body> para escapar de containers posicionados
 // do AppShell (que estavam empurrando o cupom para fora da área imprimível na ELGIN).
-function PrintTicket({ request, tenantName }) {
+function PrintTicket({ request, userName, tenantName }) {
   const isShared = !!(request.isShared || (request.splits && request.splits.length > 1));
   const op = MOCK.opById(request.op);
   const headerName = (tenantName || "Cloud Kitchen").toUpperCase();
@@ -820,6 +837,7 @@ function PrintTicket({ request, tenantName }) {
       </div>
       <div>{isShared ? "Uso compartilhado · custo rateado" : op.name}</div>
       <div>Solicitante: {request.by}</div>
+      {userName && userName !== request.by && <div>Usuário: {userName}</div>}
       {request.notes && (
         <div style={{ marginTop: "2mm", whiteSpace: "pre-wrap" }}>
           <span className="bold">Obs.:</span> {request.notes}
@@ -869,7 +887,7 @@ function PrintTicket({ request, tenantName }) {
 // ===== Modal de edição da requisição (somente em status pendente) =====
 // Itens são travados ao catálogo de estoque · usuário pode editar qty ou
 // remover linhas, mas o insumo (nome+unidade+custo) sai do MOCK.STOCK_ITEMS.
-function EditRequestModal({ request, onCancel, onSubmit, onDelete, stockItems = MOCK.STOCK_ITEMS }) {
+function EditRequestModal({ request, userName, onCancel, onSubmit, onDelete, stockItems = MOCK.STOCK_ITEMS }) {
   const [lines, setLines] = useState(() =>
     request.items.map((entry) => {
       const [name, qtyText, stockId] = entry;
@@ -912,7 +930,7 @@ function EditRequestModal({ request, onCancel, onSubmit, onDelete, stockItems = 
 
   return (
     <Modal
-      title={`Editar requisição ${request.id}`}
+      title={`Editar requisição ${request.code || request.id}`}
       subtitle="Ajuste quantidades ou remova itens · insumos vêm do catálogo do estoque."
       onClose={onCancel}
       width={820}
@@ -935,7 +953,7 @@ function EditRequestModal({ request, onCancel, onSubmit, onDelete, stockItems = 
           {isShared ? "🔗 Uso compartilhado" : op.name}
         </span>
         <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-          {request.by} · {request.at}
+          {request.by}{userName && userName !== request.by ? ` · ${userName}` : ""} · {request.at}
         </span>
         <span style={{ flex: 1 }} />
         <span className="mono" style={{ color: "var(--fg-0)" }}>{request.total}</span>

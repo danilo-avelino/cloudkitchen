@@ -860,6 +860,7 @@ function mapKitchenRequestFromDb(row) {
     status:    row.status,
     priority:  row.priority,
     by:        row.requested_by_name || "—",
+    requestedBy: row.requested_by || null, // uuid do usuário logado que criou (auth.users)
     at:        row.requested_at ? new Date(row.requested_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : "",
     requestedAt: row.requested_at,
     separatedAt: row.separated_at || null,
@@ -880,7 +881,7 @@ async function dbListKitchenRequests(tenantId, options = {}) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   let q = _client.from("kitchen_requests")
     .select(`
-      id, code, status, priority, requested_by_name, requested_at, separated_at, delivered_at, notes,
+      id, code, status, priority, requested_by, requested_by_name, requested_at, separated_at, delivered_at, notes,
       operation_id, is_shared, splits,
       operation:operations(id, slug, name, short_label),
       items:kitchen_request_items(id, display_name, qty, unit, unit_cost, line_cost, stock_item_id, sort_order)
@@ -927,12 +928,16 @@ async function dbInsertKitchenRequest(tenantId, draft) {
   }
   const isShared = !!(splitsToSave && splitsToSave.length > 1);
 
+  // Quem está logado criando a requisição (sessão local, sem round-trip)
+  const { data: { session } = {} } = await _client.auth.getSession();
+
   const { data: row, error } = await _client.from("kitchen_requests").insert({
     tenant_id:         tenantId,
     operation_id:      operationId,
     code:              header.code || null,
     status:            header.status || "pending",
     priority:          header.priority || "normal",
+    requested_by:      session?.user?.id || null,
     requested_by_name: header.by || "Cozinha",
     notes:             header.notes || null,
     is_shared:         isShared,
