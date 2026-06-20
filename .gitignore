@@ -14,6 +14,13 @@ scripts/ifood-out.json
 scripts/ifood-events.json
 scripts/ifood-order-*.json
 
+# Teste local da Agilizone (script + amostras cruas — podem conter dados de clientes)
+scripts/agilizone-poll.mjs
+scripts/agilizone-sample-*.json
+
+# Doc de integração com segredos
+AGILIZONE_INTEGRACAO.md
+
 # Node / npm
 node_modules/
 npm-debug.log

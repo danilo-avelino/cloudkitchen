@@ -17,6 +17,8 @@ const PAGE_SLUGS = {
   stock:     "estoque",
   recipes:   "fichas-tecnicas",
   revenue:   "faturamento",
+  delivery:  "tempos-delivery",
+  cardapio:  "cardapio",
   requests:  "requisicoes",
   purchases: "compras",
   cmv:       "cmv",
@@ -211,6 +213,8 @@ function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, set
           {page === "stock"     && <Stock scope={scope} />}
           {page === "recipes"   && <Recipes scope={scope} />}
           {page === "revenue"   && <Revenue scope={scope} />}
+          {page === "delivery"  && <DeliveryTimes scope={scope} />}
+          {page === "cardapio"  && <Cardapio scope={scope} />}
           {page === "requests"  && <Requests scope={scope} />}
           {page === "purchases" && <Purchases />}
           {page === "cmv"       && <CMV setPage={setPage} />}

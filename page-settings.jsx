@@ -17,6 +17,7 @@ function Settings() {
             ["operations",   "Operações"],
             ["users",        "Usuários & permissões"],
             ["integrations", "Integrações"],
+            ["agilizone",    "Agilizone"],
             ["billing",      "Plano & cobrança"],
           ].map(([id, label]) => {
             const active = tab === id;
@@ -37,6 +38,7 @@ function Settings() {
         {tab === "operations"   && <OperationsTab />}
         {tab === "users"        && <UsersTab />}
         {tab === "integrations" && <IntegrationsTab />}
+        {tab === "agilizone"    && <AgilizoneTab />}
         {tab === "billing"      && <BillingTab />}
       </div>
     </div>
@@ -1115,6 +1117,270 @@ function IntegrationModal({ operation, existing, onClose, onAdd }) {
                    placeholder={cat.placeholder} />
           </FormRow>
         )}
+      </div>
+    </Modal>
+  );
+}
+
+// ===== Aba Agilizone (integração org-level) =====
+// A Agilizone agrega os pedidos de todas as marcas de uma loja. Aqui o tenant
+// cadastra as chaves (1 conta = 1 dark kitchen), ativa a integração e atrela cada
+// "marca" (ifoodOrder.merchant.name) a uma operação. Tudo via edge function
+// agilizone-admin (service_role) — o client_secret nunca volta pro cliente.
+function AgilizoneTab() {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const [tid, setTid] = useState(null);
+  const [ops, setOps] = useState([]);
+  const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null); // conta em edição; {} = nova
+
+  const reload = async (tenantId) => {
+    const { data, error } = await dbAgilizoneListAccounts(tenantId);
+    if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+    setAccounts(data?.accounts || []);
+  };
+
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setLoading(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ctx = await dbGetCurrentContext();
+        const t = ctx?.tenant?.id || null;
+        if (cancelled) return;
+        setTid(t);
+        if (!t) return;
+        const { data: opsData } = await dbListOperations(t);
+        if (cancelled) return;
+        setOps((opsData || []).filter((o) => o.id !== "all").map((r) => ({ id: r.id, name: r.name, short: r.short_label })));
+        await reload(t);
+      } finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.state, dbStatus.isOnline]);
+
+  if (loading) return <PageLoading label="Carregando integração Agilizone…" variant="table" hint="" />;
+
+  if (!dbStatus.isOnline || !tid) {
+    return (
+      <div style={{ fontSize: 12.5, color: "var(--warn)", padding: "10px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 4 }}>
+        A integração Agilizone só pode ser gerenciada com Supabase online.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13, maxWidth: 640 }}>
+          A Agilizone agrega os pedidos de todas as marcas de uma loja. Cadastre as chaves,
+          ative a integração e atrele cada marca a uma operação — o faturamento é dividido
+          por operação automaticamente.
+        </p>
+        <button className="btn" data-variant="primary" data-size="sm" onClick={() => setEditing({})}>
+          <I.Plus size={13} />Nova conta
+        </button>
+      </div>
+
+      {accounts.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--fg-3)", padding: "16px 0" }}>
+          Nenhuma conta Agilizone cadastrada. Clique em <b>Nova conta</b> para começar.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {accounts.map((acc) => (
+            <AgilizoneAccountCard key={acc.id} tid={tid} acc={acc} ops={ops}
+              onEdit={() => setEditing(acc)} onChanged={() => reload(tid)} />
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <AgilizoneAccountModal tid={tid} initial={editing.id ? editing : null}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); reload(tid); }} />
+      )}
+    </div>
+  );
+}
+
+function AgilizoneAccountCard({ tid, acc, ops, onEdit, onChanged }) {
+  const [brands, setBrands] = useState(null);  // null = carregando salvos
+  const [map, setMap]       = useState({});    // merchant -> operationId | ""
+  const [pulling, setPulling]   = useState(false);
+  const [saving, setSaving]     = useState(false);
+  const [toggling, setToggling] = useState(false);
+
+  // persistência: carrega os mapeamentos já salvos ao montar (sem chamar a Agilizone)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await dbAgilizoneListBrandMap(tid, acc.id);
+      if (cancelled) return;
+      const bs = error ? [] : (data?.brands || []);
+      setBrands(bs);
+      setMap(Object.fromEntries(bs.map((b) => [b.merchant, b.operationId || ""])));
+    })();
+    return () => { cancelled = true; };
+  }, [tid, acc.id]);
+
+  // Atualizar: busca marcas ao vivo na Agilizone (acha novas) preservando seleções
+  const pull = async () => {
+    if (pulling) return;
+    setPulling(true);
+    try {
+      const { data, error } = await dbAgilizoneDiscoverBrands(tid, acc.id);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      const bs = data?.brands || [];
+      setBrands(bs);
+      setMap((prev) => Object.fromEntries(bs.map((b) => [b.merchant, prev[b.merchant] ?? (b.operationId || "")])));
+      window.showToast?.(`${bs.length} marcas encontradas`, { tone: "ok" });
+    } finally { setPulling(false); }
+  };
+
+  const toggle = async () => {
+    if (toggling) return;
+    setToggling(true);
+    try {
+      const { error } = await dbAgilizoneToggleAccount(tid, acc.id, !acc.is_active);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      window.showToast?.(acc.is_active ? "Integração pausada" : "Integração ativada", { tone: "ok" });
+      onChanged?.();
+    } finally { setToggling(false); }
+  };
+
+  const saveMap = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const mappings = (brands || []).map((b) => ({ merchant: b.merchant, operationId: map[b.merchant] || null }));
+      const { data, error } = await dbAgilizoneSaveBrandMap(tid, acc.id, mappings);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      window.showToast?.(`Mapeamento salvo · ${data?.saved || 0} vinculada(s)${data?.ingestQueued ? " · sincronizando faturamento…" : ""}`, { tone: "ok" });
+      onChanged?.();
+    } finally { setSaving(false); }
+  };
+
+  const maskedId = acc.client_id ? `${acc.client_id.slice(0, 8)}…${acc.client_id.slice(-4)}` : "—";
+  const mappedCount = brands ? brands.filter((b) => map[b.merchant]).length : 0;
+
+  return (
+    <div className="card">
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div>
+            <div style={{ color: "var(--fg-0)", fontWeight: 500, display: "flex", alignItems: "center", gap: 8 }}>
+              {acc.label}
+              <span className="badge" data-tone={acc.is_active ? "ok" : "warn"}>{acc.is_active ? "Ativa" : "Pausada"}</span>
+              <span className="badge">{acc.environment}</span>
+            </div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", marginTop: 2 }}>
+              {maskedId}{acc.last_synced_at ? ` · sync ${new Date(acc.last_synced_at).toLocaleString("pt-BR")}` : " · nunca sincronizado"}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onEdit} disabled={pulling || saving || toggling}>Editar</button>
+            <button className="btn" data-size="sm" onClick={toggle} disabled={toggling}>
+              {toggling ? "…" : acc.is_active ? "Pausar" : "Ativar"}
+            </button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={pull} disabled={pulling}>
+              {pulling ? "Atualizando…" : "Atualizar marcas"}
+            </button>
+          </div>
+        </div>
+
+        {brands && (
+          brands.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "var(--fg-3)" }}>
+              Nenhuma marca vinculada ainda. Clique em <b>Atualizar marcas</b> para buscar na Agilizone.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 11.5, color: "var(--fg-3)" }}>
+                {brands.length} marca(s) · {mappedCount} vinculada(s). Marcas em “—” ficam fora do faturamento.
+              </div>
+              <table className="table">
+                <thead>
+                  <tr><th>Marca (Agilizone)</th><th style={{ width: 80 }}>Pedidos</th><th style={{ width: 260 }}>Operação</th></tr>
+                </thead>
+                <tbody>
+                  {brands.map((b) => (
+                    <tr key={b.merchant}>
+                      <td>{b.merchant}</td>
+                      <td style={{ fontFamily: "var(--mono)", color: "var(--fg-3)" }}>{b.count}</td>
+                      <td>
+                        <select className="input" value={map[b.merchant] || ""}
+                          onChange={(e) => setMap((m) => ({ ...m, [b.merchant]: e.target.value }))}>
+                          <option value="">— ignorar —</option>
+                          {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button className="btn" data-variant="primary" data-size="sm" onClick={saveMap} disabled={saving}>
+                  {saving ? "Salvando…" : "Salvar mapeamentos"}
+                </button>
+              </div>
+            </div>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AgilizoneAccountModal({ tid, initial, onClose, onSaved }) {
+  const [label, setLabel]               = useState(initial?.label || "");
+  const [environment, setEnvironment]   = useState(initial?.environment || "production");
+  const [clientId, setClientId]         = useState(initial?.client_id || "");
+  const [clientSecret, setClientSecret] = useState("");
+  const [saving, setSaving]             = useState(false);
+  const isEdit = !!initial?.id;
+  const valid = label.trim() && (isEdit || (clientId.trim() && clientSecret.trim()));
+
+  const save = async () => {
+    if (saving || !valid) return;
+    setSaving(true);
+    try {
+      const payload = { id: initial?.id, label: label.trim(), environment, clientId: clientId.trim() };
+      if (clientSecret.trim()) payload.clientSecret = clientSecret.trim();
+      const { error } = await dbAgilizoneSaveAccount(tid, payload);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      window.showToast?.("Conta Agilizone salva", { tone: "ok" });
+      onSaved?.();
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal title={isEdit ? "Editar conta Agilizone" : "Nova conta Agilizone"} onClose={onClose} width={520}
+      footer={<>
+        <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || saving} onClick={save}>
+          {saving ? "Salvando…" : isEdit ? "Salvar" : "Criar conta"}
+        </button>
+      </>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <FormRow label="Nome da loja">
+          <input className="input" autoFocus value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Ex.: Dark Aldeota" />
+        </FormRow>
+        <FormRow label="Ambiente">
+          <select className="input" value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+            <option value="production">Produção</option>
+            <option value="sandbox">Sandbox</option>
+          </select>
+        </FormRow>
+        <FormRow label="Client ID">
+          <input className="input mono" value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="uuid do client" />
+        </FormRow>
+        <FormRow label="Client Secret" hint={isEdit ? "deixe em branco para manter o atual" : ""}>
+          <input className="input mono" type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)}
+                 placeholder={isEdit ? "••••••••" : "uuid do secret"} />
+        </FormRow>
       </div>
     </Modal>
   );

@@ -1893,6 +1893,157 @@ async function dbUpdateMember(tenantId, userId, patch) {
   }
 }
 
+// ---- Agilizone (integração) · edge function agilizone-admin ----
+async function _agilizoneAdmin(payload) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  try {
+    const { data: { session } } = await _client.auth.getSession();
+    if (!session) return { data: null, error: new Error("Não autenticado") };
+    const url = window.SK_CONFIG?.supabaseUrl + "/functions/v1/agilizone-admin";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + session.access_token },
+      body: JSON.stringify(payload),
+    });
+    const raw = await res.text();
+    let json = null; try { json = raw ? JSON.parse(raw) : null; } catch (_) { /* non-json */ }
+    if (!res.ok) return { data: null, error: new Error(`[${res.status}] ${json?.error || raw || res.statusText}`) };
+    return { data: json, error: null };
+  } catch (e) { return { data: null, error: e }; }
+}
+async function dbAgilizoneListAccounts(tenantId) { return _agilizoneAdmin({ tenantId, action: "list-accounts" }); }
+async function dbAgilizoneSaveAccount(tenantId, acc) { return _agilizoneAdmin({ tenantId, action: "save-account", ...acc }); }
+async function dbAgilizoneToggleAccount(tenantId, id, isActive) { return _agilizoneAdmin({ tenantId, action: "toggle-account", id, isActive }); }
+async function dbAgilizoneListBrandMap(tenantId, accountId) { return _agilizoneAdmin({ tenantId, action: "list-brand-map", accountId }); }
+async function dbAgilizoneDiscoverBrands(tenantId, accountId) { return _agilizoneAdmin({ tenantId, action: "discover-brands", accountId }); }
+async function dbAgilizoneSaveBrandMap(tenantId, accountId, mappings) { return _agilizoneAdmin({ tenantId, action: "save-brand-map", accountId, mappings }); }
+async function dbAgilizoneSync(tenantId, accountId, lookbackDays) { return _agilizoneAdmin({ tenantId, action: "sync", accountId, lookbackDays }); }
+
+// Integração ativa? = tenant tem ao menos 1 marca atrelada. agilizone_brand_map é
+// legível por membro via RLS (agilizone_accounts é service_role-only, não dá p/ ler
+// no cliente). Em erro, assume ativa (não esconde o módulo por falha transitória).
+async function dbAgilizoneIntegrationActive(tenantId) {
+  if (!isDbOnline() || !_client) return { active: false, error: null };
+  const { count, error } = await _client.from("agilizone_brand_map")
+    .select("id", { count: "exact", head: true })
+    .eq("tenant_id", tenantId);
+  if (error) return { active: true, error };
+  return { active: (count || 0) > 0, error: null };
+}
+
+// Garante sessão válida antes de um RPC autenticado (renova token expirado).
+// Sem isto, um token lapsado faz a chamada cair como `anon` → "permission denied".
+async function _ensureSession() {
+  if (!_client) return null;
+  const { data: { session } } = await _client.auth.getSession();
+  return session || null;
+}
+
+// Tempos de Delivery · métricas agregadas (RPC agilizone_delivery_metrics)
+async function dbDeliveryMetrics(tenantId, from, to) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_delivery_metrics", { p_tenant: tenantId, p_from: from, p_to: to });
+  if (error) return { data: null, error };
+  return { data, error: null };
+}
+
+// Cardápio · vendas por item (RPC agilizone_menu_sales)
+async function dbMenuSales(tenantId, from, to, operationId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_menu_sales",
+    { p_tenant: tenantId, p_from: from, p_to: to, p_operation: operationId || null });
+  if (error) return { data: null, error };
+  return { data: data || [], error: null };
+}
+
+// Cardápio · adicionais/complementos com attach rate (RPC agilizone_menu_addons)
+async function dbMenuAddons(tenantId, from, to, operationId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_menu_addons",
+    { p_tenant: tenantId, p_from: from, p_to: to, p_operation: operationId || null });
+  if (error) return { data: null, error };
+  return { data: data || [], error: null };
+}
+
+// Cardápio · cesta / itens vendidos juntos (RPC agilizone_menu_baskets)
+async function dbMenuBaskets(tenantId, from, to, operationId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_menu_baskets",
+    { p_tenant: tenantId, p_from: from, p_to: to, p_operation: operationId || null });
+  if (error) return { data: null, error };
+  return { data: data || [], error: null };
+}
+
+// Cardápio · insights por item (RPC agilizone_menu_item_insights)
+async function dbMenuItemInsights(tenantId, from, to, operationId, names) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_menu_item_insights", {
+    p_tenant: tenantId, p_from: from, p_to: to, p_operation: operationId || null, p_names: names,
+  });
+  if (error) return { data: null, error };
+  return { data: data || [], error: null };
+}
+
+// Tempos de Delivery · série temporal + piores itens (RPC agilizone_delivery_timeseries)
+async function dbDeliveryTimeseries(tenantId, from, to, operationId, shiftStart, shiftEnd) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_delivery_timeseries", {
+    p_tenant: tenantId, p_from: from, p_to: to,
+    p_operation: operationId || null,
+    p_shift_start: shiftStart || null, p_shift_end: shiftEnd || null,
+  });
+  if (error) return { data: null, error };
+  return { data, error: null };
+}
+
+// ---------- Turnos de delivery (faixas de horário, nível tenant) ----------
+async function dbListDeliveryShifts(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, error: null };
+  const { data, error } = await _client.from("delivery_shifts")
+    .select("id, name, start_time, end_time, sort_order, is_active")
+    .eq("tenant_id", tenantId)
+    .eq("is_active", true)
+    .order("sort_order", { ascending: true })
+    .order("start_time", { ascending: true });
+  if (error) return { data: null, error };
+  return { data: data || [], error: null };
+}
+
+async function dbInsertDeliveryShift(tenantId, { name, startTime, endTime, sortOrder }) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("delivery_shifts").insert({
+    tenant_id:  tenantId,
+    name:       String(name || "").trim(),
+    start_time: startTime,
+    end_time:   endTime,
+    sort_order: sortOrder ?? 0,
+  }).select().single();
+  return { data, error };
+}
+
+async function dbUpdateDeliveryShift(id, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const update = {};
+  if (patch.name !== undefined)      update.name = String(patch.name).trim();
+  if (patch.startTime !== undefined) update.start_time = patch.startTime;
+  if (patch.endTime !== undefined)   update.end_time = patch.endTime;
+  if (patch.sortOrder !== undefined) update.sort_order = patch.sortOrder;
+  const { data, error } = await _client.from("delivery_shifts").update(update).eq("id", id).select().single();
+  return { data, error };
+}
+
+async function dbDeleteDeliveryShift(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("delivery_shifts").delete().eq("id", id);
+  return { error };
+}
+
 // Wrappers de compat — chamam dbUpdateMember por baixo
 async function dbUpdateMemberProfile(userId, { name }, tenantId) {
   return dbUpdateMember(tenantId, userId, { name });
@@ -2817,6 +2968,10 @@ Object.assign(window, {
   dbInsertTechSheetItem, dbUpdateTechSheetItem, dbDeleteTechSheetItem,
   dbListInventories, dbInsertInventory, dbUpdateInventory, dbDeleteInventory,
   dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
+  dbAgilizoneListAccounts, dbAgilizoneSaveAccount, dbAgilizoneToggleAccount, dbAgilizoneDiscoverBrands, dbAgilizoneSaveBrandMap,
+  dbAgilizoneListBrandMap, dbAgilizoneSync, dbAgilizoneIntegrationActive,
+  dbDeliveryMetrics, dbMenuSales, dbMenuAddons, dbMenuBaskets, dbMenuItemInsights,
+  dbDeliveryTimeseries, dbListDeliveryShifts, dbInsertDeliveryShift, dbUpdateDeliveryShift, dbDeleteDeliveryShift,
   dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin,
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbListFinanceEntriesRange, dbListReconciledEntryIds, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
   dbListBankAccounts, dbUpsertBankAccount, dbUpsertBankTransactions, dbListBankTransactions, dbUpdateBankTransactionState,
