@@ -137,14 +137,23 @@ serve(async (req) => {
       const env = acc.environment === "sandbox" ? "sandbox" : "production";
       const accessToken = await getToken(acc.client_id, secret, env);
 
-      // pagina algumas páginas só p/ descobrir as marcas ativas (rápido)
-      const counts = new Map<string, number>();
-      for (let page = 1; page <= 6; page++) {
+      // pagina algumas páginas p/ descobrir marcas + os 3 itens mais vendidos
+      // de cada uma (ajuda o usuário a classificar marca/id → operação).
+      const agg = new Map<string, { count: number; items: Map<string, number> }>();
+      for (let page = 1; page <= 8; page++) {
         const batch = await listOrders(accessToken, env, page, 100);
         if (!batch.length) break;
         for (const o of batch) {
-          const m = o?.ifoodOrder?.merchant?.name;
-          if (m) counts.set(m, (counts.get(m) || 0) + 1);
+          const m = resolveMerchant(o);
+          if (!m) continue;
+          let e = agg.get(m);
+          if (!e) { e = { count: 0, items: new Map() }; agg.set(m, e); }
+          e.count++;
+          for (const it of orderItemsOf(o)) {
+            const nm = it?.name;
+            if (!nm) continue;
+            e.items.set(nm, (e.items.get(nm) || 0) + (Number(it?.quantity) || 1));
+          }
         }
         if (batch.length < 100) break;
       }
@@ -153,10 +162,16 @@ serve(async (req) => {
       const { data: maps } = await admin.from("agilizone_brand_map")
         .select("merchant_name, operation_id").eq("account_id", accountId);
       const mapByName = new Map((maps || []).map((r: any) => [r.merchant_name, r.operation_id]));
-      for (const r of (maps || [])) if (!counts.has(r.merchant_name)) counts.set(r.merchant_name, 0);
+      for (const r of (maps || [])) if (!agg.has(r.merchant_name)) agg.set(r.merchant_name, { count: 0, items: new Map() });
 
-      const brands = [...counts.entries()]
-        .map(([merchant, count]) => ({ merchant, count, operationId: mapByName.get(merchant) || null }))
+      const brands = [...agg.entries()]
+        .map(([merchant, e]) => ({
+          merchant,
+          count: e.count,
+          operationId: mapByName.get(merchant) || null,
+          topItems: [...e.items.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+            .map(([name, qty]) => ({ name, qty })),
+        }))
         .sort((a, b) => b.count - a.count);
       return json({ ok: true, brands });
     }
@@ -239,6 +254,34 @@ async function listOrders(token: string, env: string, page: number, pageSize: nu
   const text = await res.text();
   if (!res.ok) throw new Error(`agilizone orders ${res.status}: ${text}`);
   return JSON.parse(text);
+}
+
+// Nome da marca, robusto às origens da Agilizone. DEVE ser idêntico ao do
+// agilizone-ingest p/ o merchant_name salvo casar na hora de atribuir pedidos.
+//   iFood → ifoodOrder.merchant.name · SAIPOS/PDVs → originOrder.merchant.name
+//   AnotaAI/Mogo/Neemo → *.merchant.name · sem nome (ex.: CARDAPIO_WEB que só
+//   traz merchant_id numérico) → "<Origem> #<id>" (rótulo mapeável manualmente).
+const ORIGIN_LABEL: Record<string, string> = { CARDAPIO_WEB: "Cardápio Web", SAIPOS: "SAIPOS" };
+function resolveMerchant(o: any): string | null {
+  const byName = o?.ifoodOrder?.merchant?.name
+              ?? o?.originOrder?.merchant?.name
+              ?? o?.anotaAIOrder?.merchant?.name
+              ?? o?.mogoOrder?.merchant?.name
+              ?? o?.neemoOrder?.merchant?.name;
+  if (byName) return String(byName);
+  const mid = o?.originOrder?.merchant_id ?? o?.originOrder?.merchant?.id;
+  if (mid != null) {
+    const label = ORIGIN_LABEL[o?.originPlatform] ?? o?.originPlatform ?? "Origem";
+    return `${label} #${mid}`;
+  }
+  return null;
+}
+
+// Itens do pedido em qualquer origem: iFood usa ifoodOrder.items; SAIPOS e
+// CARDAPIO_WEB usam originOrder.items. Todos têm ao menos { name, quantity }.
+function orderItemsOf(o: any): any[] {
+  const arr = o?.ifoodOrder?.items ?? o?.originOrder?.items ?? [];
+  return Array.isArray(arr) ? arr : [];
 }
 
 function json(body: unknown, status = 200) {

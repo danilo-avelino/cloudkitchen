@@ -132,7 +132,7 @@ serve(async (req) => {
 
       // monta as linhas de pedido
       const orderRows = orders.map((o) => {
-        const merchant = o.ifoodOrder?.merchant?.name ?? null;
+        const merchant = resolveMerchant(o);
         const operationId = merchant ? (brandMap.get(merchant) ?? null) : null;
         if (merchant) (operationId ? mapped++ : (unmapped++, unmappedBrands.add(merchant)));
         return {
@@ -183,15 +183,15 @@ serve(async (req) => {
       for (const o of orders) {
         const oid = idByAgz.get(o._id);
         if (!oid) continue;
-        (o.ifoodOrder?.items ?? []).forEach((it: any, i: number) => itemRows.push({
+        orderItemsOf(o).forEach((it: any, i: number) => itemRows.push({
           tenant_id:     acc.tenant_id,
           order_id:      oid,
           idx:           it.index ?? i + 1,
-          external_code: it.externalCode ?? null,
+          external_code: it.externalCode ?? it.external_code ?? null,
           name:          it.name ?? "(sem nome)",
           quantity:      numOrNull(it.quantity) ?? 1,
-          unit_price:    numOrNull(it.unitPrice),
-          total_price:   numOrNull(it.totalPrice ?? it.price),
+          unit_price:    numOrNull(it.unitPrice ?? it.unit_price),
+          total_price:   numOrNull(it.totalPrice ?? it.price ?? it.total_price),
           options:       (it.options && it.options.length) ? it.options : null,
         }));
       }
@@ -236,7 +236,7 @@ async function refreshRevenue(admin: any, acc: any, orders: any[], brandMap: Map
 
   for (const o of orders) {
     if (NON_SALE.has(o.status)) continue;
-    const merchant = o.ifoodOrder?.merchant?.name ?? null;
+    const merchant = resolveMerchant(o);
     const opId = merchant ? brandMap.get(merchant) : undefined;
     if (!opId) continue;                                  // marca não mapeada → não entra no faturamento
     const date = effectiveDay(o.createdAt);
@@ -364,6 +364,34 @@ function chunked<T>(arr: T[], size: number): T[][] {
 function numOrNull(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+// Nome da marca, robusto às origens da Agilizone. DEVE ser idêntico ao do
+// agilizone-admin (discover-brands) p/ o merchant_name casar com o brand_map.
+//   iFood → ifoodOrder.merchant.name · SAIPOS/PDVs → originOrder.merchant.name
+//   AnotaAI/Mogo/Neemo → *.merchant.name · sem nome (ex.: CARDAPIO_WEB que só
+//   traz merchant_id numérico) → "<Origem> #<id>".
+const ORIGIN_LABEL: Record<string, string> = { CARDAPIO_WEB: "Cardápio Web", SAIPOS: "SAIPOS" };
+function resolveMerchant(o: any): string | null {
+  const byName = o?.ifoodOrder?.merchant?.name
+              ?? o?.originOrder?.merchant?.name
+              ?? o?.anotaAIOrder?.merchant?.name
+              ?? o?.mogoOrder?.merchant?.name
+              ?? o?.neemoOrder?.merchant?.name;
+  if (byName) return String(byName);
+  const mid = o?.originOrder?.merchant_id ?? o?.originOrder?.merchant?.id;
+  if (mid != null) {
+    const label = ORIGIN_LABEL[o?.originPlatform] ?? o?.originPlatform ?? "Origem";
+    return `${label} #${mid}`;
+  }
+  return null;
+}
+
+// Itens em qualquer origem: iFood usa ifoodOrder.items; SAIPOS/CARDAPIO_WEB usam
+// originOrder.items. Todos têm ao menos { name, quantity }.
+function orderItemsOf(o: any): any[] {
+  const arr = o?.ifoodOrder?.items ?? o?.originOrder?.items ?? [];
+  return Array.isArray(arr) ? arr : [];
 }
 
 function jwtRole(t: string): string | null {

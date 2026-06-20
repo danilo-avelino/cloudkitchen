@@ -1299,7 +1299,8 @@ function AgilizoneAccountCard({ tid, acc, ops, onEdit, onChanged }) {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ fontSize: 11.5, color: "var(--fg-3)" }}>
-                {brands.length} marca(s) · {mappedCount} vinculada(s). Marcas em “—” ficam fora do faturamento.
+                {brands.length} marca(s) · {mappedCount} vinculada(s). Use os <b>itens mais vendidos</b> de cada
+                marca para identificá-la e atrelar à operação certa. Marcas em “—” ficam fora do faturamento.
               </div>
               <table className="table">
                 <thead>
@@ -1308,7 +1309,14 @@ function AgilizoneAccountCard({ tid, acc, ops, onEdit, onChanged }) {
                 <tbody>
                   {brands.map((b) => (
                     <tr key={b.merchant}>
-                      <td>{b.merchant}</td>
+                      <td>
+                        <div>{b.merchant}</div>
+                        {b.topItems && b.topItems.length > 0 && (
+                          <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 3, lineHeight: 1.45 }}>
+                            Mais vendidos: {b.topItems.map((it) => `${it.name} (${it.qty})`).join(" · ")}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ fontFamily: "var(--mono)", color: "var(--fg-3)" }}>{b.count}</td>
                       <td>
                         <select className="input" value={map[b.merchant] || ""}
