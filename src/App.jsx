@@ -17,7 +17,7 @@ const PAGE_SLUGS = {
   stock:     "estoque",
   recipes:   "fichas-tecnicas",
   revenue:   "faturamento",
-  delivery:  "tempos-delivery",
+  delivery:  "logistica",
   cardapio:  "cardapio",
   requests:  "requisicoes",
   purchases: "compras",

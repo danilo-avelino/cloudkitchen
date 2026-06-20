@@ -44,6 +44,7 @@ function Dashboard({ scope, setPage }) {
     dreCategories: [],
     dreSubcategories: [],
     financeEntries: [], // do mês corrente, p/ KPI "Compras do mês"
+    fees: null,         // taxas de entrega (Agilizone) no período · { total, byOperation }
   });
 
   // Carrega dados do DB + assina realtime (faturamento/saída atualizam o ranking ao vivo)
@@ -103,8 +104,11 @@ function Dashboard({ scope, setPage }) {
       const _mtdFirst   = new Date(); _mtdFirst.setDate(1); _mtdFirst.setHours(0, 0, 0, 0);
       const cmvFromYMD  = _mtdFirst.toISOString().slice(0, 10);
       const currentPeriod = `${_mtdFirst.getFullYear()}-${String(_mtdFirst.getMonth() + 1).padStart(2, "0")}`;
+      // Taxas de entrega: o RPC filtra por business_date (data civil) no período do header.
+      const feesFromYMD = fromDate.toISOString().slice(0, 10);
+      const feesToYMD   = (toDate || new Date()).toISOString().slice(0, 10);
 
-      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes, periodMovRes, dreCatRes, dreSubRes, finRes] = await Promise.all([
+      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes, periodMovRes, dreCatRes, dreSubRes, finRes, feesRes] = await Promise.all([
         dbGetCurrentContext?.(),
         dbListRevenueEntries(tid, fromISO, toDate ? toISO : null),
         dbListRevenueEntries(tid, prevFromISO, prevToISO),
@@ -120,6 +124,7 @@ function Dashboard({ scope, setPage }) {
         dbListDreCategories?.(tid) || { data: null },
         dbListDreSubcategories?.(tid) || { data: null },
         dbListFinanceEntries?.(tid, currentPeriod) || { data: null },
+        dbDeliveryFees?.(tid, feesFromYMD, feesToYMD) || { data: null },
       ]);
       if (cancelled) return;
       // Splits das requisições de uso compartilhado que aparecem nas saídas do MTD —
@@ -144,6 +149,7 @@ function Dashboard({ scope, setPage }) {
         dreCategories:    dreCatRes.data || [],
         dreSubcategories: dreSubRes.data || [],
         financeEntries:   finRes.data || [],
+        fees:             feesRes.data || null,
       });
       setPageLoading(false);
       setPeriodLoading(false);
@@ -214,6 +220,12 @@ function Dashboard({ scope, setPage }) {
     return { entradas, saidas };
   }, [dbData.periodMovements]);
 
+  // Taxas de entrega no período · consolidado usa o total; operação usa a quebra por op.
+  const feesData = dbData.fees;
+  const feesForScope = !feesData ? null
+    : (isConsolidated ? feesData.total : (feesData.byOperation?.[scope] || { clientCollected: 0, deliverymanPaid: 0 }));
+  const hasFees = !!feesData && ((Number(feesData.total?.clientCollected) || 0) + (Number(feesData.total?.deliverymanPaid) || 0)) > 0;
+
   if (pageLoading) return <PageLoading label="Carregando dashboard…" variant="dashboard" />;
 
   return (
@@ -266,6 +278,13 @@ function Dashboard({ scope, setPage }) {
           tone={moduleMetrics.alerts.ruptura > 0 ? "crit" : moduleMetrics.alerts.total > 0 ? "warn" : "ok"}
           onClick={() => setPage("stock")} icon={<I.AlertTriangle size={11} />} />
       </div>
+
+      {/* Taxas de entrega (Agilizone) — só quando há dados de delivery no período */}
+      {hasFees && window.DeliveryFeesBox && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 360px))", gap: 12 }}>
+          <window.DeliveryFeesBox fees={feesForScope} />
+        </div>
+      )}
 
       {/* CMV + Ranking */}
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12 }}>

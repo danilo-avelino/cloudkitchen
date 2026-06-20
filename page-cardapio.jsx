@@ -440,7 +440,7 @@ function Cardapio({ scope }) {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{ padding: "20px 28px 0" }}>
         <div className="h-eyebrow" style={{ marginBottom: 6 }}>Vendas · Agilizone</div>
-        <h1 className="h-title">Cardápio</h1>
+        <h1 className="h-title">Análise de Cardápio</h1>
 
         {/* sub-abas */}
         <div style={{ display: "flex", gap: 2, borderBottom: "1px solid var(--line)", marginTop: 14 }}>

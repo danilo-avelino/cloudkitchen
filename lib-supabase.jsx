@@ -1948,6 +1948,15 @@ async function dbDeliveryMetrics(tenantId, from, to) {
   return { data, error: null };
 }
 
+// Tempos de Delivery · arrecadação de taxas (RPC agilizone_delivery_fees)
+async function dbDeliveryFees(tenantId, from, to) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_delivery_fees", { p_tenant: tenantId, p_from: from, p_to: to });
+  if (error) return { data: null, error };
+  return { data, error: null };
+}
+
 // Cardápio · vendas por item (RPC agilizone_menu_sales)
 async function dbMenuSales(tenantId, from, to, operationId) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
@@ -1985,6 +1994,26 @@ async function dbMenuItemInsights(tenantId, from, to, operationId, names) {
   const { data, error } = await _client.rpc("agilizone_menu_item_insights", {
     p_tenant: tenantId, p_from: from, p_to: to, p_operation: operationId || null, p_names: names,
   });
+  if (error) return { data: null, error };
+  return { data: data || [], error: null };
+}
+
+// Bairros/Raios · estatísticas por bairro (RPC agilizone_neighborhood_stats)
+async function dbNeighborhoodStats(tenantId, from, to, operationId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_neighborhood_stats",
+    { p_tenant: tenantId, p_from: from, p_to: to, p_operation: operationId || null });
+  if (error) return { data: null, error };
+  return { data: data || [], error: null };
+}
+
+// Bairros/Raios · estatísticas por raio de distância (RPC agilizone_radius_stats)
+async function dbRadiusStats(tenantId, from, to, operationId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("agilizone_radius_stats",
+    { p_tenant: tenantId, p_from: from, p_to: to, p_operation: operationId || null });
   if (error) return { data: null, error };
   return { data: data || [], error: null };
 }
@@ -2970,7 +2999,8 @@ Object.assign(window, {
   dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
   dbAgilizoneListAccounts, dbAgilizoneSaveAccount, dbAgilizoneToggleAccount, dbAgilizoneDiscoverBrands, dbAgilizoneSaveBrandMap,
   dbAgilizoneListBrandMap, dbAgilizoneSync, dbAgilizoneIntegrationActive,
-  dbDeliveryMetrics, dbMenuSales, dbMenuAddons, dbMenuBaskets, dbMenuItemInsights,
+  dbDeliveryMetrics, dbDeliveryFees, dbMenuSales, dbMenuAddons, dbMenuBaskets, dbMenuItemInsights,
+  dbNeighborhoodStats, dbRadiusStats,
   dbDeliveryTimeseries, dbListDeliveryShifts, dbInsertDeliveryShift, dbUpdateDeliveryShift, dbDeleteDeliveryShift,
   dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin,
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbListFinanceEntriesRange, dbListReconciledEntryIds, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,

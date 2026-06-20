@@ -1,6 +1,6 @@
-// Tempos de Delivery — sub-abas: Tempos (gráfico de camada dos tempos médios por
-// dia + piores dias + itens que mais atrasam a produção), Entregadores (ranking)
-// e Turnos (config de faixas de horário). Dados da Agilizone via RPCs
+// Logística — sub-abas: Tempos (gráfico de camada dos tempos médios por
+// dia + piores dias + itens que mais atrasam a produção), Entregadores (ranking),
+// Bairros/Raios (análise geográfica) e Turnos (config de faixas de horário). Dados da Agilizone via RPCs
 // agilizone_delivery_timeseries (série + piores itens) e agilizone_delivery_metrics
 // (ranking de entregadores). Turnos em delivery_shifts.
 
@@ -20,6 +20,7 @@ function _fmtMS(s) {
   return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
 }
 function _hm(t) { return (t || "").slice(0, 5); }
+function _brl(v) { return (Number(v) || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" }); }
 function _weekday(day) {
   try {
     const w = new Date(day + "T12:00:00Z").toLocaleDateString("pt-BR", { weekday: "short", timeZone: "UTC" }).replace(".", "");
@@ -35,6 +36,25 @@ function _daysRange(from, to) {
   return out;
 }
 
+// --- Bairros/Raios (sub-abas) ---
+function _dNum(v) { return (Number(v) || 0).toLocaleString("pt-BR"); }
+function _dPct(v) { return (Number(v) || 0).toLocaleString("pt-BR", { style: "percent", maximumFractionDigits: 1 }); }
+// metros → "1,2 km" ou "840 m"
+function _dDist(m) {
+  const n = Number(m) || 0;
+  if (n <= 0) return "—";
+  return n >= 1000
+    ? (n / 1000).toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + " km"
+    : Math.round(n) + " m";
+}
+// raio N → "0–1 km" (de N-1 a N km)
+function _raioLabel(k) { return `${Math.max(0, k - 1)}–${k} km`; }
+// CSV pt-BR (Excel): ';' separador, ',' decimal, sem agrupamento.
+function _dCsvCell(v) { const s = String(v == null ? "" : v); return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function _dCsvNum(v, dec = 2) { return (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: false }); }
+// % de atraso (0–100) → cor de severidade
+function _lateColor(pct) { const n = Number(pct) || 0; return n >= 40 ? "var(--crit)" : n >= 20 ? "var(--warn)" : "var(--fg-1)"; }
+
 const _DELIV_PERIODS = [
   { id: "7d",  label: "7 dias",  days: 7 },
   { id: "30d", label: "30 dias", days: 30 },
@@ -42,6 +62,8 @@ const _DELIV_PERIODS = [
 const _DELIV_VIEWS = [
   { id: "tempos",       label: "Tempos" },
   { id: "entregadores", label: "Entregadores" },
+  { id: "bairros",      label: "Bairros" },
+  { id: "raios",        label: "Raios" },
   { id: "turnos",       label: "Turnos" },
 ];
 const _LAYERS = [
@@ -216,6 +238,49 @@ function MetricCell({ label, value, strong }) {
   );
 }
 
+// --------------------------- mini dashboard (entregadores) ---------------------------
+function StatBox({ label, value, hint }) {
+  return (
+    <div className="card"><div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ fontSize: 10.5, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 500, fontFamily: "var(--mono)", color: "var(--fg-0)" }}>{value}</div>
+      {hint && <div style={{ fontSize: 11, color: "var(--fg-3)" }}>{hint}</div>}
+    </div></div>
+  );
+}
+
+// Arrecadação de taxas: cobrado do cliente (delivery_fee) vs. pago ao entregador
+// (deliveryman_fee). `fees` vem do RPC agilizone_delivery_metrics; enquanto a
+// migration não estiver no ar, fica indisponível (placeholder).
+function FeesBox({ fees }) {
+  const has = fees != null;
+  const collected = Number(fees?.clientCollected) || 0;
+  const paid = Number(fees?.deliverymanPaid) || 0;
+  const net = collected - paid;
+  const Row = ({ label, value, color }) => (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, fontSize: 12.5 }}>
+      <span style={{ color: "var(--fg-2)" }}>{label}</span>
+      <span style={{ fontFamily: "var(--mono)", color }}>{value}</span>
+    </div>
+  );
+  return (
+    <div className="card"><div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 10.5, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Arrecadação de taxas</div>
+      {!has ? (
+        <div style={{ fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5 }}>Sem dados de taxas no período.</div>
+      ) : (
+        <>
+          <Row label="Arrecadado dos clientes" value={_brl(collected)} color="var(--ok)" />
+          <Row label="Pago aos entregadores"  value={_brl(paid)}      color="var(--crit)" />
+          <div style={{ borderTop: "1px solid var(--line)", paddingTop: 7 }}>
+            <Row label="Saldo" value={_brl(net)} color={net >= 0 ? "var(--accent-bright)" : "var(--crit)"} />
+          </div>
+        </>
+      )}
+    </div></div>
+  );
+}
+
 // --------------------------- config de turnos ---------------------------
 function ShiftRow({ shift, onChanged }) {
   const [name, setName]   = useState(shift.name);
@@ -314,6 +379,39 @@ function DeliveryShiftsConfig({ tid, shifts, onChanged }) {
   );
 }
 
+// --------------------------- bairros/raios ---------------------------
+// barra horizontal de participação dentro da célula
+function BrShareBar({ pct, color }) {
+  return (
+    <div style={{ height: 6, borderRadius: 3, background: "var(--line)", overflow: "hidden" }}>
+      <div style={{ width: `${Math.max(2, Math.min(100, (Number(pct) || 0) * 100))}%`, height: "100%", background: color || "var(--accent-bright)", borderRadius: 3 }} />
+    </div>
+  );
+}
+function BrKpi({ label, value, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 500, fontFamily: "var(--mono)", color: color || "var(--fg-0)" }}>{value}</div>
+    </div>
+  );
+}
+
+// cabeçalho clicável p/ ordenar o ranking de entregadores (desc → asc → desc…)
+function _dmSortVal(d, key) { return key === "name" ? (d.name || "") : (Number(d[key]) || 0); }
+function DmTh({ label, sortKey, sort, onSort, width, align }) {
+  const active = sort.key === sortKey;
+  return (
+    <th onClick={() => onSort(sortKey)} title="Ordenar"
+        style={{ width, textAlign: align || "left", cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}>
+      {label}
+      <span style={{ marginLeft: 4, fontSize: 9, color: active ? "var(--accent-bright)" : "var(--fg-3)", opacity: active ? 1 : 0.4 }}>
+        {active ? (sort.dir === "desc" ? "▼" : "▲") : "▼"}
+      </span>
+    </th>
+  );
+}
+
 // ------------------------------- principal -------------------------------
 function DeliveryTimes({ scope }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
@@ -328,6 +426,10 @@ function DeliveryTimes({ scope }) {
 
   const [ts, setTs]           = useState(null);   // timeseries (aba Tempos)
   const [metrics, setMetrics] = useState(null);   // ranking (aba Entregadores)
+  const [hoods, setHoods]     = useState([]);     // bairros (aba Bairros)
+  const [radii, setRadii]     = useState([]);     // raios (aba Raios)
+  const [exporting, setExporting] = useState(false);
+  const [dmSort, setDmSort]   = useState({ key: "deliveries", dir: "desc" }); // ordenação do ranking
   const [range, setRange]     = useState({ from: null, to: null });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy]       = useState(false);
@@ -391,10 +493,23 @@ function DeliveryTimes({ scope }) {
           if (error) throw error;
           setTs(data || { byDay: [], worstItems: [], summary: {} });
         } else if (view === "entregadores") {
-          const { data, error } = await dbDeliveryMetrics(tid, from, to);
+          const [mRes, fRes] = await Promise.all([
+            dbDeliveryMetrics(tid, from, to),
+            dbDeliveryFees(tid, from, to),
+          ]);
+          if (cancelled) return;
+          if (mRes.error) throw mRes.error;
+          setMetrics({ ...(mRes.data || { byDeliveryman: [] }), fees: fRes.data?.total || null });
+        } else if (view === "bairros") {
+          const { data, error } = await dbNeighborhoodStats(tid, from, to, opFilter === "all" ? null : opFilter);
           if (cancelled) return;
           if (error) throw error;
-          setMetrics(data || { byDeliveryman: [] });
+          setHoods(data || []);
+        } else if (view === "raios") {
+          const { data, error } = await dbRadiusStats(tid, from, to, opFilter === "all" ? null : opFilter);
+          if (cancelled) return;
+          if (error) throw error;
+          setRadii(data || []);
         }
       } catch (e) {
         if (!cancelled) window.showToast?.(e.message, { tone: "crit" });
@@ -406,13 +521,13 @@ function DeliveryTimes({ scope }) {
   }, [tid, view, period, opFilter, shiftFilter, shifts]);
 
   if (loading || (dbStatus.isOnline && tid && integ === null))
-    return <PageLoading label="Carregando tempos de delivery…" variant="cards" hint="" />;
+    return <PageLoading label="Carregando logística…" variant="cards" hint="" />;
 
   if (!dbStatus.isOnline || !tid) {
     return (
       <div style={{ padding: "24px 28px" }}>
         <div style={{ fontSize: 12.5, color: "var(--warn)", padding: "10px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 4 }}>
-          Tempos de delivery só ficam disponíveis com Supabase online.
+          A Logística só fica disponível com Supabase online.
         </div>
       </div>
     );
@@ -427,7 +542,7 @@ function DeliveryTimes({ scope }) {
           </span>
           <h2 style={{ fontSize: 17, fontWeight: 600, margin: "0 0 10px", color: "var(--fg-0)" }}>Integração Agilizone não ativa</h2>
           <p style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: "0 0 8px" }}>
-            Os Tempos de Delivery são alimentados pela integração com a <b>Agilizone</b>, o sistema de gestão de delivery.
+            A Logística é alimentada pela integração com a <b>Agilizone</b>, o sistema de gestão de delivery.
           </p>
           <p style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: 0 }}>
             Entre em contato com a <b>Agilizone</b> para realizar a integração. Depois, ative-a e atrele as
@@ -453,12 +568,70 @@ function DeliveryTimes({ scope }) {
   const sm = ts?.summary || {};
   const worstItems = ts?.worstItems || [];
   const ranking = metrics?.byDeliveryman || [];
+  const fees = metrics?.fees ?? null;
+  const totalDeliveries = ranking.reduce((s, d) => s + (Number(d.deliveries) || 0), 0);
+  const sortDm = (key) => setDmSort((s) => (s.key === key ? { key, dir: s.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" }));
+  const sortedRanking = ranking.slice().sort((a, b) => {
+    const va = _dmSortVal(a, dmSort.key), vb = _dmSortVal(b, dmSort.key);
+    const cmp = typeof va === "string" ? va.localeCompare(vb, "pt-BR") : va - vb;
+    return dmSort.dir === "desc" ? -cmp : cmp;
+  });
+
+  // derivados Bairros
+  const hoodOrders  = hoods.reduce((s, r) => s + (Number(r.orders) || 0), 0);
+  const hoodRevenue = hoods.reduce((s, r) => s + (Number(r.revenue) || 0), 0);
+  const hoodTicket  = hoodOrders > 0 ? hoodRevenue / hoodOrders : 0;
+  const hoodMeasured = hoods.reduce((s, r) => s + (Number(r.measured) || 0), 0);
+  const hoodLate     = hoods.reduce((s, r) => s + (Number(r.late_orders) || 0), 0);
+  const hoodLatePct  = hoodMeasured > 0 ? hoodLate / hoodMeasured : null;
+  // derivados Raios
+  const radOrders  = radii.reduce((s, r) => s + (Number(r.orders) || 0), 0);
+  const radRevenue = radii.reduce((s, r) => s + (Number(r.revenue) || 0), 0);
+  const radDistSum = radii.reduce((s, r) => s + (Number(r.avg_distance) || 0) * (Number(r.orders) || 0), 0);
+  const radAvgDist = radOrders > 0 ? radDistSum / radOrders : 0;
+  const radTop     = radii.slice().sort((a, b) => (Number(b.orders) || 0) - (Number(a.orders) || 0))[0] || null;
+  const radWithin3 = radii.filter((r) => Number(r.radius_km) <= 3).reduce((s, r) => s + (Number(r.orders) || 0), 0);
+  const radMeasured = radii.reduce((s, r) => s + (Number(r.measured) || 0), 0);
+  const radLate     = radii.reduce((s, r) => s + (Number(r.late_orders) || 0), 0);
+  const radLatePct  = radMeasured > 0 ? radLate / radMeasured : null;
+
+  // Exporta o ranking de bairros (CSV pt-BR).
+  const exportHoods = () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      if (!hoods.length) { window.showToast?.("Nada para exportar no período/filtro.", { tone: "warn" }); return; }
+      const head = ["Bairro", "Pedidos", "% pedidos", "Faturamento", "Ticket médio", "Distância média (m)", "% atrasadas"];
+      const rows = hoods.map((r) => [
+        _dCsvCell(r.neighborhood),
+        _dCsvNum(r.orders, 0),
+        _dCsvNum(hoodOrders > 0 ? (Number(r.orders) || 0) / hoodOrders * 100 : 0, 1),
+        _dCsvNum(r.revenue, 2),
+        _dCsvNum(r.avg_ticket, 2),
+        _dCsvNum(r.avg_distance, 0),
+        Number(r.measured) > 0 ? _dCsvNum(r.late_pct, 1) : "",
+      ].join(";"));
+      const csv = [head.join(";"), ...rows].join("\r\n");
+      const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `bairros-${period}-${_effDay(new Date())}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      window.showToast?.("Bairros exportados.", { tone: "ok" });
+    } finally {
+      setTimeout(() => setExporting(false), 600);
+    }
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{ padding: "20px 28px 0" }}>
         <div className="h-eyebrow" style={{ marginBottom: 6 }}>Operação · Agilizone</div>
-        <h1 className="h-title">Tempos de Delivery</h1>
+        <h1 className="h-title">Logística</h1>
 
         {/* sub-abas */}
         <div style={{ display: "flex", gap: 2, borderBottom: "1px solid var(--line)", marginTop: 14 }}>
@@ -481,17 +654,24 @@ function DeliveryTimes({ scope }) {
               <button key={p.id} className="btn" data-size="sm" data-variant={period === p.id ? "primary" : undefined}
                       onClick={() => setPeriod(p.id)}>{p.label}</button>
             ))}
-            {view === "tempos" && (
+            {(view === "tempos" || view === "bairros" || view === "raios") && (
               <>
                 <span style={{ width: 1, height: 18, background: "var(--line)", margin: "0 4px" }} />
                 <select className="input" style={{ width: 200 }} value={opFilter} onChange={(e) => setOpFilter(e.target.value)}>
                   <option value="all">Todas as operações</option>
                   {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
                 </select>
-                <select className="input" style={{ width: 220 }} value={shiftFilter} onChange={(e) => setShiftFilter(e.target.value)}>
-                  <option value="all">Todos os turnos</option>
-                  {shifts.map((s) => <option key={s.id} value={s.id}>{s.name} ({_hm(s.start_time)}–{_hm(s.end_time)})</option>)}
-                </select>
+                {view === "tempos" && (
+                  <select className="input" style={{ width: 220 }} value={shiftFilter} onChange={(e) => setShiftFilter(e.target.value)}>
+                    <option value="all">Todos os turnos</option>
+                    {shifts.map((s) => <option key={s.id} value={s.id}>{s.name} ({_hm(s.start_time)}–{_hm(s.end_time)})</option>)}
+                  </select>
+                )}
+                {view === "bairros" && (
+                  <button className="btn" data-size="sm" onClick={exportHoods} disabled={exporting || hoods.length === 0}>
+                    {exporting ? "Exportando…" : "Exportar"}
+                  </button>
+                )}
               </>
             )}
             {busy && <span style={{ fontSize: 11.5, color: "var(--fg-3)" }}>atualizando…</span>}
@@ -576,32 +756,189 @@ function DeliveryTimes({ scope }) {
 
         {/* -------------------------- ENTREGADORES ------------------------- */}
         {view === "entregadores" && (
-          ranking.length === 0 ? (
+          ranking.length === 0 && !fees ? (
             <div style={{ fontSize: 13, color: "var(--fg-3)", maxWidth: 620 }}>Sem entregas com entregador identificado no período.</div>
           ) : (
-            <div>
-              <div style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500, marginBottom: 8 }}>
-                Ranking de entregadores <span style={{ color: "var(--fg-3)", fontWeight: 400, fontSize: 11.5 }}>· todas as operações</span>
+            <>
+              {/* mini dashboard */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>
+                <FeesBox fees={fees} />
+                <StatBox label="Entregas" value={totalDeliveries.toLocaleString("pt-BR")} hint="no período" />
+                <StatBox label="Entregadores" value={ranking.length.toLocaleString("pt-BR")} hint="ativos no período" />
+              </div>
+
+              {ranking.length === 0 ? (
+                <div style={{ fontSize: 13, color: "var(--fg-3)", maxWidth: 620 }}>Sem entregas com entregador identificado no período.</div>
+              ) : (
+                <div>
+                  <div style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500, marginBottom: 8 }}>
+                    Ranking de entregadores <span style={{ color: "var(--fg-3)", fontWeight: 400, fontSize: 11.5 }}>· todas as operações</span>
+                  </div>
+                  <div className="card">
+                    <table className="table">
+                      <thead>
+                        <tr>
+                          <th style={{ width: 44 }}>#</th>
+                          <DmTh label="Entregador"  sortKey="name"       sort={dmSort} onSort={sortDm} />
+                          <DmTh label="Entregas"    sortKey="deliveries" sort={dmSort} onSort={sortDm} width={100} align="right" />
+                          <DmTh label="Canceladas"  sortKey="canceled"   sort={dmSort} onSort={sortDm} width={110} align="right" />
+                          <DmTh label="Dias trab."  sortKey="daysWorked" sort={dmSort} onSort={sortDm} width={100} align="right" />
+                          <DmTh label="Valor pago"  sortKey="paid"       sort={dmSort} onSort={sortDm} width={130} align="right" />
+                          <DmTh label="Tempo médio" sortKey="avgDeliver" sort={dmSort} onSort={sortDm} width={130} align="right" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sortedRanking.map((d, i) => (
+                          <tr key={d.name + i}>
+                            <td style={{ fontFamily: "var(--mono)", color: "var(--fg-3)" }}>{i + 1}</td>
+                            <td>{d.name}</td>
+                            <td className="num" style={{ fontWeight: 600 }}>{_dNum(d.deliveries)}</td>
+                            <td className="num" style={{ color: Number(d.canceled) > 0 ? "var(--warn)" : "var(--fg-3)" }}>{_dNum(d.canceled)}</td>
+                            <td className="num">{_dNum(d.daysWorked)}</td>
+                            <td className="num" style={{ fontWeight: 600 }}>{_brl(d.paid)}</td>
+                            <td className="num">{_fmtDur(d.avgDeliver)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )
+        )}
+
+        {/* ----------------------------- BAIRROS --------------------------- */}
+        {view === "bairros" && (
+          hoods.length === 0 ? (
+            <div style={{ fontSize: 13, color: "var(--fg-3)", maxWidth: 620 }}>
+              Sem pedidos no período/filtro. Verifique se há operações com marcas atreladas
+              em <b>Configurações → Agilizone</b> e se o ingest já rodou.
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+                <BrKpi label="Bairros distintos" value={_dNum(hoods.length)} />
+                <BrKpi label="Pedidos" value={_dNum(hoodOrders)} />
+                <BrKpi label="Faturamento" value={_brl(hoodRevenue)} color="var(--accent-bright)" />
+                <BrKpi label="Ticket médio" value={_brl(hoodTicket)} />
+                <BrKpi label="% atrasadas" value={hoodLatePct == null ? "—" : _dPct(hoodLatePct)} color={hoodLatePct == null ? undefined : _lateColor(hoodLatePct * 100)} />
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--fg-3)" }}>
+                <b>% atrasadas</b> = entregas concluídas após o horário previsto pela plataforma (iFood).
               </div>
               <div className="card">
                 <table className="table">
                   <thead>
-                    <tr><th style={{ width: 44 }}>#</th><th>Entregador</th><th style={{ width: 110 }}>Entregas</th><th style={{ width: 150 }}>Tempo médio</th></tr>
+                    <tr>
+                      <th style={{ width: 44 }}>#</th>
+                      <th>Bairro</th>
+                      <th style={{ width: 90, textAlign: "right" }}>Pedidos</th>
+                      <th style={{ width: 150 }}>% pedidos</th>
+                      <th style={{ width: 140, textAlign: "right" }}>Faturamento</th>
+                      <th style={{ width: 120, textAlign: "right" }}>Ticket médio</th>
+                      <th style={{ width: 110, textAlign: "right" }}>Dist. média</th>
+                      <th style={{ width: 100, textAlign: "right" }}>% atrasadas</th>
+                    </tr>
                   </thead>
                   <tbody>
-                    {ranking.map((d, i) => (
-                      <tr key={d.name + i}>
-                        <td style={{ fontFamily: "var(--mono)", color: "var(--fg-3)" }}>{i + 1}</td>
-                        <td>{d.name}</td>
-                        <td style={{ fontFamily: "var(--mono)" }}>{d.deliveries}</td>
-                        <td style={{ fontFamily: "var(--mono)" }}>{_fmtDur(d.avgDeliver)}</td>
-                      </tr>
-                    ))}
+                    {hoods.map((r, i) => {
+                      const share = hoodOrders > 0 ? (Number(r.orders) || 0) / hoodOrders : 0;
+                      return (
+                        <tr key={r.neighborhood + i}>
+                          <td style={{ fontFamily: "var(--mono)", color: "var(--fg-3)" }}>{i + 1}</td>
+                          <td className="row-strong">{r.neighborhood}</td>
+                          <td className="num" style={{ fontWeight: 600 }}>{_dNum(r.orders)}</td>
+                          <td>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <div style={{ flex: 1, minWidth: 50 }}><BrShareBar pct={share} /></div>
+                              <span style={{ fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--fg-2)", width: 44, textAlign: "right" }}>{_dPct(share)}</span>
+                            </div>
+                          </td>
+                          <td className="num" style={{ fontWeight: 700 }}>{_brl(r.revenue)}</td>
+                          <td className="num" style={{ fontWeight: 500 }}>{_brl(r.avg_ticket)}</td>
+                          <td className="num" style={{ fontWeight: 500 }}>{_dDist(r.avg_distance)}</td>
+                          <td className="num" style={{ fontWeight: 700, color: Number(r.measured) > 0 ? _lateColor(r.late_pct) : "var(--fg-3)" }}>
+                            {Number(r.measured) > 0 ? _dPct((Number(r.late_pct) || 0) / 100) : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-            </div>
+            </>
           )
+        )}
+
+        {/* ------------------------------ RAIOS ---------------------------- */}
+        {view === "raios" && (
+          <>
+            <div style={{ fontSize: 12, color: "var(--fg-3)", maxWidth: 820 }}>
+              Distância em linha reta do restaurante até o cliente. <b>Raio N km</b> agrupa pedidos
+              de N-1 a N km. <b>Saldo</b> = taxa cobrada do cliente − taxa paga ao entregador.
+              <b> % atrasadas</b> = entregas concluídas após o horário previsto pela plataforma (iFood).
+            </div>
+            {radii.length === 0 ? (
+              <div style={{ fontSize: 13, color: "var(--fg-3)", maxWidth: 620 }}>
+                Sem pedidos com distância no período/filtro.
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+                  <BrKpi label="Pedidos" value={_dNum(radOrders)} />
+                  <BrKpi label="Faturamento" value={_brl(radRevenue)} color="var(--accent-bright)" />
+                  <BrKpi label="Alcance médio" value={_dDist(radAvgDist)} />
+                  <BrKpi label="Raio com mais pedidos" value={radTop ? _raioLabel(Number(radTop.radius_km)) : "—"} />
+                  <BrKpi label="Até 3 km" value={radOrders > 0 ? _dPct(radWithin3 / radOrders) : "—"} />
+                  <BrKpi label="% atrasadas" value={radLatePct == null ? "—" : _dPct(radLatePct)} color={radLatePct == null ? undefined : _lateColor(radLatePct * 100)} />
+                </div>
+                <div className="card">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 110 }}>Raio</th>
+                        <th style={{ width: 90, textAlign: "right" }}>Pedidos</th>
+                        <th style={{ width: 160 }}>% pedidos</th>
+                        <th style={{ width: 140, textAlign: "right" }}>Faturamento</th>
+                        <th style={{ width: 110, textAlign: "right" }}>Ticket médio</th>
+                        <th style={{ width: 120, textAlign: "right" }}>Taxa cliente</th>
+                        <th style={{ width: 130, textAlign: "right" }}>Taxa entregador</th>
+                        <th style={{ width: 110, textAlign: "right" }}>Saldo</th>
+                        <th style={{ width: 100, textAlign: "right" }}>% atrasadas</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {radii.map((r) => {
+                        const share = radOrders > 0 ? (Number(r.orders) || 0) / radOrders : 0;
+                        const saldo = (Number(r.avg_delivery_fee) || 0) - (Number(r.avg_deliveryman_fee) || 0);
+                        return (
+                          <tr key={r.radius_km}>
+                            <td className="row-strong" style={{ fontFamily: "var(--mono)" }}>{_raioLabel(Number(r.radius_km))}</td>
+                            <td className="num" style={{ fontWeight: 600 }}>{_dNum(r.orders)}</td>
+                            <td>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <div style={{ flex: 1, minWidth: 50 }}><BrShareBar pct={share} /></div>
+                                <span style={{ fontFamily: "var(--mono)", fontSize: 11.5, color: "var(--fg-2)", width: 44, textAlign: "right" }}>{_dPct(share)}</span>
+                              </div>
+                            </td>
+                            <td className="num" style={{ fontWeight: 700 }}>{_brl(r.revenue)}</td>
+                            <td className="num" style={{ fontWeight: 500 }}>{_brl(r.avg_ticket)}</td>
+                            <td className="num" style={{ fontWeight: 500 }}>{_brl(r.avg_delivery_fee)}</td>
+                            <td className="num" style={{ fontWeight: 500 }}>{_brl(r.avg_deliveryman_fee)}</td>
+                            <td className="num" style={{ fontWeight: 700, color: saldo >= 0 ? "var(--ok)" : "var(--crit)" }}>{_brl(saldo)}</td>
+                            <td className="num" style={{ fontWeight: 700, color: Number(r.measured) > 0 ? _lateColor(r.late_pct) : "var(--fg-3)" }}>
+                              {Number(r.measured) > 0 ? _dPct((Number(r.late_pct) || 0) / 100) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
         )}
 
         {/* ----------------------------- TURNOS ---------------------------- */}
@@ -615,3 +952,4 @@ function DeliveryTimes({ scope }) {
 }
 
 window.DeliveryTimes = DeliveryTimes;
+window.DeliveryFeesBox = FeesBox;
