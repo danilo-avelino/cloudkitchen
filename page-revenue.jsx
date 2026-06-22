@@ -659,7 +659,9 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
     return init;
   });
 
-  const setMethodValue = (id, raw) => setMethodVals((cur) => ({ ...cur, [id]: raw }));
+  // Ao colar de fonte externa vem "R$ 1.924,90"; mantém apenas dígitos e vírgula
+  const _sanitizeMoney = (raw) => String(raw ?? "").replace(/[^\d,]/g, "");
+  const setMethodValue = (id, raw) => setMethodVals((cur) => ({ ...cur, [id]: _sanitizeMoney(raw) }));
 
   // Turnos disponíveis para a operação selecionada
   const opShifts = shifts.filter((s) => s.operation_id === op);
