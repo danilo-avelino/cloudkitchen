@@ -162,9 +162,29 @@ serve(async (req) => {
         };
       });
 
-      // upsert dos pedidos em lotes; mapeia agz_id -> id do banco
+      // diff: só grava pedidos novos ou cujo status/valor mudou. Sem isso, o upsert
+      // reescreve o dia inteiro a cada poll (churn de UPDATE/WAL → sobrecarga).
+      // prefetch leve (sem payload) da janela coberta, paginando o teto de 1000 do PostgREST.
+      const floor = orderRows.reduce((m, r) => r.business_date < m ? r.business_date : m, cutoff);
+      const existing = new Map<string, { status: string; amount: number | null }>();
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await admin.from("agilizone_orders")
+          .select("agz_id, status, amount")
+          .eq("account_id", acc.id).gte("business_date", floor)
+          .range(from, from + 999);
+        if (error) return json({ error: `orders prefetch: ${error.message}` }, 500);
+        for (const r of data ?? []) existing.set(r.agz_id, { status: r.status, amount: r.amount });
+        if (!data || data.length < 1000) break;
+      }
+      const changedRows = orderRows.filter((r) => {
+        const prev = existing.get(r.agz_id);
+        return !prev || prev.status !== r.status || (prev.amount ?? null) !== (r.amount ?? null);
+      });
+      const changedAgz = new Set(changedRows.map((r) => r.agz_id));
+
+      // upsert só dos alterados; mapeia agz_id -> id do banco
       const idByAgz = new Map<string, string>();
-      for (const chunk of chunked(orderRows, 500)) {
+      for (const chunk of chunked(changedRows, 500)) {
         const { data, error } = await admin
           .from("agilizone_orders")
           .upsert(chunk, { onConflict: "account_id,agz_id" })
@@ -199,17 +219,17 @@ serve(async (req) => {
         const { error } = await admin.from("agilizone_order_items").insert(chunk);
         if (error) return json({ error: `items insert: ${error.message}` }, 500);
       }
-      const upserted = orderRows.length;
+      const upserted = changedRows.length;
 
       // recalcula faturamento por (operação, dia, origem) — só dias totalmente cobertos (>= cutoff)
-      const revenue = await refreshRevenue(admin, acc, orders, brandMap, cutoff);
+      const revenue = await refreshRevenue(admin, acc, orders, brandMap, cutoff, changedAgz);
 
       await admin.from("agilizone_accounts")
         .update({ store_id: orders[0]?.storeId ?? acc.store_id, last_synced_at: new Date().toISOString() })
         .eq("id", acc.id);
 
       perAccount[acc.label] = {
-        fetched: orders.length, upserted, mapped, unmapped,
+        fetched: orders.length, upserted, skipped: orders.length - upserted, mapped, unmapped,
         unmappedBrands: [...unmappedBrands], revenue,
       };
     }
@@ -224,7 +244,7 @@ serve(async (req) => {
 // Status que NÃO contam como venda firme.
 const NON_SALE = new Set(["CANCELED", "PENDING_PAYMENT"]);
 
-async function refreshRevenue(admin: any, acc: any, orders: any[], brandMap: Map<string, string>, cutoff: string) {
+async function refreshRevenue(admin: any, acc: any, orders: any[], brandMap: Map<string, string>, cutoff: string, changedAgz: Set<string>) {
   // métodos de pagamento do tenant: slug -> id
   const { data: methods } = await admin
     .from("payment_methods").select("id, slug").eq("tenant_id", acc.tenant_id);
@@ -251,10 +271,24 @@ async function refreshRevenue(admin: any, acc: any, orders: any[], brandMap: Map
     g.byMethod.set(slug, (g.byMethod.get(slug) || 0) + fat);
   }
 
+  // grupos (op|dia|origem) com ao menos um pedido novo/alterado neste poll — inclui
+  // cancelamentos (NON_SALE), que mudam o total mesmo saindo da agregação acima.
+  const touched = new Set<string>();
+  for (const o of orders) {
+    if (!changedAgz.has(o._id)) continue;
+    const merchant = resolveMerchant(o);
+    const opId = merchant ? brandMap.get(merchant) : undefined;
+    if (!opId) continue;
+    const date = effectiveDay(o.createdAt);
+    if (date < cutoff) continue;
+    touched.add(`${opId}|${date}|${originToSource(o.originPlatform)}`);
+  }
+
   let written = 0, conflicts = 0;
   const conflictKeys: string[] = [];
 
-  for (const g of groups.values()) {
+  for (const [key, g] of groups) {
+    if (!touched.has(key)) continue;                      // grupo inalterado → mantém a entry atual
     // remove a entry anterior da Agilizone (mesma chave) antes de regravar
     await admin.from("revenue_entries").delete()
       .eq("tenant_id", acc.tenant_id).eq("operation_id", g.opId)
