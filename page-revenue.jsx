@@ -16,6 +16,13 @@ const _todayISO    = () => {
   const day = String(d.getDate()).padStart(2, "0");
   return `${d.getFullYear()}-${m}-${day}`;
 };
+const _addDaysISO  = (iso, n) => {
+  const d = new Date(String(iso) + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+};
 const _dayName = (iso) => {
   if (!iso) return "";
   const d = new Date(iso + "T12:00:00");
@@ -156,7 +163,7 @@ function Revenue({ scope }) {
           breakdown:   draft.methods,
           shiftId:     draft.shiftId,
         });
-        if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+        if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
         // Recarrega do banco para garantir consistência (breakdown, totais, etc.)
         const { data: refreshed } = await dbListRevenueEntries(tenantId);
         if (refreshed) setEntries(refreshed);
@@ -173,14 +180,15 @@ function Revenue({ scope }) {
           breakdown:    draft.methods,
           shiftId:      draft.shiftId,
         });
-        if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+        if (error) { window.showToast(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
         // Recarrega a lista
         const { data: refreshed } = await dbListRevenueEntries(tenantId);
         if (refreshed) setEntries(refreshed);
         window.showToast(`Faturamento de ${_isoToBR(draft.date)} lançado · ${_fmtBRL(revenue)}`, { tone: "ok" });
       }
-      setEditing(null); setCreating(false);
-      return;
+      // keepOpen: mantém o modal aberto para lançar o próximo dia (mesma operação/turno)
+      if (!draft.keepOpen) { setEditing(null); setCreating(false); }
+      return true;
     }
 
     // Fallback MOCK
@@ -192,8 +200,8 @@ function Revenue({ scope }) {
       setEntries([{ ...draft, id, revenue, orders, cogs }, ...entries]);
       window.showToast(`Faturamento de ${_isoToBR(draft.date)} lançado (mock) · ${_fmtBRL(revenue)}`, { tone: "warn" });
     }
-    setEditing(null);
-    setCreating(false);
+    if (!draft.keepOpen) { setEditing(null); setCreating(false); }
+    return true;
   };
 
   const remove = async (id) => {
@@ -645,6 +653,8 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   // montado durante o insert; sem isso, o 2º clique lança o faturamento em dobro
   // (a checagem hasDuplicate não pega porque entries ainda não refez o fetch).
   const [saving, setSaving] = useState(false);
+  // Diferencia o spinner do botão "Lançar próximo dia" do "Salvar" normal
+  const [savingNext, setSavingNext] = useState(false);
   const savingRef = useRef(false);
   // Se o usuário mudar op/data depois de confirmar, exigir nova confirmação
   useEffect(() => { setConfirmDup(false); }, [op, date]);
@@ -684,8 +694,8 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
   );
   const hasDuplicate = duplicates.length > 0;
 
-  const submit = async () => {
-    if (savingRef.current) return;
+  const submit = async ({ keepOpen = false } = {}) => {
+    if (savingRef.current) return false;
     if (!valid) {
       const reasons = [];
       if (!op) reasons.push("operação");
@@ -694,18 +704,19 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
       if (!(total > 0)) reasons.push("ao menos 1 método > 0");
       if (shiftError) reasons.push("turno");
       window.showToast?.(`Faltam campos: ${reasons.join(", ")}`, { tone: "warn", ttl: 4000 });
-      return;
+      return false;
     }
     if (hasDuplicate && !confirmDup) {
       setConfirmDup(true);
-      return;
+      return false;
     }
     const cleanMethods = {};
     methods.forEach((m) => { cleanMethods[m.id] = _parseNum(methodVals[m.id]); });
     savingRef.current = true;
     setSaving(true);
+    if (keepOpen) setSavingNext(true);
     try {
-      await onSave({
+      const ok = await onSave({
         id: initial?.id,
         op, date,
         orders: ordersNum,
@@ -713,14 +724,31 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
         methods: cleanMethods,
         source: initial?.source || "manual",
         shiftId: shiftId || null,
+        keepOpen,
       });
+      return ok !== false;
     } catch (e) {
       console.error("[revenue] onSave threw:", e);
       window.showToast?.(`Erro ao salvar: ${e?.message || e}`, { tone: "crit", ttl: 5000 });
+      return false;
     } finally {
       savingRef.current = false;
       setSaving(false);
+      setSavingNext(false);
     }
+  };
+
+  // Salva o lançamento atual e prepara o formulário para o próximo dia,
+  // repetindo operação/turno/status e avançando a data em 1 dia.
+  const submitAndNextDay = async () => {
+    const ok = await submit({ keepOpen: true });
+    if (!ok) return;
+    setDate((cur) => _addDaysISO(cur, 1));
+    setOrders("");
+    setConfirmDup(false);
+    const empty = {};
+    methods.forEach((m) => { empty[m.id] = ""; });
+    setMethodVals(empty);
   };
 
   // Ctrl/Cmd+Enter para salvar
@@ -757,9 +785,20 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
                 Excluir
               </button>
             )}
+            {!initial && (
+              <button
+                className="btn"
+                data-size="sm"
+                onClick={submitAndNextDay}
+                disabled={!valid || saving}
+                title="Salva este lançamento e abre o próximo dia com a mesma operação e turno"
+              >
+                {savingNext ? "Salvando…" : "Lançar próximo dia"}
+              </button>
+            )}
             <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={!valid || saving}>
-              {saving ? "Salvando…" : initial ? "Salvar alterações" : "Salvar lançamento"}
+            <button className="btn" data-variant="primary" data-size="sm" onClick={() => submit()} disabled={!valid || saving}>
+              {saving && !savingNext ? "Salvando…" : initial ? "Salvar alterações" : "Salvar lançamento"}
             </button>
           </div>
         </div>
@@ -949,7 +988,7 @@ function RevenueModal({ initial, methods, ops, shifts = [], entries = [], defaul
           onClose={() => setConfirmDup(false)}
           footer={<>
             <button className="btn" data-size="sm" onClick={() => setConfirmDup(false)} disabled={saving}>Cancelar</button>
-            <button className="btn" data-variant="primary" data-size="sm" onClick={submit} disabled={saving}>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={() => submit()} disabled={saving}>
               {saving ? "Salvando…" : "Adicionar mesmo assim"}
             </button>
           </>}
