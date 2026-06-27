@@ -1,4 +1,33 @@
 // Dashboard page — visão consolidada operacional · puxa de TODOS os módulos
+
+// segundos → "Xm YYs" — formata os tempos gerais de delivery no dashboard
+function _fmtDeliverDur(s) {
+  if (s == null) return "—";
+  const n = Math.round(Number(s));
+  const m = Math.floor(n / 60), sec = n % 60;
+  return m === 0 ? `${sec}s` : `${m}m ${String(sec).padStart(2, "0")}s`;
+}
+
+// Cores dos tempos de delivery — espelham o gráfico de camada da Logística (_LAYERS).
+const _TIME_COLORS = {
+  avgPrep:    "var(--accent-bright)",
+  avgCollect: "var(--info)",
+  avgDeliver: "var(--warn)",
+  avgTotal:   "var(--accent-bright)",
+};
+
+// [fromYMD, toYMD] do período do header — mesmo critério das taxas de entrega
+function _dashRangeYMD(period) {
+  const from = new Date();
+  let to = null;
+  if (period === "1d") { from.setHours(0, 0, 0, 0); }
+  else if (period === "yesterday") { from.setDate(from.getDate() - 1); from.setHours(0, 0, 0, 0); to = new Date(from); to.setHours(23, 59, 59, 999); }
+  else if (period === "7d") { from.setDate(from.getDate() - 6); from.setHours(0, 0, 0, 0); }
+  else if (period === "30d") { from.setDate(from.getDate() - 29); from.setHours(0, 0, 0, 0); }
+  else { from.setDate(1); from.setHours(0, 0, 0, 0); }
+  return [from.toISOString().slice(0, 10), (to || new Date()).toISOString().slice(0, 10)];
+}
+
 function Dashboard({ scope, setPage }) {
   const op = MOCK.opById(scope);
   const isConsolidated = scope === "all";
@@ -46,6 +75,11 @@ function Dashboard({ scope, setPage }) {
     financeEntries: [], // do mês corrente, p/ KPI "Compras do mês"
     fees: null,         // taxas de entrega (Agilizone) no período · { total, byOperation }
   });
+
+  // Tempos gerais de delivery (Agilizone) · summary do período + operação do header
+  const [deliveryTimes, setDeliveryTimes] = useState(null);
+  const [deliveryTimesLoading, setDeliveryTimesLoading] = useState(false);
+  const [timesModal, setTimesModal] = useState(null); // null | "avgPrep" | "avgCollect" | "avgDeliver" | "avgTotal"
 
   // Carrega dados do DB + assina realtime (faturamento/saída atualizam o ranking ao vivo)
   useEffect(() => {
@@ -177,6 +211,26 @@ function Dashboard({ scope, setPage }) {
     };
   }, [dbStatus.state, dbStatus.isOnline, period]);
 
+  // Tempos gerais de delivery · refetch independente p/ responder à troca de operação
+  // (scope) sem re-carregar os KPIs financeiros. Respeita o período do header.
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setDeliveryTimes(null); return; }
+    const sess = (() => { try { return JSON.parse(localStorage.getItem("stockkitchen.session.v1")); } catch { return null; } })();
+    const tid = sess?.tenantId;
+    if (!tid) { setDeliveryTimes(null); return; }
+    let cancelled = false;
+    setDeliveryTimesLoading(true);
+    (async () => {
+      const [fromYMD, toYMD] = _dashRangeYMD(period);
+      const res = (await dbDeliveryTimeseries?.(tid, fromYMD, toYMD, scope === "all" ? null : scope, null, null)) || { data: null };
+      if (cancelled) return;
+      setDeliveryTimes(res.data?.summary || null);
+      setDeliveryTimesLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.state, dbStatus.isOnline, period, scope]);
+
   // Drill-down dos KPIs de entrada/saída — abre modal com o histórico filtrado.
   const [flowDetail, setFlowDetail] = useState(null); // null | "in" | "out"
   const [showStockValueModal, setShowStockValueModal] = useState(false);
@@ -223,8 +277,13 @@ function Dashboard({ scope, setPage }) {
   // Taxas de entrega no período · consolidado usa o total; operação usa a quebra por op.
   const feesData = dbData.fees;
   const feesForScope = !feesData ? null
-    : (isConsolidated ? feesData.total : (feesData.byOperation?.[scope] || { clientCollected: 0, deliverymanPaid: 0 }));
+    : (isConsolidated ? feesData.total : (feesData.byOperation?.[scope] || { clientCollected: 0, deliverymanPaid: 0, storeDiscount: 0, ifoodDiscount: 0 }));
   const hasFees = !!feesData && ((Number(feesData.total?.clientCollected) || 0) + (Number(feesData.total?.deliverymanPaid) || 0)) > 0;
+  const hasDiscounts = !!feesData && ((Number(feesData.total?.storeDiscount) || 0) + (Number(feesData.total?.ifoodDiscount) || 0)) > 0;
+
+  // Tempos gerais de delivery no período/operação do header.
+  const dt = deliveryTimes;
+  const hasDeliveryTimes = !!dt && (Number(dt.orders) || 0) > 0;
 
   if (pageLoading) return <PageLoading label="Carregando dashboard…" variant="dashboard" />;
 
@@ -279,10 +338,21 @@ function Dashboard({ scope, setPage }) {
           onClick={() => setPage("stock")} icon={<I.AlertTriangle size={11} />} />
       </div>
 
-      {/* Taxas de entrega (Agilizone) — só quando há dados de delivery no período */}
-      {hasFees && window.DeliveryFeesBox && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 360px))", gap: 12 }}>
-          <window.DeliveryFeesBox fees={feesForScope} />
+      {/* Tempos gerais de delivery (Agilizone) — só quando há pedidos no período/operação */}
+      {hasDeliveryTimes && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          <TimeKpi label="Tempo de preparo" seconds={dt.avgPrep}    color={_TIME_COLORS.avgPrep}    sub={periodLabel.toLowerCase()} loading={deliveryTimesLoading} onClick={() => setTimesModal("avgPrep")} />
+          <TimeKpi label="Tempo de coleta"  seconds={dt.avgCollect} color={_TIME_COLORS.avgCollect} sub={periodLabel.toLowerCase()} loading={deliveryTimesLoading} onClick={() => setTimesModal("avgCollect")} />
+          <TimeKpi label="Tempo de entrega" seconds={dt.avgDeliver} color={_TIME_COLORS.avgDeliver} sub={periodLabel.toLowerCase()} loading={deliveryTimesLoading} onClick={() => setTimesModal("avgDeliver")} />
+          <TimeKpi label="Tempo total" seconds={dt.avgTotal} color={_TIME_COLORS.avgTotal} sub={`${(Number(dt.orders) || 0).toLocaleString("pt-BR")} pedidos`} loading={deliveryTimesLoading} onClick={() => setTimesModal("avgTotal")} />
+        </div>
+      )}
+
+      {/* Taxas de entrega + investimento em descontos (Agilizone) — só quando há dados no período */}
+      {(hasFees || hasDiscounts) && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          {hasFees && window.DeliveryFeesBox && <window.DeliveryFeesBox fees={feesForScope} />}
+          {hasDiscounts && window.DeliveryDiscountsBox && <window.DeliveryDiscountsBox fees={feesForScope} />}
         </div>
       )}
 
@@ -321,6 +391,16 @@ function Dashboard({ scope, setPage }) {
         <window.StockTopValueModal
           items={dbData.stock || []}
           onClose={() => setShowStockValueModal(false)}
+        />
+      )}
+
+      {timesModal && (
+        <DeliveryTimesModal
+          metricKey={timesModal}
+          scope={scope}
+          period={period}
+          periodLabel={periodLabel}
+          onClose={() => setTimesModal(null)}
         />
       )}
     </div>
@@ -412,6 +492,142 @@ function StockFlowDetailModal({ direction, periodLabel, movements, onClose }) {
                   {r.ref}
                 </td>
               </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Modal>
+  );
+}
+
+// Modal · tempos de delivery por operação (e por turno, se houver) — drill-down dos TimeKpi.
+// Busca o `summary` do agilizone_delivery_timeseries por operação e por turno no período do
+// header. Uma chamada por operação (todos os turnos) + uma por (operação × turno).
+function DeliveryTimesModal({ metricKey, scope, period, periodLabel, onClose }) {
+  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState([]);          // [{ op, total, shifts: [{ shift, summary }] }]
+  const [hasShifts, setHasShifts] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      const sess = (() => { try { return JSON.parse(localStorage.getItem("stockkitchen.session.v1")); } catch { return null; } })();
+      const tid = sess?.tenantId;
+      if (!tid) { setLoading(false); return; }
+      const [fromYMD, toYMD] = _dashRangeYMD(period);
+      const allOps = (MOCK.OPERATIONS || []).filter((o) => o.id && o.id !== "all");
+      const ops = scope === "all" ? allOps : allOps.filter((o) => o.id === scope);
+      const { data: shifts } = (await dbListDeliveryShifts?.(tid)) || { data: [] };
+      const shiftList = shifts || [];
+
+      const tasks = [];
+      ops.forEach((op) => {
+        tasks.push(
+          dbDeliveryTimeseries?.(tid, fromYMD, toYMD, op.id, null, null)
+            .then((r) => ({ opId: op.id, shiftId: null, summary: r?.data?.summary || null })),
+        );
+        shiftList.forEach((sh) => {
+          tasks.push(
+            dbDeliveryTimeseries?.(tid, fromYMD, toYMD, op.id, sh.start_time, sh.end_time)
+              .then((r) => ({ opId: op.id, shiftId: sh.id, summary: r?.data?.summary || null })),
+          );
+        });
+      });
+      const results = await Promise.all(tasks);
+      if (cancelled) return;
+
+      const byOp = {};
+      results.forEach((res) => {
+        if (!res) return;
+        byOp[res.opId] = byOp[res.opId] || { total: null, byShift: {} };
+        if (res.shiftId == null) byOp[res.opId].total = res.summary;
+        else byOp[res.opId].byShift[res.shiftId] = res.summary;
+      });
+      const built = ops
+        .map((op) => {
+          const entry = byOp[op.id] || { total: null, byShift: {} };
+          const shiftRows = shiftList
+            .map((sh) => ({ shift: sh, summary: entry.byShift[sh.id] }))
+            .filter((sr) => sr.summary && (Number(sr.summary.orders) || 0) > 0);
+          return { op, total: entry.total, shifts: shiftRows };
+        })
+        .filter((r) => r.total && (Number(r.total.orders) || 0) > 0);
+
+      setHasShifts(shiftList.length > 0);
+      setRows(built);
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [metricKey, scope, period]);
+
+  const cols = [
+    { key: "avgPrep",    label: "Preparo" },
+    { key: "avgCollect", label: "Coleta" },
+    { key: "avgDeliver", label: "Entrega" },
+    { key: "avgTotal",   label: "Total" },
+  ];
+  const metricLabel = (cols.find((c) => c.key === metricKey) || {}).label || "Tempos";
+
+  return (
+    <Modal
+      title={`Tempo por operação · ${metricLabel}`}
+      subtitle={`${periodLabel}${hasShifts ? " · detalhado por turno" : ""}`}
+      onClose={onClose}
+      width={760}
+      footer={<button className="btn" data-variant="primary" data-size="sm" onClick={onClose}>Fechar</button>}
+    >
+      {loading ? (
+        <div style={{ padding: 36, textAlign: "center", fontSize: 12.5, color: "var(--fg-3)" }}>Carregando…</div>
+      ) : rows.length === 0 ? (
+        <div style={{ padding: 36, textAlign: "center", fontSize: 12.5, color: "var(--fg-3)" }}>
+          Sem dados de delivery no período.
+        </div>
+      ) : (
+        <table className="table" data-density="compact">
+          <thead>
+            <tr>
+              <th>Operação</th>
+              {cols.map((c) => (
+                <th key={c.key} className="num" style={{ width: 84, color: _TIME_COLORS[c.key] }}>{c.label}</th>
+              ))}
+              <th className="num" style={{ width: 80 }}>Pedidos</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <React.Fragment key={r.op.id}>
+                <tr>
+                  <td className="row-strong">
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 50, background: r.op.color || "var(--fg-3)" }} />
+                      {r.op.name}
+                    </span>
+                  </td>
+                  {cols.map((c) => (
+                    <td key={c.key} className="num" style={{ fontWeight: c.key === metricKey ? 700 : 500, color: _TIME_COLORS[c.key] }}>
+                      {_fmtDeliverDur(r.total?.[c.key])}
+                    </td>
+                  ))}
+                  <td className="num">{(Number(r.total?.orders) || 0).toLocaleString("pt-BR")}</td>
+                </tr>
+                {r.shifts.map((sr) => (
+                  <tr key={r.op.id + "-" + sr.shift.id}>
+                    <td style={{ paddingLeft: 22, color: "var(--fg-2)", fontSize: 12 }}>
+                      ↳ {sr.shift.name}{" "}
+                      <span className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)" }}>
+                        {(sr.shift.start_time || "").slice(0, 5)}–{(sr.shift.end_time || "").slice(0, 5)}
+                      </span>
+                    </td>
+                    {cols.map((c) => (
+                      <td key={c.key} className="num" style={{ fontSize: 12, fontWeight: c.key === metricKey ? 600 : 400, color: _TIME_COLORS[c.key], opacity: 0.85 }}>
+                        {_fmtDeliverDur(sr.summary?.[c.key])}
+                      </td>
+                    ))}
+                    <td className="num" style={{ fontSize: 12, color: "var(--fg-2)" }}>{(Number(sr.summary?.orders) || 0).toLocaleString("pt-BR")}</td>
+                  </tr>
+                ))}
+              </React.Fragment>
             ))}
           </tbody>
         </table>
@@ -1180,6 +1396,31 @@ function FlowKpi({ label, value, tone, sub, onClick, loading }) {
         <div className="skel" style={{ height: 30, width: "60%", marginTop: 4 }} />
       ) : (
         <div className="value" style={{ color }}>R$ {fmt}</div>
+      )}
+      {sub && <div className="sub" style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6 }}>{sub}</div>}
+    </div>
+  );
+}
+
+// TimeKpi · card de tempo (mm ss) para os tempos gerais de delivery.
+// `color` espelha a cor da camada no gráfico de tempos da Logística.
+function TimeKpi({ label, seconds, sub, color, loading, onClick }) {
+  return (
+    <div className="kpi"
+         onClick={loading ? undefined : onClick}
+         role={onClick && !loading ? "button" : undefined}
+         tabIndex={onClick && !loading ? 0 : undefined}
+         onKeyDown={onClick && !loading ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } } : undefined}
+         style={onClick && !loading ? { cursor: "pointer" } : undefined}
+         title={onClick && !loading ? "Ver tempo por operação e turno" : undefined}>
+      <div className="label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        {color && <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />}
+        {label}
+      </div>
+      {loading ? (
+        <div className="skel" style={{ height: 30, width: "55%", marginTop: 4 }} />
+      ) : (
+        <div className="value" style={color ? { color } : undefined}>{_fmtDeliverDur(seconds)}</div>
       )}
       {sub && <div className="sub" style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6 }}>{sub}</div>}
     </div>

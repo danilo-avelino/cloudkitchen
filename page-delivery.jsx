@@ -281,6 +281,36 @@ function FeesBox({ fees }) {
   );
 }
 
+// Investimento em descontos · loja vs iFood (mesmo payload do RPC de taxas)
+function DiscountsBox({ fees }) {
+  const has = fees != null;
+  const store = Number(fees?.storeDiscount) || 0;
+  const ifood = Number(fees?.ifoodDiscount) || 0;
+  const saldo = ifood - store; // verde se o iFood patrocina mais que a loja
+  const Row = ({ label, value, color }) => (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, fontSize: 12.5 }}>
+      <span style={{ color: "var(--fg-2)" }}>{label}</span>
+      <span style={{ fontFamily: "var(--mono)", color }}>{value}</span>
+    </div>
+  );
+  return (
+    <div className="card"><div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 10.5, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Investimento em descontos</div>
+      {!has ? (
+        <div style={{ fontSize: 12, color: "var(--fg-3)", lineHeight: 1.5 }}>Sem dados de desconto no período.</div>
+      ) : (
+        <>
+          <Row label="Desconto dado pela loja"   value={_brl(store)} color="var(--crit)" />
+          <Row label="Desconto pago pelo iFood"  value={_brl(ifood)} color="var(--ok)" />
+          <div style={{ borderTop: "1px solid var(--line)", paddingTop: 7 }}>
+            <Row label="Saldo do investimento" value={_brl(saldo)} color={saldo >= 0 ? "var(--ok)" : "var(--crit)"} />
+          </div>
+        </>
+      )}
+    </div></div>
+  );
+}
+
 // --------------------------- config de turnos ---------------------------
 function ShiftRow({ shift, onChanged }) {
   const [name, setName]   = useState(shift.name);
@@ -953,3 +983,4 @@ function DeliveryTimes({ scope }) {
 
 window.DeliveryTimes = DeliveryTimes;
 window.DeliveryFeesBox = FeesBox;
+window.DeliveryDiscountsBox = DiscountsBox;
