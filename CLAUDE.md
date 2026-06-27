@@ -104,13 +104,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO service_role
 
 Sem USAGE em `public`, edge functions caem em 500 com `permission denied for schema public` — inclusive no lookup inicial de `tenant_members` para validar role. Diagnosticar via `has_schema_privilege('service_role', 'public', 'USAGE')`. Toda migration que mexe com edge function deve incluir esses GRANTs por garantia.
 
-## 6. Deploy e Commit
+## 6. Commit
 
-**Nunca fazer deploy nem commit sem pedido explícito do usuário.**
+**Nunca fazer commit sem pedido explícito do usuário.**
 
-- Não rodar `git commit`, `git push`, `apply_migration` em produção, `deploy_edge_function` ou qualquer ação equivalente por iniciativa própria — mesmo que pareça o "próximo passo natural" depois de uma mudança.
-- Terminar a tarefa, mostrar o que mudou e esperar o usuário pedir o commit/deploy.
-- Vale também para criar PR, push de branch, merge, e qualquer ação visível fora do working tree local.
+- Não rodar `git commit`, `git push`, criar PR, push de branch ou merge por iniciativa própria — mesmo que pareça o "próximo passo natural" depois de uma mudança. Terminar a tarefa, mostrar o que mudou e esperar o usuário pedir o commit.
+- `apply_migration` e `deploy_edge_function` **podem** ser feitos como parte natural da tarefa (sem pedido explícito), desde que a mudança esteja validada (advisors, GRANTs das seções 5.x). O que não pode é o commit/push do código no git.
 
 ---
 7. Botões. Em todos os novos botões devemos adicionar um guard de duplo-clique e aviso de Carregando
