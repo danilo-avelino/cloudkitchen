@@ -3,7 +3,7 @@
 
 // Catálogo único de módulos do app — espelha src/App.jsx e page-settings.jsx
 // "saas" é exclusivo do superadmin (gestão multi-tenant da plataforma).
-const APP_MODULES = ["dashboard","stock","recipes","revenue","delivery","cardapio","requests","purchases","cmv","finance","dre","settings"];
+const APP_MODULES = ["dashboard","stock","recipes","revenue","delivery","cardapio","crm","requests","purchases","cmv","finance","dre","settings"];
 const SUPERADMIN_MODULES = ["saas"];
 
 // Preset padrão por role do banco quando o membro não tem `modules` customizado
@@ -115,6 +115,7 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     { id: "revenue",    label: "Faturamento",     icon: I.Revenue },
     { id: "delivery",   label: "Logística",       icon: I.Clock },
     { id: "cardapio",   label: "Análise de Cardápio", icon: I.Recipe },
+    { id: "crm",        label: "CRM",             icon: I.WhatsApp },
     { id: "requests",   label: "Requisições",     icon: I.Request,     pulse: pendingReq || null },
     { id: "purchases",  label: "Compras",         icon: I.ShoppingList },
     { id: "cmv",        label: "CMV & margem",    icon: I.CMV },
@@ -233,6 +234,7 @@ function Topbar({ page, scope, theme, setTheme, user, onLogout, onSwitchTenant, 
     revenue: "Faturamento",
     delivery: "Logística",
     cardapio: "Análise de Cardápio",
+    crm: "CRM",
     requests: "Requisições",
     purchases: "Compras",
     cmv: "CMV & margem",

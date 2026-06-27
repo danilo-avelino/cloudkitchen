@@ -18,6 +18,7 @@ function Settings() {
             ["users",        "Usuários & permissões"],
             ["integrations", "Integrações"],
             ["agilizone",    "Agilizone"],
+            ["whatsapp",     "WhatsApp"],
             ["billing",      "Plano & cobrança"],
           ].map(([id, label]) => {
             const active = tab === id;
@@ -39,6 +40,7 @@ function Settings() {
         {tab === "users"        && <UsersTab />}
         {tab === "integrations" && <IntegrationsTab />}
         {tab === "agilizone"    && <AgilizoneTab />}
+        {tab === "whatsapp"     && <WhatsAppTab />}
         {tab === "billing"      && <BillingTab />}
       </div>
     </div>
@@ -616,6 +618,7 @@ const USER_MODULES = [
   { id: "stock",     label: "Estoque"          },
   { id: "recipes",   label: "Fichas técnicas"  },
   { id: "revenue",   label: "Faturamento"      },
+  { id: "crm",       label: "CRM"              },
   { id: "requests",  label: "Requisições"      },
   { id: "purchases", label: "Compras"          },
   { id: "cmv",       label: "CMV & margem"     },
@@ -1391,6 +1394,92 @@ function AgilizoneAccountModal({ tid, initial, onClose, onSaved }) {
         </FormRow>
       </div>
     </Modal>
+  );
+}
+
+// ===== Aba WhatsApp (conexão por tenant via Embedded Signup) =====
+// Cada tenant conecta a própria conta WhatsApp Business. O fluxo oficial da Meta
+// (Embedded Signup) ainda depende do provisionamento do app na Meta (Tech Provider)
+// — até lá o botão "Conectar" fica desabilitado. Aqui mostramos só o STATUS
+// (não-secreto) via RPC crm_whatsapp_status; o token nunca trafega no cliente.
+function WhatsAppTab() {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const [tid, setTid]         = useState(null);
+  const [status, setStatus]   = useState(null);   // null = sem config / não carregado
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setLoading(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ctx = await dbGetCurrentContext();
+        const t = ctx?.tenant?.id || null;
+        if (cancelled) return;
+        setTid(t);
+        if (!t) return;
+        const { data } = await dbCrmWhatsappStatus(t);
+        if (!cancelled) setStatus(data);
+      } finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.state, dbStatus.isOnline]);
+
+  if (loading) return <PageLoading label="Carregando WhatsApp…" variant="table" hint="" />;
+
+  if (!dbStatus.isOnline || !tid) {
+    return (
+      <div style={{ fontSize: 12.5, color: "var(--warn)", padding: "10px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 4 }}>
+        A conexão WhatsApp só pode ser gerenciada com Supabase online.
+      </div>
+    );
+  }
+
+  const connected = !!status?.connected;
+  const fmtExpiry = status?.token_expires_at
+    ? new Date(status.token_expires_at).toLocaleDateString("pt-BR")
+    : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13, maxWidth: 640 }}>
+        Conecte a conta <b>WhatsApp Business</b> desta marca para usar o CRM (Conversas e Campanhas).
+        A conexão é feita pelo fluxo oficial da Meta — você autoriza e o número fica vinculado a este tenant.
+      </p>
+
+      <div className="card"><div className="card-body" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 40, height: 40, borderRadius: 10, background: connected ? "var(--ok-soft)" : "var(--bg-2)", border: `1px solid ${connected ? "var(--ok-line)" : "var(--line)"}`, color: connected ? "var(--ok)" : "var(--fg-3)" }}>
+            <I.WhatsApp size={20} />
+          </span>
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--fg-0)" }}>
+              {connected ? "Conectado" : "Não conectado"}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--fg-3)", marginTop: 2 }}>
+              {connected
+                ? `${status.display_phone || status.phone_number_id || "número vinculado"}${status.is_active ? " · ativo" : " · inativo"}${fmtExpiry ? ` · token expira ${fmtExpiry}` : ""}`
+                : "Nenhum número WhatsApp vinculado a este tenant."}
+            </div>
+          </div>
+        </div>
+
+        {/* Embedded Signup ainda depende do app Meta (Tech Provider) — botão gated. */}
+        <button className="btn" data-variant="primary" data-size="sm" disabled
+                title="Disponível após o provisionamento do app na Meta">
+          <I.WhatsApp size={13} />Conectar WhatsApp
+        </button>
+      </div></div>
+
+      <div style={{ fontSize: 12, color: "var(--info)", background: "var(--info-soft)", border: "1px solid var(--info-line)", borderRadius: 6, padding: "10px 14px", maxWidth: 640, display: "flex", gap: 8 }}>
+        <I.AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+        <span>
+          A conexão automática (Embedded Signup) será habilitada assim que o app da Meta estiver
+          aprovado. Enquanto isso, as abas <b>Conversas</b> e <b>Campanhas</b> do CRM ficam como “em breve”.
+        </span>
+      </div>
+    </div>
   );
 }
 

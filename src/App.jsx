@@ -19,6 +19,7 @@ const PAGE_SLUGS = {
   revenue:   "faturamento",
   delivery:  "logistica",
   cardapio:  "cardapio",
+  crm:       "crm",
   requests:  "requisicoes",
   purchases: "compras",
   cmv:       "cmv",
@@ -215,6 +216,7 @@ function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, set
           {page === "revenue"   && <Revenue scope={scope} />}
           {page === "delivery"  && <DeliveryTimes scope={scope} />}
           {page === "cardapio"  && <Cardapio scope={scope} />}
+          {page === "crm"       && <CRM scope={scope} />}
           {page === "requests"  && <Requests scope={scope} />}
           {page === "purchases" && <Purchases />}
           {page === "cmv"       && <CMV setPage={setPage} />}

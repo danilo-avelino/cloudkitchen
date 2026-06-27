@@ -2969,6 +2969,132 @@ function useSession() {
 }
 
 // =====================================================================
+// CRM · Contatos / Funil (módulo 'crm')
+// =====================================================================
+const _CRM_CONTACT_FIELDS = "id, name, phone, email, company, notes, created_at, updated_at";
+
+async function dbCrmListContacts(tenantId) {
+  return dbOrMock(
+    (sb) => sb.from("crm_contacts")
+      .select(_CRM_CONTACT_FIELDS)
+      .eq("tenant_id", tenantId)
+      .order("name", { ascending: true }),
+    null,
+  );
+}
+
+async function dbCrmInsertContact(tenantId, c) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("crm_contacts")
+    .insert({
+      tenant_id: tenantId,
+      name: c.name,
+      phone: c.phone || null,
+      email: c.email || null,
+      company: c.company || null,
+      notes: c.notes || null,
+    })
+    .select(_CRM_CONTACT_FIELDS).single();
+  return { data, error };
+}
+
+async function dbCrmUpdateContact(id, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const allowed = ["name", "phone", "email", "company", "notes"];
+  const body = {};
+  for (const k of allowed) if (patch[k] !== undefined) body[k] = patch[k] || null;
+  if (Object.keys(body).length === 0) return { data: null, error: new Error("nada a atualizar") };
+  const { data, error } = await _client.from("crm_contacts")
+    .update(body).eq("id", id).select(_CRM_CONTACT_FIELDS).single();
+  return { data, error };
+}
+
+async function dbCrmDeleteContact(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("crm_contacts").delete().eq("id", id);
+  return { error };
+}
+
+// Garante 1 pipeline padrão por tenant (cria com estágios na 1ª vez).
+// Retorna { pipeline, stages }. Estágios são ordenados por position.
+async function dbCrmGetOrCreateDefaultPipeline(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  let { data: pipe, error } = await _client.from("crm_pipelines")
+    .select("id, name, is_default")
+    .eq("tenant_id", tenantId).eq("is_default", true).maybeSingle();
+  if (error) return { data: null, error };
+  if (!pipe) {
+    const ins = await _client.from("crm_pipelines")
+      .insert({ tenant_id: tenantId, name: "Funil de vendas", is_default: true })
+      .select("id, name, is_default").single();
+    if (ins.error) return { data: null, error: ins.error };
+    pipe = ins.data;
+    const defaults = ["Novo", "Em contato", "Proposta", "Fechado"];
+    const rows = defaults.map((name, i) => ({ tenant_id: tenantId, pipeline_id: pipe.id, name, position: i }));
+    const st = await _client.from("crm_stages").insert(rows);
+    if (st.error) return { data: null, error: st.error };
+  }
+  const { data: stages, error: stErr } = await _client.from("crm_stages")
+    .select("id, name, position").eq("pipeline_id", pipe.id).order("position", { ascending: true });
+  if (stErr) return { data: null, error: stErr };
+  return { data: { pipeline: pipe, stages: stages || [] }, error: null };
+}
+
+async function dbCrmListDeals(tenantId, pipelineId) {
+  return dbOrMock(
+    (sb) => sb.from("crm_deals")
+      .select("id, title, value, currency, status, position, stage_id, contact_id, created_at")
+      .eq("tenant_id", tenantId).eq("pipeline_id", pipelineId)
+      .order("position", { ascending: true }),
+    null,
+  );
+}
+
+async function dbCrmInsertDeal(tenantId, d) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("crm_deals")
+    .insert({
+      tenant_id: tenantId,
+      pipeline_id: d.pipelineId,
+      stage_id: d.stageId,
+      contact_id: d.contactId,
+      title: d.title,
+      value: d.value ?? null,
+    })
+    .select("id, title, value, currency, status, position, stage_id, contact_id, created_at").single();
+  return { data, error };
+}
+
+async function dbCrmUpdateDeal(id, patch) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const allowed = ["stage_id", "title", "value", "status", "position"];
+  const body = {};
+  for (const k of allowed) if (patch[k] !== undefined) body[k] = patch[k];
+  if (Object.keys(body).length === 0) return { data: null, error: new Error("nada a atualizar") };
+  const { data, error } = await _client.from("crm_deals")
+    .update(body).eq("id", id)
+    .select("id, title, value, currency, status, position, stage_id, contact_id, created_at").single();
+  return { data, error };
+}
+
+async function dbCrmDeleteDeal(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.from("crm_deals").delete().eq("id", id);
+  return { error };
+}
+
+// Status (não-secreto) da conexão WhatsApp do tenant via RPC crm_whatsapp_status.
+// O token nunca volta pro cliente — só conectado?/número/ativo/expiração.
+// data === null quando o tenant ainda não tem config (nunca conectou).
+async function dbCrmWhatsappStatus(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  if (!(await _ensureSession())) return { data: null, error: new Error("Sessão expirada — recarregue a página") };
+  const { data, error } = await _client.rpc("crm_whatsapp_status", { p_tenant: tenantId });
+  if (error) return { data: null, error };
+  return { data: (Array.isArray(data) && data[0]) || null, error: null };
+}
+
+// =====================================================================
 // Exposição global
 // =====================================================================
 Object.assign(window, {
@@ -3015,6 +3141,9 @@ Object.assign(window, {
   dbInsertDreSubcategory, dbUpdateDreSubcategory, dbDeleteDreSubcategory,
   dbListCmvDaily, dbTopConsumedItems, dbListSharedSplits,
   dbUploadEvidence, dbGetSignedUrl,
+  dbCrmListContacts, dbCrmInsertContact, dbCrmUpdateContact, dbCrmDeleteContact,
+  dbCrmGetOrCreateDefaultPipeline, dbCrmListDeals, dbCrmInsertDeal, dbCrmUpdateDeal, dbCrmDeleteDeal,
+  dbCrmWhatsappStatus,
   dbSubscribeTable,
   getSession, useSession,
   mapStockItemFromDb, mapRevenueFromDb, mapKitchenRequestFromDb, mapPurchaseOrderFromDb, mapGoodsReceiptFromDb,

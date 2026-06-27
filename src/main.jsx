@@ -66,6 +66,7 @@ async function bootstrap() {
   await import("../page-revenue.jsx");
   await import("../page-delivery.jsx");
   await import("../page-cardapio.jsx");
+  await import("../page-crm.jsx");
   await import("../page-requests.jsx");
   await import("../page-mobile-requests.jsx");
   await import("../page-purchases.jsx");
