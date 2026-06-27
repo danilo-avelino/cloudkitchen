@@ -804,24 +804,542 @@ function SaUsers() {
   );
 }
 
-// ===================== Sistema =====================
+// ===================== Sistema · diagnóstico do Supabase =====================
+// Dados via edge function `platform-diagnostics`. O painel traduz advisors,
+// erros de log e estrutura do banco pra linguagem de leigo, com "como corrigir".
+
+const SYS_LEVEL_TONE = { ERROR: "crit", WARN: "warn", INFO: "info", LOG: "neutral" };
+
+// Explicações leigas por código de advisor/lint. Cobre tanto os códigos SQL do
+// nosso RPC (definer_exposed, function_no_search_path) quanto os nomes oficiais
+// do advisor do Supabase (authenticated_security_definer_function_executable…).
+const SYS_LINT_EXPLAIN = {
+  rls_enabled_no_policy: {
+    titulo: "Tabela protegida, mas sem regra de quem pode ler/escrever",
+    oQueE: "A trava de segurança por linha (RLS) está ligada nessa tabela, porém não há nenhuma regra dizendo quem acessa. Na prática a tabela fica fechada pra todo mundo (só o sistema interno entra).",
+    risco: "Baixo. Geralmente é proposital em tabelas de uso interno (integrações, config). Vira problema só se o app de fato precisar ler essa tabela e estiver dando erro de acesso.",
+    corrigir: "Se for tabela interna, pode ignorar. Se o app precisa dela, crie uma policy de acesso (peça pro dev rodar uma migration com a regra adequada).",
+  },
+  definer_exposed: {
+    titulo: "Função poderosa que qualquer usuário logado pode chamar",
+    oQueE: "Essa função roda com privilégios elevados (SECURITY DEFINER) e está exposta na API: qualquer usuário autenticado consegue executá-la pela internet.",
+    risco: "Médio. Se a função não validar direito quem está chamando, um usuário pode acessar dados de outro. As nossas validam o tenant por dentro — mas o ideal é também travar o acesso.",
+    corrigir: "Se só o backend deveria chamar: revogar o EXECUTE de 'authenticated' e expor via edge function. Se usuários precisam chamar, garantir a validação de tenant dentro da função (já fazemos).",
+  },
+  authenticated_security_definer_function_executable: {
+    titulo: "Função poderosa que qualquer usuário logado pode chamar",
+    oQueE: "Essa função roda com privilégios elevados (SECURITY DEFINER) e está exposta na API: qualquer usuário autenticado consegue executá-la pela internet.",
+    risco: "Médio. Se a função não validar direito quem está chamando, um usuário pode acessar dados de outro. As nossas validam o tenant por dentro — mas o ideal é também travar o acesso.",
+    corrigir: "Se só o backend deveria chamar: revogar o EXECUTE de 'authenticated' e expor via edge function. Se usuários precisam chamar, garantir a validação de tenant dentro da função (já fazemos).",
+  },
+  extension_in_public: {
+    titulo: "Extensão instalada no lugar 'público' do banco",
+    oQueE: "Uma extensão (aqui o pg_net, que faz chamadas HTTP) está instalada no schema 'public' em vez de um schema separado. É uma recomendação de organização/segurança do Supabase.",
+    risco: "Muito baixo. O pg_net não dá pra mover sem quebrar coisas hoje; é uma limitação conhecida da própria extensão. Não afeta o funcionamento.",
+    corrigir: "Pode conviver com esse aviso. Quando o Supabase permitir mover o pg_net de schema sem efeitos colaterais, a gente realoca. Nada urgente.",
+  },
+  function_no_search_path: {
+    titulo: "Função sem 'caminho de busca' fixado",
+    oQueE: "Uma função com privilégio elevado não fixou o search_path. Em teoria, alguém com permissão de criar objetos poderia enganar a função pra usar uma tabela falsa.",
+    risco: "Baixo no nosso caso (ninguém de fora cria objetos no banco), mas é boa prática corrigir.",
+    corrigir: "Adicionar 'SET search_path = public, pg_temp' na definição da função (migration simples).",
+  },
+  function_search_path_mutable: {
+    titulo: "Função sem 'caminho de busca' fixado",
+    oQueE: "Uma função com privilégio elevado não fixou o search_path. Em teoria, alguém com permissão de criar objetos poderia enganar a função pra usar uma tabela falsa.",
+    risco: "Baixo no nosso caso (ninguém de fora cria objetos no banco), mas é boa prática corrigir.",
+    corrigir: "Adicionar 'SET search_path = public, pg_temp' na definição da função (migration simples).",
+  },
+  auth_leaked_password_protection: {
+    titulo: "Proteção contra senhas vazadas está desligada",
+    oQueE: "O Supabase pode bloquear que usuários escolham senhas que já apareceram em vazamentos públicos (base HaveIBeenPwned). Hoje está desativado.",
+    risco: "Médio. Usuários podem usar senhas fracas/já comprometidas, facilitando invasão de contas.",
+    corrigir: "Liga num clique: painel Supabase → Authentication → Policies → 'Leaked password protection'. Recomendado ativar.",
+  },
+  unindexed_foreign_keys: {
+    titulo: "Chave estrangeira sem índice (pode deixar consultas lentas)",
+    oQueE: "Existe uma ligação entre tabelas (foreign key) sem índice. Consultas e exclusões que usam essa ligação podem ficar lentas conforme os dados crescem.",
+    risco: "Performance, não segurança. Sentido só quando a tabela tem muitos registros.",
+    corrigir: "Criar um índice na coluna da foreign key (migration de uma linha). Vale priorizar nas tabelas maiores.",
+  },
+  unused_index: {
+    titulo: "Índice que nunca é usado (ocupa espaço à toa)",
+    oQueE: "Há um índice que o banco não usou em nenhuma consulta. Ele só ocupa espaço e deixa as escritas um pouquinho mais lentas.",
+    risco: "Baixíssimo. É só desperdício de espaço/manutenção.",
+    corrigir: "Se confirmar que não serve, dá pra remover (DROP INDEX). Sem pressa.",
+  },
+};
+
+// Padrões de mensagem de erro de log → explicação leiga.
+const SYS_LOG_PATTERNS = [
+  {
+    re: /relation\s+"?([\w.]+)"?\s+does not exist/i,
+    titulo: "O sistema tentou usar uma tabela que não existe mais",
+    explica: (m) => `Algo no banco consultou "${m[1]}", que foi removida (provável tabela legada). O erro se repete porque uma rotina agendada ou integração ainda aponta pra ela.`,
+    corrigir: "Achar quem ainda chama essa tabela (cron job, edge function ou integração externa) e atualizar/desligar. Enquanto não corrige, não quebra o app — mas polui os logs.",
+  },
+  {
+    re: /(connection reset by peer|could not receive data from client|unexpected EOF|terminating connection)/i,
+    titulo: "Conexão de rede caiu no meio (geralmente inofensivo)",
+    explica: () => "Um cliente fechou a conexão antes de terminar. Acontece normalmente com apps web/celular trocando de rede. Só vira problema se for muito frequente.",
+    corrigir: "Normalmente ignorar. Se for constante, investigar instabilidade de rede ou timeouts curtos demais.",
+  },
+  {
+    re: /permission denied for (schema|table|relation)/i,
+    titulo: "Permissão negada (faltou GRANT)",
+    explica: () => "Um papel do banco tentou acessar algo sem permissão. Costuma derrubar funções/edge functions inteiras.",
+    corrigir: "Rodar os GRANTs do schema afetado (ver CLAUDE.md §5). Se for no schema 'app' ou 'public', há migration idempotente pronta.",
+  },
+  {
+    re: /violates (foreign key|unique|not-null|check) constraint/i,
+    titulo: "Tentativa de gravar dado inválido (regra do banco barrou)",
+    explica: () => "O banco recusou um dado que viola uma regra (duplicado, campo obrigatório vazio, ou referência inexistente). O dado não entrou.",
+    corrigir: "Em geral é o app mandando dado incompleto — ajustar a validação na tela. O banco está se protegendo corretamente.",
+  },
+  {
+    re: /(statement timeout|canceling statement due to)/i,
+    titulo: "Uma consulta demorou demais e foi cancelada",
+    explica: () => "Uma query passou do tempo limite. Costuma ser consulta pesada sem índice ou volume grande de dados.",
+    corrigir: "Otimizar a query/adicionar índice, ou paginar o volume. Ver a aba de performance.",
+  },
+];
+
+function sysExplainLog(msg) {
+  for (const p of SYS_LOG_PATTERNS) {
+    const m = String(msg || "").match(p.re);
+    if (m) return { titulo: p.titulo, explica: p.explica(m), corrigir: p.corrigir };
+  }
+  return null;
+}
+
+function sysFmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b >= 1e9) return (b / 1e9).toFixed(2) + " GB";
+  if (b >= 1e6) return (b / 1e6).toFixed(1) + " MB";
+  if (b >= 1e3) return (b / 1e3).toFixed(0) + " kB";
+  return b + " B";
+}
+
+// timestamps dos logs vêm em microssegundos (postgres) ou ms/ISO (edge). Normaliza.
+function sysToDate(ts) {
+  if (ts == null) return null;
+  if (typeof ts === "string") { const d = new Date(ts); return isNaN(d) ? null : d; }
+  const n = Number(ts);
+  if (!n) return null;
+  if (n > 1e15) return new Date(n / 1000); // microssegundos
+  if (n > 1e12) return new Date(n);        // milissegundos
+  return new Date(n * 1000);               // segundos
+}
+function sysAgo(d) {
+  if (!d) return "—";
+  const min = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (min < 1) return "agora";
+  if (min < 60) return `há ${min}min`;
+  if (min < 1440) return `há ${Math.floor(min / 60)}h`;
+  return `há ${Math.floor(min / 1440)}d`;
+}
+
+// Agrupa erros idênticos (ex.: o mesmo erro repetindo a cada 5min) → 1 card + contagem.
+function sysGroupLogs(rows) {
+  const map = new Map();
+  (rows || []).forEach((r) => {
+    const key = String(r.event_message || "").trim();
+    const d = sysToDate(r.timestamp);
+    if (!map.has(key)) map.set(key, { message: key, count: 0, last: d, severity: r.severity });
+    const g = map.get(key);
+    g.count++;
+    if (d && (!g.last || d > g.last)) g.last = d;
+  });
+  return [...map.values()].sort((a, b) => b.count - a.count);
+}
+
 function SaSystem() {
+  const [data, setData]       = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr]         = useState(null);
+  const [tokenInput, setTokenInput] = useState("");
+  const [savingToken, setSavingToken] = useState(false);
+  const [showToken, setShowToken]     = useState(false);
+  const dbStatus = useDbStatus ? useDbStatus() : { isOnline: false };
+
+  const load = React.useCallback(async () => {
+    if (!isDbOnline || !isDbOnline()) { setErr("Banco offline (modo MOCK) — diagnóstico indisponível."); return; }
+    setLoading(true); setErr(null);
+    const { data, error } = await dbPlatformDiagnostics("status");
+    if (error) setErr(error.message);
+    else setData(data);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { if (dbStatus.isOnline) load(); }, [dbStatus.isOnline, load]);
+
+  const saveToken = async () => {
+    if (savingToken || !tokenInput.trim()) return;
+    setSavingToken(true);
+    const { data: res, error } = await dbPlatformDiagnostics("set-token", { token: tokenInput.trim() });
+    setSavingToken(false);
+    if (error) { window.showToast?.("Falha ao salvar token: " + error.message, { tone: "crit", ttl: 5000 }); return; }
+    if (res && res.valid === false) {
+      window.showToast?.("Token salvo, mas não validou na Management API: " + (res.probeError || "erro"), { tone: "warn", ttl: 6000 });
+    } else {
+      window.showToast?.("Token salvo e validado ✓", { tone: "ok" });
+    }
+    setTokenInput(""); setShowToken(false);
+    load();
+  };
+
+  if (loading && !data) {
+    return <div style={{ padding: 40, textAlign: "center", color: "var(--fg-3)", fontSize: 13 }}>Carregando diagnóstico…</div>;
+  }
+  if (err && !data) {
+    return (
+      <div style={{ padding: "16px 28px 32px" }}>
+        <div className="card" style={{ padding: 20, borderColor: "var(--crit-line)" }}>
+          <div style={{ fontSize: 13, color: "var(--crit)", fontWeight: 500, marginBottom: 6 }}>Não foi possível carregar o diagnóstico</div>
+          <div style={{ fontSize: 12, color: "var(--fg-2)", fontFamily: "var(--mono)" }}>{err}</div>
+          <button className="btn" data-size="sm" onClick={load} disabled={loading} style={{ marginTop: 12 }}>
+            {loading ? "Carregando…" : "Tentar de novo"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const ov = data?.dbOverview || null;
+  const totals = ov?.totals || {};
+  const configured = !!data?.configured;
+
+  // Fonte das descobertas de segurança: advisor oficial (se token) senão lints SQL.
+  const officialSec = configured && data?.advisors?.security && !data.advisors.security.error
+    ? data.advisors.security : null;
+  const secFindings = (officialSec || ov?.lints || []).map((f) => ({
+    code: f.name || f.code,
+    level: f.level || "WARN",
+    object: f.metadata?.name ? `${f.metadata.schema || "public"}.${f.metadata.name}` : f.object,
+    detail: f.detail || null,
+    remediation: f.remediation || null,
+  }));
+  const perfFindings = configured && Array.isArray(data?.advisors?.performance) ? data.advisors.performance : [];
+
+  const pgLogs   = data?.logs?.postgres;
+  const edgeLogs = data?.logs?.edge;
+
   return (
-    <div style={{ padding: "16px 28px 32px", display: "flex", flexDirection: "column", gap: 16 }}>
-      <PendingFeature variant="block" label="Saúde da infraestrutura"
-        hint="Uptime, latência média de queries, errors, fila de jobs, status das Edge Functions. Pendente — integrar Supabase Status API + observabilidade externa (Sentry/Logflare)." />
+    <div style={{ padding: "16px 28px 32px", display: "flex", flexDirection: "column", gap: 16 }} className="stagger">
+      {/* Cabeçalho + refresh */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, color: "var(--fg-0)", fontWeight: 500 }}>Diagnóstico do sistema · Supabase</div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginTop: 2 }}>
+            projeto {data?.projectRef || "—"} · gerado {ov?.generated_at ? sysAgo(sysToDate(Date.parse(ov.generated_at))) : "—"}
+          </div>
+        </div>
+        <button className="btn" data-size="sm" onClick={load} disabled={loading}>
+          {loading ? "Atualizando…" : "Atualizar"}
+        </button>
+      </div>
 
-      <PendingFeature variant="block" label="Logs estruturados"
-        hint="Stream de eventos do sistema com filtro por tenant/severidade/categoria. Pendente — depende de captura via Edge Functions." />
+      {/* Token da Management API */}
+      <SysTokenCard
+        configured={configured}
+        show={showToken} setShow={setShowToken}
+        value={tokenInput} setValue={setTokenInput}
+        onSave={saveToken} saving={savingToken}
+        logsErr={configured ? (typeof pgLogs === "object" && pgLogs?.error) || (typeof edgeLogs === "object" && edgeLogs?.error) || null : null}
+      />
 
-      <PendingFeature variant="block" label="Feature flags"
-        hint="Habilitar/desabilitar módulos (Inventário, etc.) por tenant. Pendente." />
+      {/* KPIs do banco */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+        <SaKpi label="Tamanho do banco" value={sysFmtBytes(totals.db_bytes)} sub={`schema public: ${sysFmtBytes(totals.public_bytes)}`} />
+        <SaKpi label="Tabelas (public)" value={totals.public_tables ?? "—"} sub={`${totals.extensions ?? "—"} extensões ativas`} />
+        <SaKpi label="Migrations aplicadas" value={totals.migrations ?? "—"} sub={`última: ${totals.latest_migration || "—"}`} />
+        <SaKpi label="Jobs agendados" value={`${totals.cron_jobs_active ?? "—"}/${totals.cron_jobs ?? "—"}`} sub="ativos / total (pg_cron)" />
+      </div>
 
-      <PendingFeature variant="block" label="Faturamento da plataforma"
-        hint="Painel de billing dos clientes (próximas cobranças, inadimplentes, upgrades). Pendente — depende de integração com gateway (Stripe/Iugu/Pagar.me)." />
+      {/* Segurança */}
+      <SysFindingsCard
+        title="Segurança"
+        subtitle={configured ? "Advisors oficiais do Supabase" : "Verificação local (configure o token pra ver os advisors oficiais + o de Auth)"}
+        findings={secFindings}
+        emptyMsg="Nenhum alerta de segurança. ✨"
+      />
 
-      <PendingFeature variant="block" label="Backups e PITR"
-        hint="Status de backups automáticos do Supabase + restore point-in-time. Pendente." />
+      {/* Performance (só com token) */}
+      {configured && (
+        <SysFindingsCard
+          title="Performance"
+          subtitle="Sugestões de índices e otimização do Supabase"
+          findings={perfFindings.map((f) => ({
+            code: f.name, level: f.level || "INFO",
+            object: f.metadata?.name || (f.metadata ? JSON.stringify(f.metadata).slice(0, 60) : null),
+            detail: f.detail, remediation: f.remediation,
+          }))}
+          emptyMsg="Nenhuma sugestão de performance no momento."
+        />
+      )}
+
+      {/* Logs de erro */}
+      <SysLogsCard title="Erros do banco · últimas 24h" data={pgLogs} configured={configured} />
+      <SysLogsCard title="Erros das edge functions · últimas 24h" data={edgeLogs} configured={configured} />
+
+      {/* Estrutura: tabelas + extensões + cron */}
+      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 12 }}>
+        <SysTablesCard tables={ov?.tables || []} />
+        <SysCronCard jobs={ov?.cron_jobs || []} />
+      </div>
+      <SysExtensionsCard extensions={ov?.extensions || []} edgeFns={configured ? data?.edgeFns : null} />
+
+      <PendingFeature variant="block" label="Ainda não cobertos aqui"
+        hint="Faturamento da plataforma (gateway de pagamento), feature flags por tenant e status de backups/PITR continuam pendentes — não são expostos pela Management API que este painel usa." />
+    </div>
+  );
+}
+
+// --------- Card: token da Management API ---------
+function SysTokenCard({ configured, show, setShow, value, setValue, onSave, saving, logsErr }) {
+  return (
+    <div className="card" style={{ padding: "14px 16px", borderColor: configured ? "var(--accent-line)" : "var(--warn-line)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span className="badge" data-tone={configured ? "ok" : "warn"}>{configured ? "Token configurado" : "Token ausente"}</span>
+        <div style={{ flex: 1, fontSize: 12, color: "var(--fg-2)" }}>
+          {configured
+            ? "Logs e advisors oficiais ao vivo estão habilitados."
+            : "Sem o token da Management API, o painel mostra só o que o banco enxerga (estrutura + verificação local). Logs e advisors oficiais ficam indisponíveis."}
+        </div>
+        <button className="btn" data-size="sm" onClick={() => setShow(!show)}>
+          {show ? "Fechar" : configured ? "Trocar token" : "Configurar token"}
+        </button>
+      </div>
+
+      {logsErr && (
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--warn)", fontFamily: "var(--mono)" }}>
+          ⚠ Logs não carregaram: {String(logsErr)}
+        </div>
+      )}
+
+      {show && (
+        <div style={{ marginTop: 12, borderTop: "1px solid var(--line-soft)", paddingTop: 12 }}>
+          <div style={{ fontSize: 11.5, color: "var(--fg-2)", marginBottom: 8, lineHeight: 1.5 }}>
+            Gere um <strong>Personal Access Token</strong> em{" "}
+            <a href="https://supabase.com/dashboard/account/tokens" target="_blank" rel="noreferrer" style={{ color: "var(--accent-bright)" }}>
+              supabase.com/dashboard/account/tokens
+            </a>{" "}
+            e cole abaixo. Ele é gravado criptografado no Vault e usado só por esta função no servidor — <strong>nunca</strong> fica salvo no navegador.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="input mono" type="password" value={value} placeholder="sbp_..."
+                   onChange={(e) => setValue(e.target.value)} style={{ flex: 1 }} />
+            <button className="btn" data-variant="primary" data-size="sm" onClick={onSave} disabled={saving || !value.trim()}>
+              {saving ? "Salvando…" : "Salvar token"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --------- Card: descobertas (advisors/lints) ---------
+function SysFindingsCard({ title, subtitle, findings, emptyMsg }) {
+  const counts = findings.reduce((a, f) => { a[f.level] = (a[f.level] || 0) + 1; return a; }, {});
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">{title}</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>{subtitle}</span>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {["ERROR", "WARN", "INFO"].map((lv) => counts[lv]
+            ? <span key={lv} className="badge" data-tone={SYS_LEVEL_TONE[lv]}>{counts[lv]} {lv}</span> : null)}
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {findings.length === 0 ? (
+          <div style={{ padding: 20, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>{emptyMsg}</div>
+        ) : findings.map((f, i) => <SysFinding key={i} f={f} last={i === findings.length - 1} />)}
+      </div>
+    </div>
+  );
+}
+
+function SysFinding({ f, last }) {
+  const ex = SYS_LINT_EXPLAIN[f.code];
+  return (
+    <div style={{ padding: "12px 16px", borderBottom: last ? "none" : "1px solid var(--line-soft)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: ex ? 6 : 0 }}>
+        <span className="badge" data-tone={SYS_LEVEL_TONE[f.level] || "neutral"}>{f.level}</span>
+        <span style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>
+          {ex?.titulo || f.code}
+        </span>
+        {f.object && <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginLeft: "auto" }}>{f.object}</span>}
+      </div>
+      {ex ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11.5, lineHeight: 1.5 }}>
+          <div style={{ color: "var(--fg-2)" }}><strong style={{ color: "var(--fg-1)" }}>O que é:</strong> {ex.oQueE}</div>
+          <div style={{ color: "var(--fg-2)" }}><strong style={{ color: "var(--fg-1)" }}>Risco:</strong> {ex.risco}</div>
+          <div style={{ color: "var(--fg-2)" }}><strong style={{ color: "var(--ok)" }}>Como corrigir:</strong> {ex.corrigir}</div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 11.5, color: "var(--fg-2)", lineHeight: 1.5 }}>{f.detail || "Sem detalhe."}</div>
+      )}
+      {f.remediation && (
+        <a href={f.remediation} target="_blank" rel="noreferrer"
+           style={{ fontSize: 10.5, color: "var(--accent-bright)", marginTop: 6, display: "inline-block" }}>
+          Documentação ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
+// --------- Card: logs de erro ---------
+function SysLogsCard({ title, data, configured }) {
+  const isErr = data && typeof data === "object" && !Array.isArray(data) && data.error;
+  const groups = Array.isArray(data) ? sysGroupLogs(data) : [];
+  const total = Array.isArray(data) ? data.length : 0;
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">{title}</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+            {!configured ? "Requer o token da Management API"
+              : isErr ? "Falha ao consultar os logs"
+              : total === 0 ? "Nenhum erro no período 🎉"
+              : `${total} ocorrência(s) em ${groups.length} tipo(s)`}
+          </span>
+        </div>
+        {!isErr && total > 0 && <span className="badge" data-tone="crit">{total}</span>}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {!configured ? (
+          <div style={{ padding: 20, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+            Configure o token acima pra ver os logs ao vivo.
+          </div>
+        ) : isErr ? (
+          <div style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--warn)", fontFamily: "var(--mono)" }}>{String(data.error)}</div>
+        ) : groups.length === 0 ? (
+          <div style={{ padding: 20, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>Sem erros nas últimas 24h. 🎉</div>
+        ) : groups.map((g, i) => <SysLogRow key={i} g={g} last={i === groups.length - 1} />)}
+      </div>
+    </div>
+  );
+}
+
+function SysLogRow({ g, last }) {
+  const ex = sysExplainLog(g.message);
+  return (
+    <div style={{ padding: "12px 16px", borderBottom: last ? "none" : "1px solid var(--line-soft)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        {g.count > 1 && <span className="badge" data-tone="warn">{g.count}×</span>}
+        <span style={{ fontSize: 12.5, color: "var(--fg-0)", fontWeight: 500 }}>{ex?.titulo || "Erro"}</span>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginLeft: "auto" }}>{sysAgo(g.last)}</span>
+      </div>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--crit)", background: "var(--bg-2)", padding: "6px 8px", borderRadius: 4, marginBottom: ex ? 6 : 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        {g.message}
+      </div>
+      {ex && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11.5, lineHeight: 1.5 }}>
+          <div style={{ color: "var(--fg-2)" }}>{ex.explica}</div>
+          <div style={{ color: "var(--fg-2)" }}><strong style={{ color: "var(--ok)" }}>Como corrigir:</strong> {ex.corrigir}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --------- Card: tabelas por tamanho ---------
+function SysTablesCard({ tables }) {
+  const max = tables[0]?.bytes || 1;
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">Maiores tabelas</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Top {tables.length} por espaço em disco</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", padding: "8px 16px 12px", gap: 8 }}>
+        {tables.map((t) => (
+          <div key={t.name} style={{ display: "grid", gridTemplateColumns: "1fr 70px", gap: 10, alignItems: "center" }}>
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-1)" }}>{t.name}</span>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>~{Number(t.est_rows).toLocaleString("pt-BR")} linhas</span>
+              </div>
+              <div style={{ position: "relative", height: 4, background: "var(--bg-3)", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${(t.bytes / max) * 100}%`, background: "var(--accent)" }} />
+              </div>
+            </div>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-0)", textAlign: "right" }}>{t.pretty}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// --------- Card: jobs agendados ---------
+function SysCronCard({ jobs }) {
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">Jobs agendados</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Rotinas automáticas (pg_cron)</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {jobs.length === 0 ? (
+          <div style={{ padding: 20, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>Nenhum job.</div>
+        ) : jobs.map((j, i) => (
+          <div key={j.jobid} style={{ padding: "10px 16px", borderBottom: i < jobs.length - 1 ? "1px solid var(--line-soft)" : "none", display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="badge" data-tone={j.active ? "ok" : "neutral"} style={{ flexShrink: 0 }}>{j.active ? "on" : "off"}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{j.command}</div>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", marginTop: 2 }}>cron: {j.schedule}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// --------- Card: extensões + edge functions ---------
+function SysExtensionsCard({ extensions, edgeFns }) {
+  const fns = Array.isArray(edgeFns) ? edgeFns : null;
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="card-title">Extensões & Edge functions</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+            {extensions.length} extensão(ões){fns ? ` · ${fns.length} edge function(s)` : ""}
+          </span>
+        </div>
+      </div>
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {extensions.map((e) => (
+            <span key={e.name} style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-1)", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 99, padding: "2px 8px" }}>
+              {e.name} <span style={{ color: "var(--fg-3)" }}>{e.version}</span>
+            </span>
+          ))}
+        </div>
+        {fns && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {fns.map((fn) => (
+              <span key={fn.id || fn.slug} style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-1)", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 99, padding: "2px 8px" }}>
+                <span style={{ width: 6, height: 6, borderRadius: 50, background: fn.status === "ACTIVE" ? "var(--ok)" : "var(--warn)", display: "inline-block", marginRight: 5 }} />
+                {fn.slug} <span style={{ color: "var(--fg-3)" }}>v{fn.version}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

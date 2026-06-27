@@ -2736,16 +2736,20 @@ async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const { data, error } = await _client
     .from("stock_movements")
-    .select("stock_item_id, qty, stock_item:stock_items(name, unit, unit_cost)")
+    .select("stock_item_id, qty, unit_cost, stock_item:stock_items(name, unit)")
     .eq("tenant_id", tenantId)
     .eq("kind", "out")
-    .gte("created_at", fromDate)
-    .lte("created_at", toDate);
+    // Datado pela baixa (performed_at), igual ao resto da aba; created_at é a
+    // data de inserção da linha e desalinhava a box do período operacional.
+    .gte("performed_at", fromDate)
+    .lte("performed_at", toDate);
   if (error) return { data: null, source: "mock", error };
 
   // `kind='out'` grava qty negativa (schema constraint). Pra consumo, usamos
   // valor absoluto — assim o sort DESC traz o MAIOR consumo primeiro, em vez de
   // ordenar pelo "menos negativo" (que aparecia como -R$ 1,29 no topo).
+  // Custo = unit_cost do PRÓPRIO movimento (custo na baixa); o unit_cost do item
+  // é sobrescrito pela última compra e reavaliaria o consumo a preço de hoje.
   const agg = {};
   for (const mv of data || []) {
     const id = mv.stock_item_id;
@@ -2754,7 +2758,7 @@ async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
     }
     const qtyAbs = Math.abs(Number(mv.qty) || 0);
     agg[id].totalQty += qtyAbs;
-    agg[id].totalCost += qtyAbs * (Number(mv.stock_item?.unit_cost) || 0);
+    agg[id].totalCost += qtyAbs * (Number(mv.unit_cost) || 0);
   }
   const sorted = Object.values(agg).sort((a, b) => b.totalCost - a.totalCost);
   return { data: sorted.slice(0, limit), source: "db", error: null };
@@ -2901,6 +2905,36 @@ async function dbProvisionTenant({ name, slug, plan, ownerEmail, ownerName, owne
         "Authorization": "Bearer " + session.access_token,
       },
       body: JSON.stringify(payload),
+    });
+    const raw = await res.text();
+    let json = null; try { json = raw ? JSON.parse(raw) : null; } catch (_) { /* non-json */ }
+    if (!res.ok) {
+      const detail = json?.error || raw || res.statusText || "sem mensagem";
+      return { data: null, error: new Error(`[${res.status}] ${detail}`) };
+    }
+    return { data: json, error: null };
+  } catch (e) {
+    return { data: null, error: e };
+  }
+}
+
+// Painel de diagnóstico (Superadmin > Sistema). Chama a edge function
+// `platform-diagnostics` com o token da sessão (a função valida is_superadmin).
+//   action "status"     → { dbOverview, configured, advisors?, logs?, edgeFns? }
+//   action "set-token"  → grava o PAT da Management API no Vault
+async function dbPlatformDiagnostics(action = "status", payload = {}) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  try {
+    const { data: { session } } = await _client.auth.getSession();
+    if (!session) return { data: null, error: new Error("Não autenticado") };
+    const url = window.SK_CONFIG?.supabaseUrl + "/functions/v1/platform-diagnostics";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + session.access_token,
+      },
+      body: JSON.stringify({ action, ...payload }),
     });
     const raw = await res.text();
     let json = null; try { json = raw ? JSON.parse(raw) : null; } catch (_) { /* non-json */ }
@@ -3128,7 +3162,7 @@ Object.assign(window, {
   dbDeliveryMetrics, dbDeliveryFees, dbMenuSales, dbMenuAddons, dbMenuBaskets, dbMenuItemInsights,
   dbNeighborhoodStats, dbRadiusStats,
   dbDeliveryTimeseries, dbListDeliveryShifts, dbInsertDeliveryShift, dbUpdateDeliveryShift, dbDeleteDeliveryShift,
-  dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin,
+  dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin, dbPlatformDiagnostics,
   dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbListFinanceEntriesRange, dbListReconciledEntryIds, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
   dbListBankAccounts, dbUpsertBankAccount, dbUpsertBankTransactions, dbListBankTransactions, dbUpdateBankTransactionState,
   dbInsertReconciliationLink, dbDeleteReconciliationLinksForTx, dbDeleteBankTransactions,
