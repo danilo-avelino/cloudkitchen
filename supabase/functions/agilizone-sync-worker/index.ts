@@ -41,7 +41,7 @@ serve(async (req) => {
   // ---- auth do chamador ----
   const ingestHeader = req.headers.get("x-ingest-secret");
   const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
-  const ok = (!!secret && ingestHeader === secret) || token === SERVICE_KEY;
+  const ok = (!!secret && ingestHeader != null && safeEqual(ingestHeader, secret as string)) || safeEqual(token, SERVICE_KEY);
   if (!ok) return json({ error: "Unauthorized" }, 401);
   if (!secret) return json({ error: "agilizone_ingest_secret ausente no Vault" }, 500);
 
@@ -81,6 +81,16 @@ serve(async (req) => {
 
   return json({ ok: true, processed, archived, retried, dead });
 });
+
+// comparação constant-time p/ secrets (evita timing attack na auth de máquina)
+function safeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  if (ea.length !== eb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
+}
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {

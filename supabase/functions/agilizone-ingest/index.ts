@@ -66,10 +66,10 @@ serve(async (req) => {
     let machineAuth = false;
     if (ingestHeader) {
       const want = await getVaultSecret(admin, "agilizone_ingest_secret");
-      machineAuth = !!want && ingestHeader === want;
+      machineAuth = !!want && safeEqual(ingestHeader, want);
     }
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
-    const isService = machineAuth || jwtRole(token) === "service_role" || token === SERVICE_KEY;
+    const isService = machineAuth || jwtRole(token) === "service_role" || safeEqual(token, SERVICE_KEY);
     if (!isService) {
       if (!token) return json({ error: "Unauthorized" }, 401);
       if (!tenantId) return json({ error: "tenantId required" }, 400);
@@ -398,6 +398,16 @@ function chunked<T>(arr: T[], size: number): T[][] {
 function numOrNull(v: any) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+// comparação constant-time p/ secrets (evita timing attack na auth de máquina)
+function safeEqual(a: string, b: string): boolean {
+  const ea = new TextEncoder().encode(a);
+  const eb = new TextEncoder().encode(b);
+  if (ea.length !== eb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ea.length; i++) diff |= ea[i] ^ eb[i];
+  return diff === 0;
 }
 
 // Nome da marca, robusto às origens da Agilizone. DEVE ser idêntico ao do
