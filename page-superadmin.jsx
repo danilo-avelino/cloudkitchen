@@ -53,7 +53,16 @@ function _saMapTenantFromDb(row) {
 }
 
 function SuperAdmin({ user, onLogout, embedded = false }) {
-  const [tab, setTab] = useState("overview");
+  // Aba inicial pode vir dos atalhos da sidebar (window.SA_TAB + evento "sa-set-tab").
+  const [tab, setTab] = useState(() => window.SA_TAB || "overview");
+  // Mantém window.SA_TAB em sincronia (sidebar usa pra marcar o atalho ativo).
+  useEffect(() => { window.SA_TAB = tab; }, [tab]);
+  // Troca de aba disparada pelos atalhos da sidebar quando o painel já está aberto.
+  useEffect(() => {
+    const h = (e) => { if (e?.detail) setTab(e.detail); };
+    window.addEventListener("sa-set-tab", h);
+    return () => window.removeEventListener("sa-set-tab", h);
+  }, []);
   const dbStatus = useDbStatus ? useDbStatus() : { state: "checking", isOnline: false };
   const [tenants, setTenants] = useState(() => dbStatus.isOnline ? [] : MOCK.SYSTEM_TENANTS);
   const [loadingTenants, setLoadingTenants] = useState(false);

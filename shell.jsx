@@ -25,16 +25,21 @@ const ROLE_LABEL_TO_DB = {
 
 function getAllowedModules(user) {
   if (!user) return ["dashboard"];
-  // Superadmin: só "Gestão SaaS" (escopo é global, não há tenant pra operar).
-  // Se quiser entrar como owner de algum tenant específico, usar conta diferente.
-  if (user.isSuperadmin === true || user.role === "superadmin") return SUPERADMIN_MODULES;
+  const isSuper = user.isSuperadmin === true || user.role === "superadmin";
+  // Superadmin "puro" (sem tenant pra operar): só "Gestão SaaS".
+  if (isSuper && !user.tenantId) return SUPERADMIN_MODULES;
   const dbRole = ROLE_LABEL_TO_DB[user.role] || user.role || "viewer";
-  // Owner/admin sempre veem tudo, ignorando customização (evita auto-bloqueio)
-  if (dbRole === "owner" || dbRole === "admin") return APP_MODULES;
-  if (Array.isArray(user.modules) && user.modules.length > 0) {
-    return user.modules.filter((m) => APP_MODULES.includes(m));
+  let mods;
+  // Owner/admin (e superadmin operando um tenant) veem todos os módulos.
+  if (dbRole === "owner" || dbRole === "admin" || isSuper) {
+    mods = APP_MODULES;
+  } else if (Array.isArray(user.modules) && user.modules.length > 0) {
+    mods = user.modules.filter((m) => APP_MODULES.includes(m));
+  } else {
+    mods = ROLE_DEFAULT_MODULES[dbRole] || ["dashboard"];
   }
-  return ROLE_DEFAULT_MODULES[dbRole] || ["dashboard"];
+  // Superadmin que também é membro de um tenant: módulos do tenant + plataforma.
+  return isSuper ? [...mods, ...SUPERADMIN_MODULES] : mods;
 }
 
 window.getAllowedModules = getAllowedModules;
@@ -107,8 +112,10 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   }, [dbStatus.isOnline, user?.tenantId, page]);
 
   const isSuperadmin = user?.isSuperadmin === true || user?.role === "superadmin";
+  // "Puro" = superadmin sem tenant pra operar → mostra branding da plataforma.
+  // Superadmin que também é owner de um tenant mantém a marca do tenant.
+  const isPureSuper = isSuperadmin && !user?.tenantId;
   const allNav = [
-    { id: "saas",       label: "Gestão SaaS",     icon: I.Trophy },
     { id: "dashboard",  label: "Dashboard",      icon: I.Dashboard },
     { id: "stock",      label: "Estoque",         icon: I.Stock,       badge: stockCrit || null, badgeTone: stockOut > 0 ? "crit" : "warn" },
     { id: "recipes",    label: "Fichas técnicas", icon: I.Recipe },
@@ -125,7 +132,7 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   ].filter((item) => has(item.id));
 
   const initials = user?.name?.split(" ").map((n) => n[0]).slice(0, 2).join("") || "?";
-  const tenantName = isSuperadmin
+  const tenantName = isPureSuper
     ? "StockKitchen · Plataforma"
     : (user?.tenantName || "Cloud Kitchen");
 
@@ -139,10 +146,10 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
         <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
           <div style={sb.tenantName}>{tenantName}</div>
           <div style={sb.tenantId}>
-            {isSuperadmin
+            {isPureSuper
               ? "MULTI-TENANT"
               : (user?.tenantId ? user.tenantId.slice(0, 8).toUpperCase() : "LOCAL")}
-            {!isSuperadmin && (() => {
+            {!isPureSuper && (() => {
               const n = (window.MOCK?.OPERATIONS || []).filter((o) => o.id !== "all").length;
               return n > 0 ? ` · ${n} ops` : "";
             })()}
@@ -180,6 +187,36 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
           );
         })}
       </nav>
+
+      {/* Plataforma · atalhos de superadmin (só quando o usuário é superadmin) */}
+      {isSuperadmin && has("saas") && (
+        <div style={{ padding: "8px 12px 10px", borderTop: "1px solid var(--line-soft)" }}>
+          <div style={sb.sectionLbl}>Plataforma</div>
+          {[
+            { tab: "tenants", label: "Gestão SaaS",  icon: I.Trophy },
+            { tab: "system",  label: "Diagnóstico",  icon: I.AlertTriangle },
+          ].map((item) => {
+            const Ico = item.icon;
+            const active = page === "saas" && (window.SA_TAB || "overview") === item.tab;
+            return (
+              <button
+                key={item.tab}
+                style={{ ...sb.navItem, ...(active ? sb.navItemActive : null) }}
+                onClick={() => {
+                  window.SA_TAB = item.tab;
+                  window.dispatchEvent(new CustomEvent("sa-set-tab", { detail: item.tab }));
+                  setPage("saas");
+                }}
+              >
+                <Ico size={15} stroke={1.5} style={{ color: active ? "var(--accent-bright)" : "#c2843a" }} />
+                <span style={{ flex: 1, textAlign: "left", color: active ? "var(--fg-0)" : "var(--fg-1)" }}>
+                  {item.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* User */}
       <button
