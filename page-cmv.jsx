@@ -103,6 +103,47 @@ function buildDailyRows(revenueEntries, movements, sharedSplits = {}) {
   return Object.values(acc).sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// Detalhe de uma única célula (operação × dia) do heatmap: faturamento do dia +
+// insumos que compõem o CMV daquele dia (qty e custo). Replica o rateio de uso
+// compartilhado de buildDailyRows pra o total bater com a célula clicada.
+function buildDayOpDetail(movements, revenueEntries, sharedSplits, op, isoDate) {
+  let revenue = 0;
+  for (const re of revenueEntries) {
+    if (String(re.date || "").slice(0, 10) === isoDate && re.op === op) revenue += Number(re.revenue) || 0;
+  }
+  const acc = {};
+  const add = (mv, frac) => {
+    const id = mv.itemId || mv.item;
+    if (!acc[id]) acc[id] = { id, name: mv.item, unit: mv.unit, qty: 0, cost: 0 };
+    const qty = Math.abs(Number(mv.delta) || 0) * frac;
+    acc[id].qty  += qty;
+    acc[id].cost += qty * (Number(mv.unitCost) || 0);
+  };
+  for (const mv of movements) {
+    if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
+    if (mv.composeCmv === false) continue;
+    if (_spDay(mv.at) !== isoDate) continue;
+    const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
+    if (splits && splits.length > 0) {
+      const totalPct = splits.reduce((s, x) => s + (x.pct || 0), 0) || 1;
+      const sp = splits.find((x) => x.slug === op);
+      if (sp) add(mv, (sp.pct || 0) / totalPct);
+    } else if (mv.op === op) {
+      add(mv, 1);
+    }
+  }
+  const items = Object.values(acc).sort((a, b) => b.cost - a.cost);
+  const cogs = items.reduce((s, r) => s + r.cost, 0);
+  return { revenue, items, cogs, cmv: revenue > 0 ? (cogs / revenue) * 100 : null };
+}
+
+// "Quarta-feira, 24/06/2026" a partir de um ISO YYYY-MM-DD.
+function dayLabelFull(iso) {
+  const d = new Date(iso + "T12:00:00");
+  const names = ["Domingo","Segunda-feira","Terça-feira","Quarta-feira","Quinta-feira","Sexta-feira","Sábado"];
+  return `${names[d.getDay()]}, ${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()}`;
+}
+
 // Calcula impacto total dos insumos excluídos do CMV no período (apenas para
 // exibir no badge "X itens excluídos · R$ Y/período não computado").
 function excludedImpact(movements, fromDate, toDate) {
@@ -148,6 +189,8 @@ function CMV({ setPage }) {
   const [revenueEntries, setRevenueEntries] = useState([]);
   const [movements, setMovements] = useState([]);
   const [topConsumed, setTopConsumed] = useState([]);
+  // Célula do heatmap aberta no modal de detalhe · { op (slug), date (ISO) }
+  const [dayDetail, setDayDetail] = useState(null);
 
   // Heatmap fixo · últimos 7 dias (independe do filtro de período de KPI).
   const [heatRevenue, setHeatRevenue] = useState([]);
@@ -399,7 +442,7 @@ function CMV({ setPage }) {
       });
       return { op, values };
     });
-    return { days: dates.map(dayLabel), rows };
+    return { days: dates.map(dayLabel), dates, rows };
   }, [heatRevenue, heatMovements, sharedSplitsResolved]);
 
   const periodLabel = {
@@ -569,14 +612,18 @@ function CMV({ setPage }) {
                             borderRadius: 2,
                           }}>—</div>
                         ) : (
-                          <div style={{
-                            background: cmvCellBg(v),
-                            border: "1px solid var(--line)",
-                            padding: "10px 6px", textAlign: "center",
-                            fontFamily: "var(--mono)", fontSize: 11.5,
-                            color: "var(--fg-0)", fontWeight: 500,
-                            borderRadius: 2, position: "relative",
-                          }} title={`${v.toFixed(1)}%`}>
+                          <div
+                            onClick={() => setDayDetail({ op: row.op, date: heat.dates[i] })}
+                            style={{
+                              background: cmvCellBg(v),
+                              border: "1px solid var(--line)",
+                              padding: "10px 6px", textAlign: "center",
+                              fontFamily: "var(--mono)", fontSize: 11.5,
+                              color: "var(--fg-0)", fontWeight: 500,
+                              borderRadius: 2, position: "relative", cursor: "pointer",
+                            }}
+                            title={`${v.toFixed(1)}% · clique para detalhar o dia`}
+                          >
                             {v.toFixed(1)}
                           </div>
                         )}
@@ -598,6 +645,17 @@ function CMV({ setPage }) {
           )}
         </div>
       </div>
+
+      {dayDetail && (
+        <CmvDayDetailModal
+          op={dayDetail.op}
+          date={dayDetail.date}
+          movements={heatMovements}
+          revenueEntries={heatRevenue}
+          sharedSplits={sharedSplitsResolved}
+          onClose={() => setDayDetail(null)}
+        />
+      )}
 
       {/* Por operação · faturamento × custo × CMV × margem */}
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12, alignItems: "start" }}>
@@ -992,6 +1050,201 @@ function CmvKpiCard({ label, value, sub, tone, hero, mode }) {
       )}
     </div>
   );
+}
+
+// Modal de detalhe de uma célula do heatmap (operação × dia): faturamento, insumos
+// que compõem o CMV daquele dia e ações de copiar p/ WhatsApp / exportar PDF.
+function CmvDayDetailModal({ op, date, movements, revenueEntries, sharedSplits, onClose }) {
+  const ModalShell = window.ModalShell;
+  const opMeta = MOCK.opById(op);
+  const opName = opMeta?.name || op;
+  const dayFull = dayLabelFull(date);
+  const detail = useMemo(
+    () => buildDayOpDetail(movements, revenueEntries, sharedSplits, op, date),
+    [movements, revenueEntries, sharedSplits, op, date],
+  );
+  const tone = detail.cmv != null ? cmvTone(detail.cmv) : null;
+  const cmvLabel = detail.cmv != null ? `${detail.cmv.toFixed(1)}%` : "—";
+  const [copying, setCopying] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const buildWaText = () => {
+    const lines = [
+      `*CMV diário — ${opName}*`,
+      dayFull,
+      "",
+      `Faturamento: ${_fmtBRLc(detail.revenue)}`,
+      `Custo (CMV): ${_fmtBRLc(detail.cogs)}`,
+      `CMV: ${cmvLabel}`,
+      "",
+      `*Insumos consumidos (${detail.items.length})*`,
+    ];
+    if (detail.items.length === 0) {
+      lines.push("— sem consumo registrado —");
+    } else {
+      for (const it of detail.items) {
+        const q = (Number(it.qty) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+        lines.push(`• ${it.name} — ${q} ${it.unit} · ${_fmtBRLc(it.cost)}`);
+      }
+    }
+    return lines.join("\n");
+  };
+
+  const onCopy = async () => {
+    if (copying) return;
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(buildWaText());
+      window.showToast?.("Resumo copiado · cole no WhatsApp", { tone: "ok" });
+    } catch {
+      window.showToast?.("Não foi possível copiar para a área de transferência", { tone: "crit", ttl: 4500 });
+    } finally {
+      setCopying(false);
+    }
+  };
+
+  const onExport = () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
+      const html = buildCmvDayExportHtml({ opName, dayFull, detail, cmvLabel, tenantName });
+      const w = window.open("", "_blank");
+      if (!w) {
+        window.showToast?.("Pop-up bloqueado · permita pop-ups para exportar", { tone: "warn", ttl: 4500 });
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <ModalShell
+      title={opName}
+      subtitle={`${dayFull} · faturamento, consumo e CMV do dia`}
+      width={640}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" data-variant="ghost" data-size="sm" onClick={onCopy} disabled={copying}>
+          <I.WhatsApp size={13} />{copying ? "Copiando…" : "Copiar p/ WhatsApp"}
+        </button>
+        <button className="btn" data-size="sm" onClick={onExport} disabled={exporting}>
+          <I.Print size={13} />{exporting ? "Exportando…" : "Exportar PDF"}
+        </button>
+      </>}
+    >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
+        <CmvKpiCard label="Faturamento" value={detail.revenue > 0 ? _fmtBRLci(detail.revenue) : "—"} sub="vendas do dia" />
+        <CmvKpiCard label="Custo (CMV)" value={_fmtBRLci(detail.cogs)} sub="saídas × custo unit." />
+        <CmvKpiCard label="CMV" value={cmvLabel} sub={tone ? tone.label : "sem faturamento"} tone={tone} hero />
+      </div>
+
+      <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
+        Insumos que compõem o CMV · {detail.items.length} {detail.items.length === 1 ? "item" : "itens"}
+      </div>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th className="num">Qtd.</th>
+            <th className="num">Valor</th>
+            <th className="num">% do consumo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {detail.items.length === 0 ? (
+            <tr><td colSpan={4} className="dim" style={{ textAlign: "center", padding: 24 }}>Sem consumo de estoque neste dia.</td></tr>
+          ) : detail.items.map((it) => {
+            const pct = detail.cogs > 0 ? (it.cost / detail.cogs) * 100 : 0;
+            return (
+              <tr key={it.id}>
+                <td style={{ color: "var(--fg-0)", fontWeight: 500 }}>{it.name}</td>
+                <td className="num mono" style={{ color: "var(--fg-1)" }}>
+                  {(Number(it.qty) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 })} {it.unit}
+                </td>
+                <td className="num mono" style={{ color: "var(--fg-0)" }}>{_fmtBRLc(it.cost)}</td>
+                <td className="num mono" style={{ color: "var(--fg-2)" }}>{pct.toFixed(1)}%</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </ModalShell>
+  );
+}
+
+// Documento A4 standalone do detalhe do dia (mesma técnica da DRE: window.print →
+// "Salvar como PDF"). Sem dependências novas.
+function buildCmvDayExportHtml({ opName, dayFull, detail, cmvLabel, tenantName }) {
+  const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const fmt = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const qfmt = (v) => (Number(v) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+  const rows = detail.items.map((it) => {
+    const pct = detail.cogs > 0 ? (it.cost / detail.cogs) * 100 : 0;
+    return `<tr><td>${esc(it.name)}</td><td class="num">${qfmt(it.qty)} ${esc(it.unit)}</td><td class="num">${fmt(it.cost)}</td><td class="num">${pct.toFixed(1)}%</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="empty">Sem consumo de estoque neste dia.</td></tr>`;
+
+  const now = new Date();
+  const genAt = `${String(now.getDate()).padStart(2,"0")}/${String(now.getMonth()+1).padStart(2,"0")}/${now.getFullYear()} ${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>CMV diário · ${esc(opName)} · ${esc(dayFull)}</title>
+<style>
+  @page { size: A4; margin: 12mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 11px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; color: #16181c; background: #fff; }
+  .toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #f3f4f6; border-bottom: 1px solid #dfe2e6; }
+  .toolbar button { font: 600 12px/1 inherit; padding: 8px 16px; border: 0; border-radius: 5px; background: #1a6d4a; color: #fff; cursor: pointer; }
+  .toolbar span { font-size: 11px; color: #6a7077; }
+  main { width: 186mm; margin: 0 auto; padding: 18px 0 0; }
+  h1 { font-size: 19px; margin: 0; letter-spacing: -0.01em; }
+  .meta { font-size: 10.5px; color: #6a7077; margin-top: 4px; }
+  .kpis { display: flex; gap: 12px; margin: 16px 0 18px; }
+  .kpis > div { flex: 1; border: 1px solid #dfe2e6; border-radius: 6px; padding: 10px 14px; }
+  .kpis span { display: block; font-size: 8.5px; color: #6a7077; text-transform: uppercase; letter-spacing: 0.06em; }
+  .kpis b { font-size: 16px; font-variant-numeric: tabular-nums; }
+  .kpis .cmv b { color: #1a6d4a; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 8.5px; color: #6a7077; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; padding: 6px 8px; border-bottom: 1.5px solid #16181c; }
+  td { padding: 5px 8px; border-bottom: 1px solid #eceef0; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.empty { text-align: center; color: #9aa0a6; padding: 20px; }
+  tr { break-inside: avoid; }
+  footer { margin-top: 12px; font-size: 9.5px; color: #9aa0a6; display: flex; justify-content: space-between; }
+  @media print { .toolbar { display: none; } main { padding: 0; } }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button onclick="window.print()">Imprimir / Salvar PDF</button>
+  <span>No diálogo de impressão, escolha o destino "Salvar como PDF".</span>
+</div>
+<main>
+  <h1>CMV diário — ${esc(opName)}</h1>
+  <div class="meta">${tenantName ? `${esc(tenantName)} · ` : ""}${esc(dayFull)}</div>
+  <div class="kpis">
+    <div><span>Faturamento</span><b>${fmt(detail.revenue)}</b></div>
+    <div><span>Custo (CMV)</span><b>${fmt(detail.cogs)}</b></div>
+    <div class="cmv"><span>CMV</span><b>${esc(cmvLabel)}</b></div>
+  </div>
+  <table>
+    <thead><tr><th>Item</th><th class="num">Qtd.</th><th class="num">Valor</th><th class="num">% do consumo</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <footer><span>Gerado pelo Cloud Kitchen</span><span>${genAt}</span></footer>
+</main>
+<script>
+window.addEventListener("load", function () { setTimeout(function () { window.print(); }, 300); });
+</script>
+</body>
+</html>`;
 }
 
 function CmvScaleLegend({ pct }) {
