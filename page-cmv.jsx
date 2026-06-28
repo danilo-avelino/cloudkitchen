@@ -681,7 +681,7 @@ function CMV({ setPage }) {
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
                       {op && <span style={{ width: 4, height: 4, borderRadius: 50, background: op.color }} />}
                       <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                        {op ? `${op.short} · ` : ""}{itemQty} {c.unit}
+                        {op ? `${op.short} · ` : ""}{(Number(itemQty) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 })} {c.unit}
                       </span>
                     </div>
                   </div>

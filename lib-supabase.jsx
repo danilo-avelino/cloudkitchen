@@ -2734,16 +2734,28 @@ async function dbListCmvDaily(tenantId, fromDate, toDate) {
 
 async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
-  const { data, error } = await _client
-    .from("stock_movements")
-    .select("stock_item_id, qty, unit_cost, stock_item:stock_items(name, unit)")
-    .eq("tenant_id", tenantId)
-    .eq("kind", "out")
-    // Datado pela baixa (performed_at), igual ao resto da aba; created_at é a
-    // data de inserção da linha e desalinhava a box do período operacional.
-    .gte("performed_at", fromDate)
-    .lte("performed_at", toDate);
-  if (error) return { data: null, source: "mock", error };
+  // PostgREST corta a resposta em 1000 linhas (max-rows) mesmo sem .limit().
+  // Sem paginar, meses com mais de 1000 baixas eram subnotificados (a box
+  // mostrava ~1/4 do consumo real vs. a aba "Por item"). Busca por páginas via
+  // .range() até esgotar — mesmo padrão de dbListStockMovements.
+  const PAGE = 1000;
+  const rows = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await _client
+      .from("stock_movements")
+      .select("stock_item_id, qty, unit_cost, stock_item:stock_items(name, unit)")
+      .eq("tenant_id", tenantId)
+      .eq("kind", "out")
+      // Datado pela baixa (performed_at), igual ao resto da aba; created_at é a
+      // data de inserção da linha e desalinhava a box do período operacional.
+      .gte("performed_at", fromDate)
+      .lte("performed_at", toDate)
+      .order("performed_at", { ascending: false })
+      .range(offset, offset + PAGE - 1);
+    if (error) return { data: null, source: "mock", error };
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE) break; // última página
+  }
 
   // `kind='out'` grava qty negativa (schema constraint). Pra consumo, usamos
   // valor absoluto — assim o sort DESC traz o MAIOR consumo primeiro, em vez de
@@ -2751,7 +2763,7 @@ async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
   // Custo = unit_cost do PRÓPRIO movimento (custo na baixa); o unit_cost do item
   // é sobrescrito pela última compra e reavaliaria o consumo a preço de hoje.
   const agg = {};
-  for (const mv of data || []) {
+  for (const mv of rows) {
     const id = mv.stock_item_id;
     if (!agg[id]) {
       agg[id] = { name: mv.stock_item?.name, unit: mv.stock_item?.unit, totalQty: 0, totalCost: 0 };
