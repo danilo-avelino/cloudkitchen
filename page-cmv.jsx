@@ -32,6 +32,7 @@ function cmvCellBg(pct) {
 
 const _fmtBRLc  = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const _fmtBRLci = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const _fmtPct = (v) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`);
 const _ymd = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 
 // Data local de SP (YYYY-MM-DD) a partir de um timestamp ISO. stock_movements.performed_at
@@ -177,8 +178,153 @@ function buildItemRows(movements, opFilter) {
   return Object.values(acc).sort((a, b) => b.cost - a.cost);
 }
 
+// ===== Semanal · ciclos Seg→Dom (independem da data do mês) =====
+
+// Segunda-feira (YYYY-MM-DD) da semana que contém `iso`.
+function weekMonday(iso) {
+  const d = new Date(iso + "T12:00:00");
+  const dow = d.getDay();               // 0=Dom … 6=Sáb
+  const back = dow === 0 ? 6 : dow - 1; // dias desde a segunda
+  d.setDate(d.getDate() - back);
+  return _ymd(d);
+}
+
+// Domingo (YYYY-MM-DD) a partir da segunda da semana.
+function weekSunday(mondayIso) {
+  const d = new Date(mondayIso + "T12:00:00");
+  d.setDate(d.getDate() + 6);
+  return _ymd(d);
+}
+
+// "22/06 – 28/06" a partir da segunda.
+function weekRangeShort(mondayIso) {
+  const mon = new Date(mondayIso + "T12:00:00");
+  const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
+  const f = (d) => `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}`;
+  return `${f(mon)} – ${f(sun)}`;
+}
+
+// "22/06/2026 – 28/06/2026" (com ano) para subtítulo/exportação.
+function weekRangeFull(mondayIso) {
+  const mon = new Date(mondayIso + "T12:00:00");
+  const sun = new Date(mon); sun.setDate(sun.getDate() + 6);
+  const f = (d) => `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()}`;
+  return `${f(mon)} – ${f(sun)}`;
+}
+
+// "08/06" (DD/MM da segunda) — tick curto para o eixo dos gráficos semanais.
+function weekTick(mondayIso) {
+  const d = new Date(mondayIso + "T12:00:00");
+  return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}`;
+}
+
+// Custo que compõe o CMV de um movimento de saída (out/loss/expiration). Ajustes de
+// inventário não entram — o semanal espelha as "saídas de estoque" do heatmap diário.
+function cmvOutCost(mv) {
+  if (mv.composeCmv === false) return 0;
+  if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") return 0;
+  return Math.abs(Number(mv.delta) || 0) * (Number(mv.unitCost) || 0);
+}
+
+// Fração do custo de um movimento atribuída à operação `op` (slug). "all" → 1. Caso
+// contrário aplica o rateio de uso compartilhado (splits) ou a operação primária —
+// mesma regra do heatmap diário / "Resultado por operação".
+function cmvOpFrac(mv, op, sharedSplits) {
+  if (op === "all") return 1;
+  const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
+  if (splits && splits.length > 0) {
+    const totalPct = splits.reduce((s, x) => s + (x.pct || 0), 0) || 1;
+    const sp = splits.find((x) => x.slug === op);
+    return sp ? (sp.pct || 0) / totalPct : 0;
+  }
+  return mv.op === op ? 1 : 0;
+}
+
+// Agrega faturamento + custo de saídas por semana (Seg→Dom), opcionalmente filtrado por
+// operação (slug). Com filtro, o custo é rateado pelos splits de uso compartilhado.
+// Retorna semanas da mais recente p/ a mais antiga: { week (segunda ISO), revenue, cogs, cmv, margin }.
+function buildWeeklyRows(revenueEntries, movements, sharedSplits = {}, opFilter = "all") {
+  const acc = {};
+  const ensure = (mon) => acc[mon] || (acc[mon] = { week: mon, revenue: 0, cogs: 0 });
+  for (const re of revenueEntries) {
+    if (opFilter !== "all" && re.op !== opFilter) continue;
+    const d = String(re.date || "").slice(0, 10);
+    if (!d) continue;
+    ensure(weekMonday(d)).revenue += Number(re.revenue) || 0;
+  }
+  for (const mv of movements) {
+    const frac = cmvOpFrac(mv, opFilter, sharedSplits);
+    if (!frac) continue;
+    const cost = cmvOutCost(mv) * frac;
+    if (!cost) continue;
+    const d = _spDay(mv.at);
+    if (!d) continue;
+    ensure(weekMonday(d)).cogs += cost;
+  }
+  return Object.values(acc).map((w) => ({
+    ...w,
+    cmv:    w.revenue > 0 ? (w.cogs / w.revenue) * 100 : null,
+    margin: w.revenue > 0 ? ((w.revenue - w.cogs) / w.revenue) * 100 : null,
+  })).sort((a, b) => b.week.localeCompare(a.week));
+}
+
+// Detalhe de uma semana: faturamento + insumos que compõem o CMV (saídas) no intervalo
+// Seg→Dom, opcionalmente filtrado por operação. Mesmo formato de buildDayOpDetail.
+function buildWeekDetail(movements, revenueEntries, mondayIso, sharedSplits = {}, opFilter = "all") {
+  const from = mondayIso, to = weekSunday(mondayIso);
+  let revenue = 0;
+  for (const re of revenueEntries) {
+    if (opFilter !== "all" && re.op !== opFilter) continue;
+    const d = String(re.date || "").slice(0, 10);
+    if (d >= from && d <= to) revenue += Number(re.revenue) || 0;
+  }
+  const acc = {};
+  for (const mv of movements) {
+    const frac = cmvOpFrac(mv, opFilter, sharedSplits);
+    if (!frac) continue;
+    const baseCost = cmvOutCost(mv);
+    if (!baseCost) continue;
+    const d = _spDay(mv.at);
+    if (d < from || d > to) continue;
+    const id = mv.itemId || mv.item;
+    if (!acc[id]) acc[id] = { id, name: mv.item, unit: mv.unit, qty: 0, cost: 0 };
+    acc[id].qty  += Math.abs(Number(mv.delta) || 0) * frac;
+    acc[id].cost += baseCost * frac;
+  }
+  const items = Object.values(acc).sort((a, b) => b.cost - a.cost);
+  const cogs = items.reduce((s, r) => s + r.cost, 0);
+  return { revenue, items, cogs, cmv: revenue > 0 ? (cogs / revenue) * 100 : null };
+}
+
+// Consumo (qty + custo) por (insumo × semana) restrito às semanas `weekMondays`, com
+// filtro de operação (rateando uso compartilhado pelos splits). Ordenado por custo total
+// desc. Base da aba "Análise de insumos" — { id, name, unit, category, totalCost, weeks: { [monday]: { qty, cost } } }.
+function buildItemWeekly(movements, sharedSplits, opFilter, weekMondays) {
+  const weekSet = new Set(weekMondays);
+  const acc = {};
+  for (const mv of movements) {
+    const frac = cmvOpFrac(mv, opFilter, sharedSplits);
+    if (!frac) continue;
+    const baseCost = cmvOutCost(mv);
+    if (!baseCost) continue;
+    const d = _spDay(mv.at);
+    if (!d) continue;
+    const mon = weekMonday(d);
+    if (!weekSet.has(mon)) continue;
+    const id = mv.itemId || mv.item;
+    if (!acc[id]) acc[id] = { id, name: mv.item, unit: mv.unit, category: mv.categoryName, totalCost: 0, weeks: {} };
+    const qty  = Math.abs(Number(mv.delta) || 0) * frac;
+    const cost = baseCost * frac;
+    acc[id].totalCost += cost;
+    if (!acc[id].weeks[mon]) acc[id].weeks[mon] = { qty: 0, cost: 0 };
+    acc[id].weeks[mon].qty  += qty;
+    acc[id].weeks[mon].cost += cost;
+  }
+  return Object.values(acc).sort((a, b) => b.totalCost - a.totalCost);
+}
+
 function CMV({ setPage }) {
-  const [view, setView] = useState("consolidado"); // consolidado | items
+  const [view, setView] = useState("consolidado"); // consolidado | items | semanal
   const [opFilter, setOpFilter] = useState("all");  // all | <operation slug>
   const [period, setPeriod] = useState("mtd"); // mtd | today | yesterday | 7d | 30d
   const dbStatus = useDbStatus?.() || { isOnline: false, state: "offline" };
@@ -198,6 +344,15 @@ function CMV({ setPage }) {
 
   // Splits de rateio das requisições "Uso compartilhado" → { [requestId]: [{op, pct}] }
   const [sharedSplits, setSharedSplits] = useState({});
+
+  // Aba "Semanal" · janela própria (semana atual + 7 completas), independe do período.
+  const [weeklyRevenue, setWeeklyRevenue] = useState([]);
+  const [weeklyMovements, setWeeklyMovements] = useState([]);
+  const [weeklySharedSplits, setWeeklySharedSplits] = useState({});
+  const [weeklyLoading, setWeeklyLoading] = useState(true);
+  const [weeklyOpFilter, setWeeklyOpFilter] = useState("all"); // all | <operation slug>
+  // Semana aberta no modal de detalhe · segunda-feira ISO (YYYY-MM-DD).
+  const [weekDetail, setWeekDetail] = useState(null);
 
   useEffect(() => {
     if (dbStatus.state === "checking") return;
@@ -255,6 +410,44 @@ function CMV({ setPage }) {
     return () => { cancelled = true; };
   }, [dbStatus.state, dbStatus.isOnline, period]);
 
+  // Carrega a janela da aba "Semanal" uma vez (não depende do filtro de período):
+  // semana atual + 7 semanas completas (Seg→Dom).
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setWeeklyLoading(false); return; }
+    let cancelled = false;
+    setWeeklyLoading(true);
+    (async () => {
+      const ctx = await dbGetCurrentContext?.();
+      const tid = ctx?.tenant?.id;
+      if (cancelled || !tid) { setWeeklyLoading(false); return; }
+      const curMon = weekMonday(_ymd(new Date()));
+      const start = new Date(curMon + "T00:00:00"); start.setDate(start.getDate() - 7 * 7);
+      const fromDate = _ymd(start);
+      const toDate   = _ymd(new Date());
+      const fromIso = new Date(fromDate + "T00:00:00").toISOString();
+      const toEnd   = new Date(toDate   + "T23:59:59.999").toISOString();
+      const [revRes, movRes] = await Promise.all([
+        dbListRevenueEntries?.(tid, fromDate, toDate) || { data: [] },
+        dbListStockMovements?.(tid, fromIso, toEnd, { limit: 20000 }) || { data: [] },
+      ]);
+      if (cancelled) return;
+      const movsData = movRes.data || [];
+      // Splits das requisições compartilhadas — necessários para ratear o custo ao
+      // filtrar por operação (sem filtro, a soma independe do rateio).
+      const reqIds = movsData
+        .filter((m) => m.referenceType === "kitchen_request" && m.referenceId)
+        .map((m) => m.referenceId);
+      const splitsRes = await dbListSharedSplits?.(tid, reqIds) || { data: {} };
+      if (cancelled) return;
+      setWeeklyRevenue(revRes.data || []);
+      setWeeklyMovements(movsData);
+      setWeeklySharedSplits(splitsRes.data || {});
+      setWeeklyLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.state, dbStatus.isOnline]);
+
   // Resolve splits (op uuid → slug/name/color) usando as operações carregadas no MOCK.
   const sharedSplitsResolved = useMemo(() => {
     const out = {};
@@ -266,6 +459,18 @@ function CMV({ setPage }) {
     }
     return out;
   }, [sharedSplits]);
+
+  // Mesma resolução, para a janela própria da aba "Semanal".
+  const weeklySplitsResolved = useMemo(() => {
+    const out = {};
+    for (const [reqId, splits] of Object.entries(weeklySharedSplits)) {
+      out[reqId] = splits.map((s) => {
+        const op = MOCK.opById(s.op);
+        return { slug: op?.slug || s.op, name: op?.name || "—", color: op?.color || "var(--fg-3)", pct: s.pct };
+      });
+    }
+    return out;
+  }, [weeklySharedSplits]);
 
   const daily = useMemo(
     () => buildDailyRows(revenueEntries, movements, sharedSplitsResolved),
@@ -445,6 +650,38 @@ function CMV({ setPage }) {
     return { days: dates.map(dayLabel), dates, rows };
   }, [heatRevenue, heatMovements, sharedSplitsResolved]);
 
+  // Operações presentes na janela semanal — alimentam o filtro da aba.
+  const weeklyAvailableOps = useMemo(() => {
+    const seen = new Map();
+    for (const mv of weeklyMovements) {
+      if (!mv.operationId || mv.op === "—") continue;
+      if (!seen.has(mv.op)) seen.set(mv.op, { slug: mv.op, name: mv.operationName, color: mv.operationColor });
+    }
+    return [...seen.values()].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  }, [weeklyMovements]);
+
+  // Reseta o filtro semanal se a operação some da janela.
+  useEffect(() => {
+    if (weeklyOpFilter !== "all" && !weeklyAvailableOps.some((o) => o.slug === weeklyOpFilter)) setWeeklyOpFilter("all");
+  }, [weeklyAvailableOps, weeklyOpFilter]);
+
+  // Semanas (Seg→Dom) da janela própria · mais recente primeiro · filtradas por operação.
+  const weekly = useMemo(
+    () => buildWeeklyRows(weeklyRevenue, weeklyMovements, weeklySplitsResolved, weeklyOpFilter),
+    [weeklyRevenue, weeklyMovements, weeklySplitsResolved, weeklyOpFilter],
+  );
+  const currentWeekMon = weekMonday(_ymd(new Date()));
+
+  // Análise de insumos · top 10 por custo nas semanas completas + série semanal de uso.
+  const itemsAnalysis = useMemo(() => {
+    const complete = weekly.filter((w) => w.week < currentWeekMon)
+      .slice().sort((a, b) => a.week.localeCompare(b.week)); // ascendente p/ série temporal
+    const weekMondays = complete.map((w) => w.week);
+    const revByWeek = Object.fromEntries(complete.map((w) => [w.week, w.revenue]));
+    const items = buildItemWeekly(weeklyMovements, weeklySplitsResolved, weeklyOpFilter, weekMondays).slice(0, 12);
+    return { weekMondays, revByWeek, items };
+  }, [weekly, currentWeekMon, weeklyMovements, weeklySplitsResolved, weeklyOpFilter]);
+
   const periodLabel = {
     mtd: "mês atual até hoje",
     today: "hoje",
@@ -489,7 +726,7 @@ function CMV({ setPage }) {
           )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          <CmvPeriodTabs value={period} onChange={setPeriod} />
+          {view !== "semanal" && view !== "insumos" && <CmvPeriodTabs value={period} onChange={setPeriod} />}
           {loading && (
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 6,
@@ -528,6 +765,27 @@ function CMV({ setPage }) {
           onOpFilter={setOpFilter}
           periodLabel={periodLabel}
           source={source}
+        />
+      ) : view === "semanal" ? (
+        <CmvWeeklyView
+          rows={weekly}
+          currentWeekMon={currentWeekMon}
+          loading={weeklyLoading}
+          source={source}
+          availableOps={weeklyAvailableOps}
+          opFilter={weeklyOpFilter}
+          onOpFilter={setWeeklyOpFilter}
+          onOpenWeek={(mon) => setWeekDetail(mon)}
+        />
+      ) : view === "insumos" ? (
+        <CmvItemsAnalysisView
+          data={itemsAnalysis}
+          loading={weeklyLoading}
+          source={source}
+          availableOps={weeklyAvailableOps}
+          opFilter={weeklyOpFilter}
+          onOpFilter={setWeeklyOpFilter}
+          onOpenWeek={(mon) => setWeekDetail(mon)}
         />
       ) : (
       <>
@@ -756,6 +1014,17 @@ function CMV({ setPage }) {
       )}
       </>
       )}
+
+      {weekDetail && (
+        <CmvWeekDetailModal
+          week={weekDetail}
+          movements={weeklyMovements}
+          revenueEntries={weeklyRevenue}
+          sharedSplits={weeklySplitsResolved}
+          opFilter={weeklyOpFilter}
+          onClose={() => setWeekDetail(null)}
+        />
+      )}
     </div>
   );
 }
@@ -826,6 +1095,8 @@ function CmvViewTabs({ value, onChange }) {
   const opts = [
     { id: "consolidado", label: "Consolidado" },
     { id: "items",       label: "Por item" },
+    { id: "semanal",     label: "Semanal" },
+    { id: "insumos",     label: "Análise de insumos" },
   ];
   return (
     <div style={{ display: "inline-flex", padding: 2, background: "var(--bg-2)", borderRadius: 6, border: "1px solid var(--line)", alignSelf: "flex-start" }}>
@@ -1026,6 +1297,299 @@ function CmvItemsView({ rows, totalCost, scope, availableOps, opFilter, onOpFilt
   );
 }
 
+// Barra de filtro por operação · chips "Todas" + uma por operação (com cor).
+function CmvOpFilterBar({ availableOps, opFilter, onOpFilter }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase", marginRight: 2 }}>
+        Operação
+      </span>
+      <div style={{ display: "flex", padding: 2, background: "var(--bg-2)", borderRadius: 4, border: "1px solid var(--line)", flexWrap: "wrap" }}>
+        {[{ slug: "all", name: "Todas", color: null }, ...availableOps].map((o) => {
+          const active = o.slug === opFilter;
+          return (
+            <button key={o.slug} onClick={() => onOpFilter(o.slug)} style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "5px 12px", fontSize: 12,
+              background: active ? "var(--bg-3)" : "transparent",
+              border: "none", borderRadius: 2, cursor: "pointer",
+              color: active ? "var(--fg-0)" : "var(--fg-2)",
+              fontWeight: active ? 500 : 400,
+            }}>
+              {o.color && <span style={{ width: 6, height: 6, borderRadius: 50, background: o.color }} />}
+              {o.name}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Gráfico de barras do CMV do insumo, semana a semana. Normaliza pela própria escala
+// (o CMV de um único insumo costuma ser baixo). A última semana é destacada.
+function ItemCmvBars({ series, unit, lastColor }) {
+  const H = 64;
+  const valid = series.filter((s) => s.cmv != null).map((s) => s.cmv);
+  const max = valid.length ? Math.max(...valid) : 1;
+  const qfmt = (q) => (Number(q) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+  return (
+    <div style={{ display: "flex", alignItems: "flex-end", gap: 6 }}>
+      {series.map((s, i) => {
+        const isLast = i === series.length - 1;
+        const h = s.cmv != null ? Math.max(3, (s.cmv / (max || 1)) * H) : 0;
+        return (
+          <div key={s.mon} style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+            <span className="mono" style={{ fontSize: 9, color: s.cmv != null ? "var(--fg-2)" : "var(--fg-3)" }}>
+              {s.cmv != null ? s.cmv.toFixed(1) : "—"}
+            </span>
+            <div style={{ width: "100%", height: H, display: "flex", alignItems: "flex-end" }}>
+              <div
+                title={`${weekRangeShort(s.mon)} · ${qfmt(s.qty)} ${unit} · CMV ${s.cmv != null ? s.cmv.toFixed(2) + "%" : "—"} · ${_fmtBRLc(s.cost)}`}
+                style={{
+                  width: "100%", height: h, borderRadius: "3px 3px 0 0",
+                  background: s.cmv == null ? "var(--bg-3)" : (isLast ? lastColor : "var(--accent)"),
+                  opacity: s.cmv == null ? 0.4 : 1,
+                }}
+              />
+            </div>
+            <span className="mono" style={{ fontSize: 8.5, color: "var(--fg-3)", whiteSpace: "nowrap" }}>
+              {weekTick(s.mon)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Box individual de um insumo · CMV (custo do insumo ÷ faturamento) semana a semana,
+// com o valor da última semana em destaque e a variação (pp) vs a semana anterior.
+function ItemCmvCard({ rank, card, onOpenWeek }) {
+  const { item, series, cmvNow, delta } = card;
+  const last = series[series.length - 1];
+  const up = delta != null && delta > 0.05;   // CMV subindo (custo cresce mais que o faturamento)
+  const down = delta != null && delta < -0.05;
+  const deltaColor = delta == null ? "var(--fg-3)" : (up ? "var(--crit)" : down ? "var(--ok)" : "var(--warn)");
+  const lastColor  = up ? "var(--crit)" : down ? "var(--ok)" : "var(--accent-bright)";
+
+  return (
+    <div className="card" onClick={() => last && onOpenWeek(last.mon)} style={{ cursor: "pointer", padding: 0 }}>
+      <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line-soft)", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", flexShrink: 0 }}>#{rank}</span>
+            <span style={{ color: "var(--fg-0)", fontWeight: 500, fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.name}</span>
+          </div>
+          {item.category && (
+            <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 3 }}>
+              {item.category}
+            </div>
+          )}
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div className="mono" style={{ fontSize: 18, fontWeight: 500, color: cmvNow != null ? "var(--fg-0)" : "var(--fg-3)" }}>
+            {cmvNow != null ? `${cmvNow.toFixed(2)}%` : "—"}
+          </div>
+          <div className="mono" style={{ fontSize: 10, color: deltaColor, marginTop: 2, whiteSpace: "nowrap" }}>
+            {delta == null ? "CMV do insumo" : `${delta >= 0 ? "+" : ""}${delta.toFixed(2)} pp`}
+          </div>
+        </div>
+      </div>
+      <div style={{ padding: "12px 14px 10px" }}>
+        <ItemCmvBars series={series} unit={item.unit} lastColor={lastColor} />
+      </div>
+    </div>
+  );
+}
+
+// Aba "Análise de insumos" · top 10 insumos por custo, cada um num box com o CMV
+// individual (custo do insumo ÷ faturamento) semana a semana. Só semanas completas com
+// faturamento entram no gráfico; a última semana é a referência do destaque/variação.
+function CmvItemsAnalysisView({ data, loading, source, availableOps, opFilter, onOpFilter, onOpenWeek }) {
+  const { weekMondays, revByWeek, items } = data;
+
+  if (loading) {
+    return <div style={{ padding: 40, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>Carregando análise de insumos…</div>;
+  }
+
+  // Só semanas completas com faturamento entram no gráfico (semanas sem faturamento
+  // teriam CMV indefinido). Eixo X igual para todos os boxes.
+  const chartWeeks = weekMondays.filter((m) => (revByWeek[m] || 0) > 0);
+  const n = chartWeeks.length;
+  const hasPair = n >= 2;
+  const w0 = chartWeeks[n - 1];
+  const w1 = chartWeeks[n - 2];
+  const revW0 = w0 ? revByWeek[w0] : 0;
+  const revW1 = w1 ? revByWeek[w1] : 0;
+  const revGrowth = revW1 > 0 ? ((revW0 - revW1) / revW1) * 100 : null;
+  const revTone = revGrowth == null ? null : (revGrowth >= 0
+    ? { fg: "var(--ok)",   bg: "var(--accent-soft)", line: "var(--accent-line)" }
+    : { fg: "var(--crit)", bg: "var(--crit-soft)",   line: "var(--crit-line)" });
+
+  const cmvOf = (it, m) => {
+    const rev = revByWeek[m] || 0;
+    const cost = it.weeks[m]?.cost || 0;
+    return rev > 0 ? (cost / rev) * 100 : null;
+  };
+  const cards = items.map((it) => {
+    const series = chartWeeks.map((m) => ({ mon: m, cost: it.weeks[m]?.cost || 0, qty: it.weeks[m]?.qty || 0, cmv: cmvOf(it, m) }));
+    const cmvNow  = n ? series[n - 1].cmv : null;
+    const cmvPrev = n > 1 ? series[n - 2].cmv : null;
+    const delta = (cmvNow != null && cmvPrev != null) ? cmvNow - cmvPrev : null;
+    return { item: it, series, cmvNow, delta };
+  });
+  const alertCount = cards.filter((c) => c.delta != null && c.delta > 0.05).length;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <CmvOpFilterBar availableOps={availableOps} opFilter={opFilter} onOpFilter={onOpFilter} />
+
+      {!hasPair ? (
+        <div className="card" style={{ padding: 40, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+          São necessárias ao menos 2 semanas completas (Seg → Dom) com faturamento para comparar.
+          {source !== "db" && <span> · {source === "loading" ? "Carregando…" : "DB offline"}</span>}
+        </div>
+      ) : (
+        <>
+          {/* Comparativo semana sobre semana */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+            <CmvKpiCard label="Faturamento (semana s/ semana)" value={_fmtPct(revGrowth)} sub={`${weekRangeShort(w1)} → ${weekRangeShort(w0)}`} tone={revTone} hero />
+            <CmvKpiCard label="Faturamento da semana" value={_fmtBRLci(revW0)} sub={weekRangeShort(w0)} />
+            <CmvKpiCard label="Insumos com CMV em alta" value={String(alertCount)} sub="custo subindo mais que o faturamento" tone={alertCount > 0 ? { fg: "var(--crit)" } : null} />
+          </div>
+
+          <div>
+            <h3 className="card-title">Top 12 insumos · CMV individual semanal</h3>
+            <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+              Custo do insumo ÷ faturamento, semana a semana · variação (pp) vs a semana anterior · clique no box p/ detalhar a semana
+            </span>
+          </div>
+
+          {cards.length === 0 ? (
+            <div className="card" style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>Sem consumo nas semanas completas.</div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 12 }}>
+              {cards.map((c, i) => <ItemCmvCard key={c.item.id} rank={i + 1} card={c} onOpenWeek={onOpenWeek} />)}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Aba "Semanal" · CMV por ciclo Seg→Dom. Destaca a semana atual (incompleta) e lista
+// as semanas completas (mais recente primeiro). Cada semana abre o modal de insumos.
+function CmvWeeklyView({ rows, currentWeekMon, loading, source, availableOps, opFilter, onOpFilter, onOpenWeek }) {
+  const current = rows.find((r) => r.week === currentWeekMon)
+    || { week: currentWeekMon, revenue: 0, cogs: 0, cmv: null, margin: null };
+  const complete = rows.filter((r) => r.week < currentWeekMon);
+
+  const totRev  = complete.reduce((s, w) => s + w.revenue, 0);
+  const totCogs = complete.reduce((s, w) => s + w.cogs, 0);
+  const avgCmv  = totRev > 0 ? (totCogs / totRev) * 100 : null;
+  const avgTone = avgCmv != null ? cmvTone(avgCmv) : null;
+  const curTone = current.cmv != null ? cmvTone(current.cmv) : null;
+  const maxBar  = Math.max(45, ...complete.map((w) => w.cmv || 0), current.cmv || 0);
+
+  if (loading) {
+    return <div style={{ padding: 40, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>Carregando análise semanal…</div>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <CmvOpFilterBar availableOps={availableOps} opFilter={opFilter} onOpFilter={onOpFilter} />
+
+      {/* Semana atual · incompleta */}
+      <div className="card" onClick={() => onOpenWeek(current.week)} style={{
+        cursor: "pointer",
+        borderColor: curTone ? curTone.line : "var(--line)",
+        background: curTone ? `linear-gradient(180deg, ${curTone.bg}, transparent 70%)` : undefined,
+      }}>
+        <div className="card-header">
+          <div>
+            <h3 className="card-title" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              Semana atual
+              <span style={{
+                fontFamily: "var(--mono)", fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase",
+                color: "var(--warn)", border: "1px solid var(--warn-line)", background: "var(--warn-soft)",
+                borderRadius: 99, padding: "2px 8px",
+              }}>
+                Em andamento · incompleta
+              </span>
+            </h3>
+            <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+              {weekRangeFull(current.week)} · Seg → Dom · clique p/ ver insumos
+            </span>
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, padding: 16 }}>
+          <CmvKpiCard label="CMV %" value={current.cmv != null ? `${current.cmv.toFixed(1)}%` : "—"} sub={curTone ? curTone.label : "sem faturamento"} tone={curTone} hero />
+          <CmvKpiCard label="Faturamento" value={current.revenue > 0 ? _fmtBRLci(current.revenue) : "—"} sub="parcial da semana" />
+          <CmvKpiCard label="Custo (saídas)" value={_fmtBRLci(current.cogs)} sub="consumo × custo unit." />
+          <CmvKpiCard label="Margem" value={current.margin != null ? `${current.margin.toFixed(1)}%` : "—"} sub="sobre faturamento" tone={curTone} mode="margin" />
+        </div>
+      </div>
+
+      {/* Semanas completas */}
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <h3 className="card-title">Semanas completas · Seg → Dom</h3>
+            <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+              CMV por saídas de estoque · {complete.length} {complete.length === 1 ? "semana" : "semanas"} · clique p/ detalhar
+            </span>
+          </div>
+          {avgCmv != null && (
+            <span className="mono" style={{ fontSize: 12.5, color: avgTone.fg, fontWeight: 500 }} title="Média ponderada pelo faturamento">
+              média {avgCmv.toFixed(1)}%
+            </span>
+          )}
+        </div>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Semana</th>
+              <th className="num">Faturamento</th>
+              <th className="num">Custo</th>
+              <th className="num">CMV</th>
+              <th style={{ width: 160 }}>Faixa</th>
+              <th className="num">Margem</th>
+            </tr>
+          </thead>
+          <tbody>
+            {complete.length === 0 ? (
+              <tr><td colSpan={6} className="dim" style={{ textAlign: "center", padding: 24 }}>
+                {source === "db" ? "Sem semanas completas na janela carregada" : (source === "loading" ? "Carregando…" : "DB offline")}
+              </td></tr>
+            ) : complete.map((w) => {
+              const tone = w.cmv != null ? cmvTone(w.cmv) : null;
+              return (
+                <tr key={w.week} onClick={() => onOpenWeek(w.week)} style={{ cursor: "pointer" }}>
+                  <td>
+                    <div style={{ color: "var(--fg-0)", fontWeight: 500, fontSize: 12.5 }}>{weekRangeShort(w.week)}</div>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", marginTop: 2 }}>
+                      {new Date(w.week + "T12:00:00").getFullYear()}
+                    </div>
+                  </td>
+                  <td className="num">{_fmtBRLci(w.revenue)}</td>
+                  <td className="num">{_fmtBRLci(w.cogs)}</td>
+                  <td className="num">
+                    {tone ? <span className="mono" style={{ color: tone.fg, fontWeight: 500 }}>{w.cmv.toFixed(1)}%</span> : <span className="dim">—</span>}
+                  </td>
+                  <td>{tone ? <CmvBar pct={w.cmv} max={maxBar} tone={tone} /> : null}</td>
+                  <td className="num" style={{ color: "var(--fg-1)" }}>{w.margin != null ? `${w.margin.toFixed(1)}%` : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function CmvKpiCard({ label, value, sub, tone, hero, mode }) {
   const valueColor = tone
     ? (mode === "margin" ? "var(--fg-0)" : tone.fg)
@@ -1177,16 +1741,161 @@ function CmvDayDetailModal({ op, date, movements, revenueEntries, sharedSplits, 
   );
 }
 
+// Modal de detalhe de uma semana (Seg→Dom): faturamento, insumos que compõem o CMV
+// da semana (respeitando o filtro de operação) e ações de copiar p/ WhatsApp / exportar PDF.
+function CmvWeekDetailModal({ week, movements, revenueEntries, sharedSplits, opFilter = "all", onClose }) {
+  const ModalShell = window.ModalShell;
+  const rangeShort = weekRangeShort(week);
+  const rangeFull  = weekRangeFull(week);
+  const isCurrent  = week === weekMonday(_ymd(new Date()));
+  const opName = opFilter === "all" ? null : (MOCK.opById(opFilter)?.name || opFilter);
+  const detail = useMemo(
+    () => buildWeekDetail(movements, revenueEntries, week, sharedSplits, opFilter),
+    [movements, revenueEntries, week, sharedSplits, opFilter],
+  );
+  const tone = detail.cmv != null ? cmvTone(detail.cmv) : null;
+  const cmvLabel = detail.cmv != null ? `${detail.cmv.toFixed(1)}%` : "—";
+  const [copying, setCopying] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const buildWaText = () => {
+    const lines = [
+      `*CMV semanal — ${rangeShort}*`,
+      `${rangeFull} (Seg→Dom)${isCurrent ? " · em andamento" : ""}`,
+      ...(opName ? [`Operação: ${opName}`] : []),
+      "",
+      `Faturamento: ${_fmtBRLc(detail.revenue)}`,
+      `Custo (CMV): ${_fmtBRLc(detail.cogs)}`,
+      `CMV: ${cmvLabel}`,
+      "",
+      `*Insumos consumidos (${detail.items.length})*`,
+    ];
+    if (detail.items.length === 0) {
+      lines.push("— sem consumo registrado —");
+    } else {
+      for (const it of detail.items) {
+        const q = (Number(it.qty) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+        lines.push(`• ${it.name} — ${q} ${it.unit} · ${_fmtBRLc(it.cost)}`);
+      }
+    }
+    return lines.join("\n");
+  };
+
+  const onCopy = async () => {
+    if (copying) return;
+    setCopying(true);
+    try {
+      await navigator.clipboard.writeText(buildWaText());
+      window.showToast?.("Resumo copiado · cole no WhatsApp", { tone: "ok" });
+    } catch {
+      window.showToast?.("Não foi possível copiar para a área de transferência", { tone: "crit", ttl: 4500 });
+    } finally {
+      setCopying(false);
+    }
+  };
+
+  const onExport = () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
+      const html = buildCmvExportHtml({
+        docTitle: `CMV semanal · ${rangeFull}${opName ? ` · ${opName}` : ""}`,
+        heading:  `CMV semanal — ${rangeShort}${opName ? ` · ${opName}` : ""}`,
+        metaText: `${rangeFull} · Seg→Dom${isCurrent ? " · em andamento" : ""}`,
+        emptyMsg: "Sem consumo de estoque nesta semana.",
+        detail, cmvLabel, tenantName,
+      });
+      const w = window.open("", "_blank");
+      if (!w) {
+        window.showToast?.("Pop-up bloqueado · permita pop-ups para exportar", { tone: "warn", ttl: 4500 });
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <ModalShell
+      title={`Semana ${rangeShort}${opName ? ` · ${opName}` : ""}`}
+      subtitle={`${rangeFull} · Seg → Dom${isCurrent ? " · em andamento" : ""} · faturamento, consumo e CMV`}
+      width={640}
+      onClose={onClose}
+      footer={<>
+        <button className="btn" data-variant="ghost" data-size="sm" onClick={onCopy} disabled={copying}>
+          <I.WhatsApp size={13} />{copying ? "Copiando…" : "Copiar p/ WhatsApp"}
+        </button>
+        <button className="btn" data-size="sm" onClick={onExport} disabled={exporting}>
+          <I.Print size={13} />{exporting ? "Exportando…" : "Exportar PDF"}
+        </button>
+      </>}
+    >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
+        <CmvKpiCard label="Faturamento" value={detail.revenue > 0 ? _fmtBRLci(detail.revenue) : "—"} sub="vendas da semana" />
+        <CmvKpiCard label="Custo (CMV)" value={_fmtBRLci(detail.cogs)} sub="saídas × custo unit." />
+        <CmvKpiCard label="CMV" value={cmvLabel} sub={tone ? tone.label : "sem faturamento"} tone={tone} hero />
+      </div>
+
+      <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
+        Insumos que compõem o CMV · {detail.items.length} {detail.items.length === 1 ? "item" : "itens"}
+      </div>
+      <table className="table">
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th className="num">Qtd.</th>
+            <th className="num">Valor</th>
+            <th className="num">% do consumo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {detail.items.length === 0 ? (
+            <tr><td colSpan={4} className="dim" style={{ textAlign: "center", padding: 24 }}>Sem consumo de estoque nesta semana.</td></tr>
+          ) : detail.items.map((it) => {
+            const pct = detail.cogs > 0 ? (it.cost / detail.cogs) * 100 : 0;
+            return (
+              <tr key={it.id}>
+                <td style={{ color: "var(--fg-0)", fontWeight: 500 }}>{it.name}</td>
+                <td className="num mono" style={{ color: "var(--fg-1)" }}>
+                  {(Number(it.qty) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 })} {it.unit}
+                </td>
+                <td className="num mono" style={{ color: "var(--fg-0)" }}>{_fmtBRLc(it.cost)}</td>
+                <td className="num mono" style={{ color: "var(--fg-2)" }}>{pct.toFixed(1)}%</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </ModalShell>
+  );
+}
+
 // Documento A4 standalone do detalhe do dia (mesma técnica da DRE: window.print →
 // "Salvar como PDF"). Sem dependências novas.
 function buildCmvDayExportHtml({ opName, dayFull, detail, cmvLabel, tenantName }) {
+  return buildCmvExportHtml({
+    docTitle: `CMV diário · ${opName} · ${dayFull}`,
+    heading:  `CMV diário — ${opName}`,
+    metaText: dayFull,
+    emptyMsg: "Sem consumo de estoque neste dia.",
+    detail, cmvLabel, tenantName,
+  });
+}
+
+// Builder genérico do documento A4 (dia ou semana). `metaText` já sem o nome do tenant
+// (prefixado aqui). `emptyMsg` é a linha exibida quando não houve consumo.
+function buildCmvExportHtml({ docTitle, heading, metaText, emptyMsg, detail, cmvLabel, tenantName }) {
   const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const fmt = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const qfmt = (v) => (Number(v) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
   const rows = detail.items.map((it) => {
     const pct = detail.cogs > 0 ? (it.cost / detail.cogs) * 100 : 0;
     return `<tr><td>${esc(it.name)}</td><td class="num">${qfmt(it.qty)} ${esc(it.unit)}</td><td class="num">${fmt(it.cost)}</td><td class="num">${pct.toFixed(1)}%</td></tr>`;
-  }).join("") || `<tr><td colspan="4" class="empty">Sem consumo de estoque neste dia.</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="empty">${esc(emptyMsg)}</td></tr>`;
 
   const now = new Date();
   const genAt = `${String(now.getDate()).padStart(2,"0")}/${String(now.getMonth()+1).padStart(2,"0")}/${now.getFullYear()} ${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
@@ -1195,7 +1904,7 @@ function buildCmvDayExportHtml({ opName, dayFull, detail, cmvLabel, tenantName }
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8" />
-<title>CMV diário · ${esc(opName)} · ${esc(dayFull)}</title>
+<title>${esc(docTitle)}</title>
 <style>
   @page { size: A4; margin: 12mm; }
   * { box-sizing: border-box; }
@@ -1227,8 +1936,8 @@ function buildCmvDayExportHtml({ opName, dayFull, detail, cmvLabel, tenantName }
   <span>No diálogo de impressão, escolha o destino "Salvar como PDF".</span>
 </div>
 <main>
-  <h1>CMV diário — ${esc(opName)}</h1>
-  <div class="meta">${tenantName ? `${esc(tenantName)} · ` : ""}${esc(dayFull)}</div>
+  <h1>${esc(heading)}</h1>
+  <div class="meta">${tenantName ? `${esc(tenantName)} · ` : ""}${esc(metaText)}</div>
   <div class="kpis">
     <div><span>Faturamento</span><b>${fmt(detail.revenue)}</b></div>
     <div><span>Custo (CMV)</span><b>${fmt(detail.cogs)}</b></div>
