@@ -24,6 +24,7 @@ function _dashRangeYMD(period) {
   else if (period === "yesterday") { from.setDate(from.getDate() - 1); from.setHours(0, 0, 0, 0); to = new Date(from); to.setHours(23, 59, 59, 999); }
   else if (period === "7d") { from.setDate(from.getDate() - 6); from.setHours(0, 0, 0, 0); }
   else if (period === "30d") { from.setDate(from.getDate() - 29); from.setHours(0, 0, 0, 0); }
+  else if (period === "lastmonth") { from.setDate(1); from.setMonth(from.getMonth() - 1); from.setHours(0, 0, 0, 0); to = new Date(from.getFullYear(), from.getMonth() + 1, 0, 23, 59, 59, 999); }
   else { from.setDate(1); from.setHours(0, 0, 0, 0); }
   return [from.toISOString().slice(0, 10), (to || new Date()).toISOString().slice(0, 10)];
 }
@@ -32,7 +33,7 @@ function Dashboard({ scope, setPage }) {
   const op = MOCK.opById(scope);
   const isConsolidated = scope === "all";
   const [period, setPeriod] = useState("mtd");
-  const periodLabel = { "1d": "Hoje", "yesterday": "Ontem", "7d": "Últimos 7 dias", "30d": "Últimos 30 dias", "mtd": "Mês atual" }[period];
+  const periodLabel = { "1d": "Hoje", "yesterday": "Ontem", "7d": "Últimos 7 dias", "30d": "Últimos 30 dias", "mtd": "Mês atual", "lastmonth": "Mês passado" }[period];
   const sess = (typeof useSession === "function") ? useSession() : null;
   const [tenantNameLive, setTenantNameLive] = useState(sess?.tenantName || null);
   useEffect(() => {
@@ -115,6 +116,12 @@ function Dashboard({ scope, setPage }) {
       } else if (period === "30d") {
         fromDate.setDate(fromDate.getDate() - 29); // 30 dias incluindo hoje
         fromDate.setHours(0, 0, 0, 0);
+      } else if (period === "lastmonth") {
+        // Mês civil completo anterior: dia 1 do mês passado a 23:59:59 do último dia
+        fromDate.setDate(1);
+        fromDate.setMonth(fromDate.getMonth() - 1);
+        fromDate.setHours(0, 0, 0, 0);
+        toDate = new Date(fromDate.getFullYear(), fromDate.getMonth() + 1, 0, 23, 59, 59, 999);
       } else { // mtd: dia 1 do mês corrente até agora
         fromDate.setDate(1);
         fromDate.setHours(0, 0, 0, 0);
@@ -645,6 +652,7 @@ function computeKpi(scope, dbData = {}, period = "7d") {
     "7d":        "vs semana anterior",
     "30d":       "vs 30 dias anteriores",
     "mtd":       "vs mês anterior",
+    "lastmonth": "vs mês anterior",
   }[period] || "vs período anterior";
 
   // Filtra por operação se não for consolidado
@@ -1251,6 +1259,7 @@ function PeriodPicker({ value, onChange, label }) {
     { id: "7d",        label: "Últimos 7 dias" },
     { id: "30d",       label: "Últimos 30 dias" },
     { id: "mtd",       label: "Mês atual" },
+    { id: "lastmonth", label: "Mês passado" },
   ];
   useEffect(() => {
     if (!open) return;

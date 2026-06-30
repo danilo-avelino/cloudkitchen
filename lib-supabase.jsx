@@ -1387,6 +1387,54 @@ async function dbListTechSheets(tenantId) {
   return { data: (data || []).map(mapTechSheetFromDb), source: "db", error: null };
 }
 
+// Metadados de um insumo para o modal de detalhe (SKU, fornecedor, categoria).
+async function dbGetInsumoMeta(itemId) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client.from("stock_items")
+    .select("code, name, unit, category:stock_categories(name), supplier:suppliers(name)")
+    .eq("id", itemId).maybeSingle();
+  if (error) return { data: null, source: "mock", error };
+  return {
+    data: data ? {
+      sku: data.code || null, name: data.name, unit: data.unit,
+      category: data.category?.name || null, supplier: data.supplier?.name || null,
+    } : null,
+    source: "db", error: null,
+  };
+}
+
+// Pratos (fichas técnicas) que consomem um insumo: porção (qty/rendimento) e peso do
+// insumo no custo do prato. Opcionalmente filtrado por operação (slug). Ordenado por peso.
+async function dbListInsumoUsage(tenantId, stockItemId, opSlug = "all") {
+  if (!isDbOnline() || !_client) return { data: [], source: "mock", error: null };
+  const { data, error } = await _client.from("tech_sheets")
+    .select(`
+      id, name, yield_qty, yield_unit, operation:operations(slug, name),
+      items:tech_sheet_items(qty, unit, line_cost, stock_item_id)
+    `)
+    .eq("tenant_id", tenantId).eq("is_active", true);
+  if (error) return { data: [], source: "mock", error };
+  const out = [];
+  for (const s of data || []) {
+    if (opSlug !== "all" && s.operation?.slug !== opSlug) continue;
+    const items = s.items || [];
+    const mine = items.find((it) => it.stock_item_id === stockItemId);
+    if (!mine) continue;
+    const totalCost = items.reduce((acc, it) => acc + (Number(it.line_cost) || 0), 0);
+    const yieldQty = Number(s.yield_qty) || 1;
+    out.push({
+      dish: s.name,
+      opSlug: s.operation?.slug || null,
+      opName: s.operation?.name || null,
+      portionQty: (Number(mine.qty) || 0) / (yieldQty || 1),
+      portionUnit: mine.unit || "",
+      pctOfDishCost: totalCost > 0 ? ((Number(mine.line_cost) || 0) / totalCost) * 100 : 0,
+    });
+  }
+  out.sort((a, b) => b.pctOfDishCost - a.pctOfDishCost);
+  return { data: out, source: "db", error: null };
+}
+
 // =====================================================================
 // PREPARATIONS · CRUD
 // =====================================================================
@@ -3164,6 +3212,7 @@ Object.assign(window, {
   dbUpdatePurchaseOrderItem, dbDeletePurchaseOrderItem,
   dbListGoodsReceipts, dbInsertGoodsReceipt,
   dbListTechSheets, dbInsertTechSheet, dbUpdateTechSheet, dbDeleteTechSheet,
+  dbGetInsumoMeta, dbListInsumoUsage,
   dbListPreparations, dbInsertPreparation, dbUpdatePreparation, dbDeletePreparation, dbRecomputeAllCosts,
   dbInsertPreparationItem, dbUpdatePreparationItem, dbDeletePreparationItem,
   dbInsertTechSheetItem, dbUpdateTechSheetItem, dbDeleteTechSheetItem,

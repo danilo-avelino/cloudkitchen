@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Análise de insumos · CMV individual</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* surfaces — modern cool ink */
+  --bg:#0b0c10; --bg2:#0d0e13;
+  --card:#14161d; --card-2:#1a1d26; --card-3:#22252f;
+  --line:rgba(255,255,255,.06); --line-2:rgba(255,255,255,.10); --ring:rgba(255,255,255,.16);
+
+  --tx:#f4f5f8; --tx-2:#a6aab6; --tx-3:#717686; --tx-4:#4c5160;
+
+  /* semantic — custo subindo = ruim / caindo = bom / estável */
+  --up:#ff6b6b; --up-bg:rgba(255,107,107,.12); --up-line:rgba(255,107,107,.32);
+  --down:#34e0a1; --down-bg:rgba(52,224,161,.10); --down-line:rgba(52,224,161,.30);
+  --flat:#f5c451; --flat-bg:rgba(245,196,81,.12); --flat-line:rgba(245,196,81,.3);
+
+  --accent:#8b8cf5; --accent-bg:rgba(139,140,245,.12); --accent-line:rgba(139,140,245,.36);
+
+  --r:18px; --r-sm:12px; --r-xs:9px;
+  --f:"Inter",system-ui,-apple-system,sans-serif;
+  --fd:"Sora","Inter",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:
+    radial-gradient(1100px 520px at 85% -10%, rgba(139,140,245,.07), transparent 58%),
+    radial-gradient(820px 460px at -6% 4%, rgba(52,224,161,.05), transparent 55%),
+    linear-gradient(180deg,var(--bg2),var(--bg) 260px);
+  color:var(--tx);font-family:var(--f);min-height:100vh;
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum" 1,"ss01" 1;
+  letter-spacing:-.005em;padding:0 0 72px;
+}
+.wrap{max-width:1320px;margin:0 auto;padding:0 28px}
+.tnum{font-variant-numeric:tabular-nums}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--tx-3)}
+
+/* ───── notice ───── */
+.notice{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:11px 16px;margin:22px 0 18px;border-radius:var(--r-sm);
+  background:linear-gradient(100deg,rgba(245,196,81,.07),transparent 70%);
+  border:1px solid var(--line);font-size:13px;color:var(--tx-2);
+}
+.notice .dot{width:7px;height:7px;border-radius:50%;background:var(--flat);box-shadow:0 0 12px var(--flat)}
+.notice b{color:var(--tx);font-weight:600}
+.notice .sep{width:1px;height:14px;background:var(--line-2)}
+
+/* ───── tabs ───── */
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:26px;flex-wrap:wrap}
+.tab{appearance:none;background:none;border:0;cursor:pointer;font-family:var(--f);
+  font-size:14px;font-weight:500;color:var(--tx-3);padding:13px 16px;position:relative;transition:color .16s}
+.tab:hover{color:var(--tx-2)}
+.tab[aria-selected="true"]{color:var(--tx)}
+.tab[aria-selected="true"]::after{content:"";position:absolute;left:16px;right:16px;bottom:-1px;height:2px;
+  background:var(--accent);border-radius:2px;box-shadow:0 0 14px var(--accent-line)}
+
+/* ───── operation filter ───── */
+.filterbar{display:flex;align-items:center;gap:16px;margin-bottom:26px;flex-wrap:wrap}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{appearance:none;cursor:pointer;display:inline-flex;align-items:center;gap:9px;
+  padding:9px 15px 9px 13px;border-radius:99px;background:var(--card);border:1px solid var(--line);
+  font-family:var(--f);font-size:13px;font-weight:500;color:var(--tx-2);
+  transition:.16s background,.16s border-color,.16s color,.16s transform}
+.chip:hover{border-color:var(--line-2);color:var(--tx)}
+.chip .pip{width:8px;height:8px;border-radius:50%;background:var(--op);box-shadow:0 0 10px var(--op)}
+.chip[aria-pressed="true"]{background:var(--card-3);border-color:var(--ring);color:var(--tx)}
+
+/* ───── KPIs ───── */
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:40px}
+.kpi{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:var(--r);
+  background:linear-gradient(180deg,var(--card-2),var(--card));padding:22px 24px}
+.kpi .lbl{display:block;margin-bottom:18px}
+.kpi .big{font-family:var(--fd);font-size:40px;font-weight:600;letter-spacing:-.03em;line-height:.95}
+.kpi .sub{font-size:12.5px;color:var(--tx-3);margin-top:14px;display:flex;align-items:center;gap:8px}
+.kpi .sub .arr{color:var(--tx-4)}
+
+.kpi--wow .big{color:var(--down);display:inline-flex;align-items:center;gap:10px}
+.kpi--wow.neg .big{color:var(--up)}
+.kpi--wow .ic{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+  background:var(--down-bg);color:var(--down)}
+.kpi--wow.neg .ic{background:var(--up-bg);color:var(--up)}
+
+.spark{display:flex;align-items:flex-end;gap:4px;height:34px;margin-top:16px}
+.spark i{flex:1;border-radius:4px 4px 2px 2px;background:var(--card-3);min-height:5px}
+.spark i.hi{background:var(--accent);box-shadow:0 0 14px -2px var(--accent)}
+
+.kpi--alta{cursor:pointer;transition:border-color .16s,box-shadow .16s}
+.kpi--alta:hover{border-color:var(--up-line)}
+.kpi--alta .big{color:var(--up);display:inline-flex;align-items:baseline;gap:12px}
+.kpi--alta .hint{font-size:11px;font-weight:600;color:var(--up);opacity:.85;letter-spacing:.02em}
+.kpi--alta[data-active="true"]{border-color:var(--up-line);box-shadow:0 0 0 1px var(--up-line),0 18px 40px -22px var(--up)}
+
+/* ───── section head + toolbar ───── */
+.sec-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:4px}
+.sec-title{font-family:var(--fd);font-size:22px;font-weight:600;letter-spacing:-.02em}
+.sec-title .n{color:var(--accent)}
+.sec-desc{font-size:12.5px;color:var(--tx-3);margin-top:9px}
+.toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.search{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);
+  border-radius:11px;padding:0 13px;height:40px;transition:border-color .16s}
+.search:focus-within{border-color:var(--accent-line)}
+.search svg{width:15px;height:15px;color:var(--tx-3)}
+.search input{background:none;border:0;outline:none;color:var(--tx);font-family:var(--f);font-size:13.5px;width:130px}
+.search input::placeholder{color:var(--tx-4)}
+.seg{display:flex;background:var(--card);border:1px solid var(--line);border-radius:11px;padding:4px;gap:3px}
+.seg button{appearance:none;cursor:pointer;background:none;border:0;border-radius:8px;font-family:var(--f);
+  font-size:12.5px;font-weight:500;color:var(--tx-3);padding:7px 13px;transition:.14s}
+.seg button:hover{color:var(--tx-2)}
+.seg button[aria-pressed="true"]{background:var(--card-3);color:var(--tx)}
+.toggle{appearance:none;cursor:pointer;display:inline-flex;align-items:center;gap:10px;height:40px;padding:0 15px;
+  border-radius:11px;background:var(--card);border:1px solid var(--line);font-family:var(--f);font-size:12.5px;
+  font-weight:500;color:var(--tx-2);transition:.16s}
+.toggle:hover{border-color:var(--line-2)}
+.toggle[aria-pressed="true"]{background:var(--up-bg);border-color:var(--up-line);color:var(--up)}
+.toggle .sw{width:30px;height:17px;border-radius:99px;background:var(--card-3);position:relative;transition:.16s}
+.toggle .sw::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;
+  background:var(--tx-3);transition:.16s}
+.toggle[aria-pressed="true"] .sw{background:var(--up)}
+.toggle[aria-pressed="true"] .sw::after{left:15px;background:#2a0f0f}
+
+/* ───── grid ───── */
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:24px}
+
+/* ───── card ───── */
+.card{--c:var(--up);position:relative;text-align:left;cursor:pointer;width:100%;font-family:inherit;color:inherit;
+  appearance:none;background:linear-gradient(180deg,var(--card-2),var(--card));border:1px solid var(--line);
+  border-radius:var(--r);padding:20px 22px 18px;display:flex;flex-direction:column;gap:18px;
+  transition:transform .2s cubic-bezier(.2,.7,.3,1),border-color .2s,box-shadow .2s;
+  opacity:0;transform:translateY(10px)}
+.card.in{opacity:1;transform:none}
+.card.down{--c:var(--down)} .card.flat{--c:var(--flat)}
+.card:hover{transform:translateY(-4px);border-color:var(--line-2);box-shadow:0 22px 48px -26px rgba(0,0,0,.85)}
+.card:focus-visible{outline:none;border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-bg)}
+
+.card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.card-cat{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.03em;
+  text-transform:uppercase;color:var(--tx-3)}
+.card-cat .cdot{width:6px;height:6px;border-radius:50%;background:var(--catc,var(--tx-4))}
+.card-rank{font-family:var(--fd);font-size:12px;font-weight:600;color:var(--tx-4)}
+.card-name{font-family:var(--fd);font-size:17px;font-weight:600;letter-spacing:-.02em;color:var(--tx);line-height:1.2;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:-6px}
+
+.card-metric{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-top:-4px}
+.card-cmv{font-family:var(--fd);font-size:33px;font-weight:600;letter-spacing:-.03em;line-height:.9}
+.card-cmv .u{font-size:17px;color:var(--tx-3);font-weight:500;margin-left:1px}
+.card-delta{display:inline-flex;align-items:center;gap:5px;font-size:13px;font-weight:600;padding:5px 10px 5px 8px;
+  border-radius:9px;background:color-mix(in srgb,var(--c) 15%,transparent);color:var(--c)}
+.card-delta svg{width:11px;height:11px}
+
+/* chart — the hero */
+.chart{position:relative;height:128px;display:flex;align-items:stretch;gap:11px}
+.bar-col{flex:1;min-width:0;display:grid;grid-template-rows:1fr auto;gap:0}
+.bar-area{position:relative;display:flex;align-items:flex-end;justify-content:center;padding-top:20px}
+.bar{position:relative;width:100%;border-radius:7px 7px 3px 3px;min-height:4px;
+  background:var(--c);transition:filter .15s,transform .15s;cursor:pointer}
+.bar:hover{filter:brightness(1.18) saturate(1.05)}
+.bar.cur{background:linear-gradient(180deg,var(--c),color-mix(in srgb,var(--c) 55%,transparent));
+  box-shadow:0 0 24px -6px var(--c),0 0 0 1px color-mix(in srgb,var(--c) 40%,transparent)}
+.bar-val{position:absolute;left:50%;top:-18px;transform:translateX(-50%);font-size:11.5px;font-weight:500;
+  color:var(--tx-3);white-space:nowrap}
+.bar.cur .bar-val{color:var(--tx);font-weight:600}
+.bar-tick{text-align:center;font-size:10.5px;color:var(--tx-4);padding-top:9px;font-weight:500}
+.bar-col.cur .bar-tick{color:var(--c)}
+
+/* tooltip */
+.tip{position:fixed;z-index:90;pointer-events:none;opacity:0;transform:translateY(4px);
+  transition:opacity .12s,transform .12s;background:var(--card-3);border:1px solid var(--ring);
+  border-radius:12px;padding:11px 13px;min-width:160px;box-shadow:0 20px 46px -14px rgba(0,0,0,.9)}
+.tip.on{opacity:1;transform:none}
+.tip h5{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--tx-3);margin-bottom:9px;text-transform:uppercase}
+.tip .row{display:flex;justify-content:space-between;gap:20px;font-size:12.5px;margin-top:5px}
+.tip .row span{color:var(--tx-3)}
+.tip .row b{color:var(--tx);font-weight:600;font-variant-numeric:tabular-nums}
+.tip .row b.c{color:var(--tipc,var(--tx))}
+
+.empty{grid-column:1/-1;text-align:center;padding:64px 24px;border:1px dashed var(--line-2);border-radius:var(--r);
+  color:var(--tx-3);font-size:14px}
+.empty b{color:var(--tx);display:block;margin-bottom:7px;font-size:15.5px;font-family:var(--fd);font-weight:600}
+
+/* footer */
+.foot{display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap;margin-top:40px;
+  padding-top:20px;border-top:1px solid var(--line);font-size:12px;color:var(--tx-4)}
+.foot .live{display:inline-flex;align-items:center;gap:9px;color:var(--tx-3)}
+.foot .live i{width:7px;height:7px;border-radius:50%;background:var(--down);box-shadow:0 0 10px var(--down);animation:pulse 2.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ═══ MODAL ═══ */
+.overlay{position:fixed;inset:0;z-index:100;display:flex;justify-content:flex-end;
+  background:rgba(6,7,10,.62);backdrop-filter:blur(5px);opacity:0;visibility:hidden;
+  transition:opacity .24s,visibility .24s}
+.overlay.open{opacity:1;visibility:visible}
+.modal{width:min(660px,100%);height:100%;overflow-y:auto;overscroll-behavior:contain;
+  background:linear-gradient(180deg,#15171f,#0e0f14 340px);border-left:1px solid var(--line-2);
+  transform:translateX(32px);transition:transform .28s cubic-bezier(.2,.7,.3,1);
+  box-shadow:-34px 0 90px -34px rgba(0,0,0,.92)}
+.overlay.open .modal{transform:none}
+.modal::-webkit-scrollbar{width:11px}
+.modal::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:6px;border:3px solid transparent;background-clip:content-box}
+
+.m-head{position:sticky;top:0;z-index:5;padding:26px 30px 20px;
+  background:linear-gradient(180deg,#171922,rgba(23,25,34,.85));backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.m-head-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.m-badge{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.04em;
+  padding:6px 11px;border-radius:8px;background:var(--up-bg);color:var(--up);border:1px solid var(--up-line);text-transform:uppercase}
+.m-title{font-family:var(--fd);font-size:28px;font-weight:700;letter-spacing:-.03em;margin:14px 0 4px;line-height:1.08}
+.m-cat{font-size:13px;color:var(--tx-3);font-weight:500}
+.m-close{appearance:none;cursor:pointer;width:38px;height:38px;flex:0 0 auto;border-radius:11px;background:var(--card);
+  border:1px solid var(--line);color:var(--tx-2);display:flex;align-items:center;justify-content:center;transition:.14s}
+.m-close:hover{background:var(--card-3);color:var(--tx);border-color:var(--line-2)}
+.m-close:focus-visible{outline:none;border-color:var(--accent-line);box-shadow:0 0 0 3px var(--accent-bg)}
+.m-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.m-meta .pill{font-size:11.5px;color:var(--tx-2);background:var(--card);border:1px solid var(--line);border-radius:8px;
+  padding:6px 11px;display:inline-flex;gap:7px;align-items:center;font-weight:500}
+.m-meta .pill s{color:var(--tx-4);text-decoration:none}
+
+.m-body{padding:28px 30px 48px;display:flex;flex-direction:column;gap:34px}
+.block-h{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.block-h .rule{flex:1;height:1px;background:var(--line)}
+
+.kgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.kcell{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 17px}
+.kcell .kl{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--tx-3);text-transform:uppercase}
+.kcell .kv{font-family:var(--fd);font-size:25px;font-weight:600;letter-spacing:-.02em;margin-top:11px;line-height:1}
+.kcell .kx{font-size:12px;color:var(--tx-3);margin-top:9px;font-weight:500}
+.kcell .kx .up{color:var(--up);font-weight:600}.kcell .kx .down{color:var(--down);font-weight:600}
+
+/* waterfall */
+.wf{display:flex;flex-direction:column;gap:10px}
+.wf-row{display:grid;grid-template-columns:104px 1fr 76px;align-items:center;gap:14px}
+.wf-row .wl{font-size:12.5px;color:var(--tx-2);font-weight:500}
+.wf-bar{position:relative;height:26px;border-radius:8px;background:var(--card);border:1px solid var(--line);overflow:hidden}
+.wf-bar .zero{position:absolute;top:0;bottom:0;width:1px;background:var(--line-2)}
+.wf-bar .fill{position:absolute;top:4px;bottom:4px;border-radius:5px}
+.wf-bar .fill.pos{background:var(--up)}.wf-bar .fill.neg{background:var(--down)}
+.wf-row .wv{font-size:13px;font-weight:600;text-align:right;font-variant-numeric:tabular-nums}
+.wf-row .wv.pos{color:var(--up)}.wf-row .wv.neg{color:var(--down)}
+.wf-row.total{padding-top:10px;border-top:1px solid var(--line);margin-top:4px}
+.wf-row.total .wl{color:var(--tx);font-weight:600}.wf-row.total .wv{font-size:14px}
+
+/* other ops */
+.ops{display:flex;flex-direction:column;gap:3px}
+.op-row{display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:16px;padding:12px 14px;
+  border-radius:12px;transition:background .14s}
+.op-row:hover{background:var(--card)}
+.op-row.here{background:var(--accent-bg);border:1px solid var(--accent-line)}
+.op-name{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--tx);min-width:0;font-weight:500}
+.op-name .pip{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.op-name .here-badge{font-size:9.5px;font-weight:600;color:var(--accent);border:1px solid var(--accent-line);
+  border-radius:6px;padding:2px 6px;letter-spacing:.04em;text-transform:uppercase}
+.op-cmv{font-family:var(--fd);font-size:16px;font-weight:600;width:66px;text-align:right;font-variant-numeric:tabular-nums}
+.op-rs{font-size:12px;color:var(--tx-3);width:90px;text-align:right;font-variant-numeric:tabular-nums;font-weight:500}
+
+/* where used */
+.uses{display:flex;flex-direction:column;gap:9px}
+.use-row{display:flex;align-items:center;gap:14px;padding:13px 15px;background:var(--card);border:1px solid var(--line);border-radius:13px}
+.use-name{flex:1;font-family:var(--fd);font-size:14px;font-weight:500;color:var(--tx);min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.use-porc{font-size:12px;color:var(--tx-3);flex:0 0 auto;font-weight:500}
+.use-pct{flex:0 0 96px;display:flex;align-items:center;gap:10px}
+.use-pct .track{flex:1;height:6px;border-radius:4px;background:var(--card-3);overflow:hidden}
+.use-pct .track i{display:block;height:100%;border-radius:4px;background:var(--accent)}
+.use-pct b{font-size:12px;color:var(--tx-2);width:36px;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+
+/* recommendations */
+.recs{display:flex;flex-direction:column;gap:11px}
+.rec{display:flex;gap:13px;padding:15px 16px;border-radius:14px;border:1px solid var(--line);background:var(--card)}
+.rec.win{border-color:var(--down-line);background:var(--down-bg)}
+.rec.buy{border-color:var(--accent-line);background:var(--accent-bg)}
+.rec.warn{border-color:var(--up-line);background:var(--up-bg)}
+.rec .ic{width:34px;height:34px;border-radius:10px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  font-family:var(--fd);font-weight:700;font-size:16px}
+.rec.win .ic{background:var(--down);color:#06160e}.rec.buy .ic{background:var(--accent);color:#0c0c2a}.rec.warn .ic{background:var(--up);color:#2a0c0c}
+.rec .rt{font-size:13.5px;line-height:1.5;color:var(--tx)}
+.rec .rt b{font-weight:600}
+.rec .rt s{display:block;font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;
+  text-decoration:none;color:var(--tx-3);margin-bottom:4px}
+
+@media(max-width:1100px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:820px){.kpis{grid-template-columns:1fr}}
+@media(max-width:700px){
+  .wrap{padding:0 16px}.grid{grid-template-columns:1fr}.kgrid{grid-template-columns:1fr}
+  .m-body,.m-head{padding-left:18px;padding-right:18px}
+  .wf-row{grid-template-columns:80px 1fr 64px;gap:9px}
+}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.card{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="notice">
+    <span class="dot"></span>
+    <span><b id="nExcl">51</b> itens excluídos do CMV</span>
+    <span class="sep"></span>
+    <span><b id="nVal">R$ 7.563</b> não computado no período</span>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="Visões do CMV">
+    <button class="tab" role="tab" aria-selected="false">Consolidado</button>
+    <button class="tab" role="tab" aria-selected="false">Por item</button>
+    <button class="tab" role="tab" aria-selected="false">Semanal</button>
+    <button class="tab" role="tab" aria-selected="true">Análise de insumos</button>
+  </nav>
+
+  <div class="filterbar">
+    <span class="eyebrow">Operação</span>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <section class="kpis" aria-label="Comparativo semana sobre semana">
+    <div class="kpi kpi--wow" id="kpiWow">
+      <span class="lbl eyebrow">Faturamento · semana s/ semana</span>
+      <div class="big tnum"><span class="ic" id="wowIc"></span><span id="wowVal">+0,8%</span></div>
+      <div class="sub"><span id="wowPrev">15/06 – 21/06</span><span class="arr">→</span><span id="wowCur">22/06 – 28/06</span></div>
+    </div>
+
+    <div class="kpi">
+      <span class="lbl eyebrow">Faturamento da semana</span>
+      <div class="big tnum" id="fatVal">R$ 73.476</div>
+      <div class="spark" id="fatSpark"></div>
+    </div>
+
+    <div class="kpi kpi--alta" id="kpiAlta" role="button" tabindex="0" aria-pressed="false"
+         aria-label="Filtrar apenas insumos com CMV em alta">
+      <span class="lbl eyebrow">Insumos com CMV em alta</span>
+      <div class="big tnum"><span id="altaVal">6</span><span class="hint" id="altaHint">clique p/ filtrar</span></div>
+      <div class="sub">custo subindo mais que o faturamento</div>
+    </div>
+  </section>
+
+  <div class="sec-head">
+    <div>
+      <h2 class="sec-title">Top <span class="n">12</span> insumos · CMV individual semanal</h2>
+      <p class="sec-desc">Custo do insumo ÷ faturamento da semana · clique no card para detalhar</p>
+    </div>
+    <div class="toolbar">
+      <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+        <input id="search" type="search" placeholder="buscar insumo" aria-label="Buscar insumo">
+      </label>
+      <div class="seg" role="group" aria-label="Ordenar por">
+        <button data-sort="cmv" aria-pressed="true">Maior CMV</button>
+        <button data-sort="delta" aria-pressed="false">Maiores altas</button>
+        <button data-sort="cat" aria-pressed="false">Categoria</button>
+      </div>
+      <button class="toggle" id="onlyUp" aria-pressed="false"><span class="sw"></span> só em alta</button>
+    </div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <div class="foot">
+    <span class="live"><i></i> Conectado ao Supabase · <span id="opsActive">5 operações ativas</span></span>
+    <span id="stamp">SEG 29/06 · 00:16 · v3</span>
+  </div>
+</div>
+
+<div class="tip" id="tip" role="tooltip"></div>
+
+<!-- ═══ MODAL ═══ -->
+<div class="overlay" id="overlay" aria-hidden="true">
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+    <header class="m-head">
+      <div class="m-head-top">
+        <div>
+          <span class="m-badge" id="mBadge">#1 maior custo</span>
+          <h3 class="m-title" id="mTitle">Salmão</h3>
+          <div class="m-cat" id="mCat">Proteínas</div>
+        </div>
+        <button class="m-close" id="mClose" aria-label="Fechar detalhe (Esc)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div class="m-meta" id="mMeta"></div>
+    </header>
+
+    <div class="m-body">
+      <section>
+        <div class="block-h"><span class="eyebrow">Indicadores da semana</span><span class="rule"></span></div>
+        <div class="kgrid" id="mInd"></div>
+      </section>
+      <section>
+        <div class="block-h"><span class="eyebrow">Decomposição da variação (%)</span><span class="rule"></span></div>
+        <div class="wf" id="mWf"></div>
+      </section>
+      <section>
+        <div class="block-h"><span class="eyebrow">Mesmo insumo · outras operações</span><span class="rule"></span></div>
+        <div class="ops" id="mOps"></div>
+      </section>
+      <section>
+        <div class="block-h"><span class="eyebrow">Onde é usado · fichas técnicas</span><span class="rule"></span></div>
+        <div class="uses" id="mUses"></div>
+      </section>
+      <section>
+        <div class="block-h"><span class="eyebrow">Recomendações</span><span class="rule"></span></div>
+        <div class="recs" id="mRecs"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ───── domain data (espelha getInsumoDetail) ───── */
+const WEEKS=['01/06','08/06','15/06','22/06'];
+const RANGES=['01–07/06','08–14/06','15–21/06','22–28/06'];
+const FAT=[70100,71800,72892,73476];
+
+const OPS=[
+  {id:'todas',name:'Todas',color:'#9aa0ad',factor:1.00},
+  {id:'aglio',name:'Aglio Nero',color:'#34e0a1',factor:0.83},
+  {id:'terra',name:'LOJA TERRA',color:'#f5c451',factor:0.91},
+  {id:'moby',name:'Moby Cookies',color:'#e08a34',factor:0.71},
+  {id:'nippon',name:'Nippon',color:'#ff6b6b',factor:1.00},
+  {id:'querida',name:'Terra Querida',color:'#8b8cf5',factor:0.88},
+];
+const CAT_COLOR={'Proteínas':'#ff6b6b','Laticínios':'#f5c451','Insumos - Nippon':'#8b8cf5','Embalagens':'#34e0a1','Bebidas':'#5ab0ff'};
+const CAT_DISHES={
+  'Proteínas':[['Combo Sashimi 15pç','120 g',38],['Niguiri Especial','40 g',22],['Temaki Salmão','90 g',31]],
+  'Laticínios':[['Hot Filadélfia','60 g',24],['Uramaki Phila','45 g',19],['Combo Cream','80 g',27]],
+  'Insumos - Nippon':[['Combo Laminado','1 un',15],['Bento Box','180 g',12],['Hot Roll 8pç','70 g',18]],
+  'Embalagens':[['Combo Delivery','1 un',6],['Bento Box','1 un',5],['Combo Família','1 un',8]],
+  'Bebidas':[['Combo Bebida','350 ml',9],['Almoço Executivo','350 ml',7],['Combo Família','1 L',11]],
+};
+
+const BASE=[
+  {rank:1,nome:'Salmão',cat:'Proteínas',sku:'PRT-0142',forn:'Pescados Atlântico',cmv:[21.3,15.0,12.9,14.1],delta:+1.16,preco:[182,189,195,205],precoPrev:195,pctTotal:31.2},
+  {rank:2,nome:'Camarão c/ casca (2kg)',cat:'Proteínas',sku:'PRT-0210',forn:'Pescados Atlântico',cmv:[3.1,2.2,2.7,3.0],delta:+0.33,preco:[78,74,76,79],precoPrev:76,pctTotal:6.7},
+  {rank:3,nome:'Cream Cheese Polenghi (1kg)',cat:'Laticínios',sku:'LAT-0051',forn:'Polenghi Distrib.',cmv:[2.1,2.6,1.1,1.7],delta:+0.60,preco:[31,33,30,32],precoPrev:30,pctTotal:3.8},
+  {rank:4,nome:'Arroz Oriental (5kg)',cat:'Insumos - Nippon',sku:'NIP-0008',forn:'Importadora Sakura',cmv:[1.6,1.6,1.6,1.7],delta:+0.14,preco:[44,44,45,46],precoPrev:45,pctTotal:3.7},
+  {rank:5,nome:'Filé de Peito / Frango (kg)',cat:'Proteínas',sku:'PRT-0099',forn:'Avícola Bom Corte',cmv:[1.3,1.2,1.3,1.3],delta:-0.05,preco:[18,18,19,18],precoPrev:19,pctTotal:2.8},
+  {rank:6,nome:'Cream Cheese Danubio 1kg',cat:'Laticínios',sku:'LAT-0048',forn:'Danubio Foods',cmv:[1.7,1.6,0.7,1.1],delta:+0.48,preco:[27,28,25,27],precoPrev:25,pctTotal:2.5},
+  {rank:7,nome:'Farinha Panko (1kg)',cat:'Insumos - Nippon',sku:'NIP-0021',forn:'Importadora Sakura',cmv:[0.8,1.1,0.8,0.8],delta:-0.03,preco:[14,15,14,14],precoPrev:14,pctTotal:1.8},
+  {rank:8,nome:'Caixa Combo Laminada (pct)',cat:'Embalagens',sku:'EMB-0112',forn:'Embalar Premium',cmv:[1.4,0.8,0.8,0.8],delta:-0.01,preco:[0.90,0.85,0.85,0.85],precoPrev:0.85,pctTotal:1.8},
+  {rank:9,nome:'Nori (140g)',cat:'Insumos - Nippon',sku:'NIP-0003',forn:'Importadora Sakura',cmv:[1.1,0.8,0.9,0.8],delta:-0.10,preco:[42,40,41,39],precoPrev:41,pctTotal:1.7},
+  {rank:10,nome:'Coca-Cola Zero',cat:'Bebidas',sku:'BEB-0017',forn:'Dist. Refri Sul',cmv:[0.5,0.8,0.8,0.7],delta:-0.15,preco:[4.2,4.4,4.4,4.3],precoPrev:4.4,pctTotal:1.5},
+  {rank:11,nome:'Lombo de Atum (kg)',cat:'Proteínas',sku:'PRT-0188',forn:'Pescados Atlântico',cmv:[1.4,0.7,1.3,0.0],delta:-1.27,preco:[96,92,98,0],precoPrev:98,pctTotal:0.0},
+  {rank:12,nome:'Sacola Bag Nippon (250un)',cat:'Embalagens',sku:'EMB-0090',forn:'Embalar Premium',cmv:[0.6,0.5,0.6,1.1],delta:+0.56,preco:[0.40,0.38,0.40,0.46],precoPrev:0.40,pctTotal:2.4},
+];
+
+const state={op:'nippon',sort:'cmv',onlyUp:false,q:''};
+
+/* helpers — sempre % (sem pp) */
+const brl=n=>'R$\u00A0'+Math.round(n).toLocaleString('pt-BR');
+const brl2=n=>'R$\u00A0'+n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+const sign=n=>n>0?'+':n<0?'−':'±';
+const fmtDelta=n=>sign(n)+Math.abs(n).toFixed(2).replace('.',',')+'%';
+const fmtPct=n=>n.toFixed(2).replace('.',',')+'%';
+const pctVar=n=>sign(n)+Math.abs(n).toFixed(1).replace('.',',')+'%';
+const opById=id=>OPS.find(o=>o.id===id);
+const trend=d=>Math.abs(d)<0.02?'flat':(d>0?'up':'down');
+const tColor=t=>t==='up'?'var(--up)':t==='down'?'var(--down)':'var(--flat)';
+
+function derive(b){
+  const f=opById(state.op).factor;
+  const cmv=b.cmv.map(v=>+(v*f).toFixed(2));
+  const fat=FAT.map(v=>Math.round(v*(state.op==='todas'?2.4:f)));
+  const cost=cmv.map((c,i)=>c/100*fat[i]);
+  const qty=cost.map((c,i)=>b.preco[i]?c/b.preco[i]:0);
+  return {...b,cmvOp:cmv,fat,cost,qty,deltaOp:+(b.delta*f).toFixed(2)};
+}
+const data=()=>BASE.map(derive);
+
+/* chips */
+function renderChips(){
+  document.getElementById('chips').innerHTML=OPS.map(o=>`
+    <button class="chip" data-op="${o.id}" aria-pressed="${o.id===state.op}" style="--op:${o.color}">
+      <span class="pip"></span>${o.name}</button>`).join('');
+  document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{state.op=c.dataset.op;renderAll();});
+}
+
+/* KPIs */
+function renderKpis(){
+  const d=data(),fat=d[0].fat;
+  const wow=(fat[3]/fat[2]-1)*100;
+  const up=d.filter(x=>x.deltaOp>0).length;
+  document.getElementById('fatVal').textContent=brl(fat[3]);
+  document.getElementById('wowVal').textContent=(wow>=0?'+':'−')+Math.abs(wow).toFixed(1).replace('.',',')+'%';
+  document.getElementById('kpiWow').classList.toggle('neg',wow<0);
+  document.getElementById('wowIc').innerHTML=`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="transform:rotate(${wow<0?180:0}deg)"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`;
+  document.getElementById('altaVal').textContent=up;
+  document.getElementById('opsActive').textContent=(state.op==='todas'?'5 operações ativas':'1 operação selecionada');
+  const mx=Math.max(...fat);
+  document.getElementById('fatSpark').innerHTML=fat.map((v,i)=>`<i class="${i===3?'hi':''}" style="height:${30+(v/mx)*70}%"></i>`).join('');
+}
+
+/* cards */
+function renderCards(){
+  let list=data();
+  if(state.onlyUp) list=list.filter(x=>x.deltaOp>0);
+  if(state.q){const q=state.q.toLowerCase();list=list.filter(x=>x.nome.toLowerCase().includes(q)||x.cat.toLowerCase().includes(q));}
+  if(state.sort==='cmv') list.sort((a,b)=>b.cmvOp[3]-a.cmvOp[3]);
+  if(state.sort==='delta') list.sort((a,b)=>b.deltaOp-a.deltaOp);
+  if(state.sort==='cat') list.sort((a,b)=>a.cat.localeCompare(b.cat)||b.cmvOp[3]-a.cmvOp[3]);
+
+  const grid=document.getElementById('grid');
+  if(!list.length){grid.innerHTML=`<div class="empty"><b>Nenhum insumo no filtro</b>Ajuste a busca ou desative “só em alta”.</div>`;return;}
+
+  grid.innerHTML=list.map(x=>{
+    const t=trend(x.deltaOp),c=x.cmvOp,mx=Math.max(...c,0.1);
+    const bars=c.map((v,i)=>{
+      const cur=i===3,h=Math.max((v/mx)*100,3);
+      const op=cur?1:(0.30+0.16*i); // opacity ramp até a semana atual
+      return `<div class="bar-col ${cur?'cur':''}">
+        <div class="bar-area">
+          <div class="bar ${cur?'cur':''}" style="height:${h}%;${cur?'':'opacity:'+op}"
+               data-rank="${x.rank}" data-i="${i}" tabindex="-1">
+            <span class="bar-val">${v.toFixed(1).replace('.',',')}</span>
+          </div>
+        </div>
+        <span class="bar-tick">${WEEKS[i].slice(0,2)}</span>
+      </div>`;
+    }).join('');
+
+    return `<button class="card ${t}" data-rank="${x.rank}" aria-label="${x.nome}, CMV ${fmtPct(c[3])}, variação ${fmtDelta(x.deltaOp)}. Abrir detalhe.">
+      <div class="card-top">
+        <div style="min-width:0">
+          <div class="card-cat"><span class="cdot" style="background:${CAT_COLOR[x.cat]}"></span>${x.cat}</div>
+        </div>
+        <div class="card-rank">#${x.rank}</div>
+      </div>
+      <div class="card-name" title="${x.nome}">${x.nome}</div>
+      <div class="card-metric">
+        <div class="card-cmv tnum">${c[3].toFixed(1).replace('.',',')}<span class="u">%</span></div>
+        <div class="card-delta">${arrow(t)} ${fmtDelta(x.deltaOp)}</div>
+      </div>
+      <div class="chart">${bars}</div>
+    </button>`;
+  }).join('');
+
+  const cards=grid.querySelectorAll('.card');
+  cards.forEach((el,i)=>setTimeout(()=>el.classList.add('in'),i*32));
+  cards.forEach(el=>el.onclick=()=>openModal(+el.dataset.rank));
+  grid.querySelectorAll('.bar').forEach(bar=>{
+    bar.addEventListener('mouseenter',e=>showTip(e,+bar.dataset.rank,+bar.dataset.i));
+    bar.addEventListener('mousemove',moveTip);
+    bar.addEventListener('mouseleave',hideTip);
+  });
+}
+function arrow(t){
+  if(t==='flat') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12h14"/></svg>`;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" style="transform:rotate(${t==='up'?0:180}deg)"><path d="M12 19V5M6 11l6-6 6 6"/></svg>`;
+}
+
+/* tooltip */
+const tip=document.getElementById('tip');
+function showTip(e,rank,i){
+  const x=data().find(d=>d.rank===rank),t=trend(x.deltaOp);
+  tip.style.setProperty('--tipc',i===3?tColor(t):'var(--tx)');
+  tip.innerHTML=`<h5>${RANGES[i]}</h5>
+    <div class="row"><span>CMV</span><b class="c tnum">${fmtPct(x.cmvOp[i])}</b></div>
+    <div class="row"><span>Custo</span><b class="tnum">${brl(x.cost[i])}</b></div>
+    <div class="row"><span>Qtd usada</span><b class="tnum">${x.qty[i].toFixed(1).replace('.',',')} un</b></div>`;
+  tip.classList.add('on');moveTip(e);
+}
+function moveTip(e){
+  const pad=14,w=tip.offsetWidth,h=tip.offsetHeight;
+  let x=e.clientX+pad,y=e.clientY-h-pad;
+  if(x+w>innerWidth-8)x=e.clientX-w-pad;
+  if(y<8)y=e.clientY+pad;
+  tip.style.left=x+'px';tip.style.top=y+'px';
+}
+function hideTip(){tip.classList.remove('on');}
+
+/* getInsumoDetail(rank, op) mock */
+function getInsumoDetail(rank){
+  const x=data().find(d=>d.rank===rank),op=opById(state.op),dpp=x.deltaOp;
+  const ePreco=+(dpp*0.58).toFixed(2),eVol=+(dpp*0.27).toFixed(2),eFat=+(dpp-ePreco-eVol).toFixed(2);
+  const ops=OPS.filter(o=>o.id!=='todas').map(o=>{
+    const cmv=+(x.cmv[3]*o.factor).toFixed(2);
+    return {id:o.id,name:o.name,color:o.color,cmv,rs:cmv/100*Math.round(FAT[3]*o.factor),here:o.id===state.op};
+  }).sort((a,b)=>a.cmv-b.cmv);
+  const uses=(CAT_DISHES[x.cat]||[]).map(d=>({nome:d[0],porc:d[1],pct:d[2]}));
+  const precoVar=x.precoPrev?(x.preco[3]-x.precoPrev)/x.precoPrev*100:0;
+  const recs=[];const cheap=ops[0];
+  if(cheap&&!cheap.here){
+    const econ=(x.cmvOp[3]-cheap.cmv)/100*x.fat[3];
+    recs.push({k:'win',s:'Operação mais barata',t:`<b>${cheap.name}</b> opera este insumo a <b>${fmtPct(cheap.cmv)}</b> de CMV. Alinhar compra/uso pode economizar ~<b>${brl(Math.max(econ,0))}/sem</b>.`});
+  }
+  if(precoVar<-1 && x.preco[3]>0) recs.push({k:'buy',s:'Janela de compra',t:`Preço unitário caiu <b>${Math.abs(precoVar).toFixed(1).replace('.',',')}%</b> na semana. Boa janela para antecipar pedido e travar o custo.`});
+  if(dpp>0) recs.push({k:'warn',s:'CMV em alta',t:`Custo subiu <b>${fmtDelta(dpp)}</b> — mais que o faturamento. Reveja o porcionamento na ficha técnica e renegocie com <b>${x.forn}</b>.`});
+  if(!recs.length) recs.push({k:'win',s:'Sob controle',t:`CMV estável e sem alertas para este insumo na semana. Manter o monitoramento.`});
+  return {x,op,dpp,ePreco,eVol,eFat,precoVar,ops,uses,recs};
+}
+
+const overlay=document.getElementById('overlay'),modal=document.getElementById('modal');
+let lastFocus=null;
+function openModal(rank){
+  const {x,op,dpp,ePreco,eVol,eFat,precoVar,ops,uses,recs}=getInsumoDetail(rank);
+  const t=trend(dpp),tc=tColor(t);
+  const b=document.getElementById('mBadge');
+  b.textContent=`#${x.rank} maior custo`;
+  b.style.background=t==='up'?'var(--up-bg)':'var(--down-bg)';b.style.color=tc;
+  b.style.borderColor=t==='up'?'var(--up-line)':'var(--down-line)';
+  document.getElementById('mTitle').textContent=x.nome;
+  document.getElementById('mCat').textContent=x.cat;
+  document.getElementById('mMeta').innerHTML=[['SKU',x.sku],['Fornecedor',x.forn],['Semana',RANGES[3]],['Operação',op.name]]
+    .map(([k,v])=>`<span class="pill"><s>${k}</s>${v}</span>`).join('');
+
+  document.getElementById('mInd').innerHTML=[
+    {l:'CMV da semana',v:fmtPct(x.cmvOp[3]),x:`<b class="${t}">${fmtDelta(dpp)}</b> vs. semana anterior`},
+    {l:'Custo da semana',v:brl(x.cost[3]),x:`${x.qty[3].toFixed(1).replace('.',',')} un consumidas`},
+    {l:'Preço unitário',v:x.preco[3]>=10?brl(x.preco[3]):brl2(x.preco[3]),x:`<b class="${precoVar>0?'up':precoVar<0?'down':''}">${pctVar(precoVar)}</b> vs. semana anterior`},
+    {l:'% do CMV total',v:fmtPct(x.pctTotal),x:`participação no custo total`},
+  ].map(c=>`<div class="kcell"><div class="kl">${c.l}</div><div class="kv tnum">${c.v}</div><div class="kx">${c.x}</div></div>`).join('');
+
+  const effs=[['Preço',ePreco],['Volume',eVol],['Faturamento',eFat]];
+  const mxAbs=Math.max(...effs.map(e=>Math.abs(e[1])),Math.abs(dpp),0.05);
+  const row=(l,v,tot)=>{
+    const w=Math.min(Math.abs(v)/mxAbs*48,48),pos=v>=0;
+    return `<div class="wf-row ${tot?'total':''}"><span class="wl">${l}</span>
+      <div class="wf-bar"><span class="zero" style="left:50%"></span>
+      <span class="fill ${pos?'pos':'neg'}" style="${pos?'left:50%':'right:50%'};width:${w}%"></span></div>
+      <span class="wv ${v>0?'pos':v<0?'neg':''}">${sign(v)}${Math.abs(v).toFixed(2).replace('.',',')}%</span></div>`;
+  };
+  document.getElementById('mWf').innerHTML=effs.map(e=>row(e[0],e[1],false)).join('')+row('Variação total',dpp,true);
+
+  document.getElementById('mOps').innerHTML=ops.map(o=>`
+    <div class="op-row ${o.here?'here':''}">
+      <div class="op-name"><span class="pip" style="background:${o.color}"></span>${o.name}
+        ${o.here?'<span class="here-badge">aqui</span>':''}</div>
+      <div class="op-cmv tnum">${fmtPct(o.cmv)}</div>
+      <div class="op-rs tnum">${brl(o.rs)}</div></div>`).join('');
+
+  document.getElementById('mUses').innerHTML=uses.length?uses.map(u=>`
+    <div class="use-row"><span class="use-name" title="${u.nome}">${u.nome}</span>
+      <span class="use-porc">${u.porc}</span>
+      <span class="use-pct"><span class="track"><i style="width:${u.pct}%"></i></span><b>${u.pct}%</b></span></div>`).join('')
+    :`<div class="empty" style="padding:26px">Sem fichas técnicas vinculadas a este insumo.</div>`;
+
+  document.getElementById('mRecs').innerHTML=recs.map(r=>`
+    <div class="rec ${r.k}"><div class="ic">${r.k==='win'?'↓':r.k==='buy'?'$':'!'}</div>
+      <div class="rt"><s>${r.s}</s>${r.t}</div></div>`).join('');
+
+  lastFocus=document.activeElement;
+  overlay.classList.add('open');overlay.setAttribute('aria-hidden','false');
+  document.body.style.overflow='hidden';modal.scrollTop=0;
+  document.getElementById('mClose').focus();
+}
+function closeModal(){
+  overlay.classList.remove('open');overlay.setAttribute('aria-hidden','true');
+  document.body.style.overflow='';if(lastFocus)lastFocus.focus();
+}
+document.getElementById('mClose').onclick=closeModal;
+overlay.addEventListener('click',e=>{if(e.target===overlay)closeModal();});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&overlay.classList.contains('open'))closeModal();
+  if(e.key==='Tab'&&overlay.classList.contains('open')){
+    const f=modal.querySelectorAll('button,[tabindex]:not([tabindex="-1"]),input');
+    if(!f.length)return;const first=f[0],last=f[f.length-1];
+    if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}
+    else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}
+  }
+});
+
+/* toolbar */
+document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{
+  state.sort=b.dataset.sort;
+  document.querySelectorAll('.seg button').forEach(x=>x.setAttribute('aria-pressed',x===b));
+  renderCards();
+});
+const onlyUpBtn=document.getElementById('onlyUp'),altaKpi=document.getElementById('kpiAlta');
+function setOnlyUp(v){
+  state.onlyUp=v;onlyUpBtn.setAttribute('aria-pressed',v);
+  altaKpi.setAttribute('data-active',v);
+  document.getElementById('altaHint').textContent=v?'ativo ✓':'clique p/ filtrar';
+  renderCards();
+}
+onlyUpBtn.onclick=()=>setOnlyUp(!state.onlyUp);
+altaKpi.onclick=()=>setOnlyUp(!state.onlyUp);
+altaKpi.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();setOnlyUp(!state.onlyUp);}};
+document.getElementById('search').oninput=e=>{state.q=e.target.value.trim();renderCards();};
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-selected',x===t)));
+
+/* boot */
+function renderAll(){
+  document.querySelectorAll('.chip').forEach(c=>c.setAttribute('aria-pressed',c.dataset.op===state.op));
+  renderKpis();renderCards();
+}
+renderChips();renderAll();
+</script>
+</body>
+</html>

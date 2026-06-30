@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CMV & margem · Semanal</title>
+<style>
+  :root{
+    --bg:#0b0c0e; --panel:#121417; --box:#15181c; --box-hover:#1b1f25;
+    --border:rgba(255,255,255,.07); --border-2:rgba(255,255,255,.13);
+    --ink:#e8eaed; --ink-2:#9aa0a8; --ink-3:#646a73;
+    --good:#54c08c; --good-bg:rgba(84,192,140,.13);
+    --warn:#e3a44e; --warn-bg:rgba(227,164,78,.13);
+    --bad:#e0685a;  --bad-bg:rgba(224,104,90,.13);
+    --live:#57b7cf; --live-bg:rgba(87,183,207,.13);
+    --target:#cfd3d9;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,"Helvetica Neue",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1260px;margin:0 auto;padding:22px 26px 56px;}
+  .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);}
+
+  /* topbar */
+  .top{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    padding-bottom:16px;border-bottom:.5px solid var(--border);}
+  .crumb{font-family:var(--mono);font-size:12px;color:var(--ink-2);letter-spacing:.04em;}
+  .crumb b{color:var(--ink);font-weight:500;}
+  .crumb span{color:var(--ink-3);margin:0 7px;}
+  .kit{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2);}
+  .kit .dot{width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 8px var(--good);}
+
+  .tabs{display:flex;gap:4px;margin-top:16px;flex-wrap:wrap;}
+  .tab{font-size:13px;color:var(--ink-2);padding:6px 12px;border-radius:8px;cursor:pointer;
+    border:.5px solid transparent;transition:background .14s,color .14s;}
+  .tab:hover{color:var(--ink);background:rgba(255,255,255,.03);}
+  .tab.on{color:var(--ink);background:var(--box);border-color:var(--border-2);}
+
+  .ops{display:flex;align-items:center;gap:6px;margin-top:14px;flex-wrap:wrap;}
+  .ops .lbl{margin-right:6px;}
+  .op{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);
+    padding:5px 11px;border-radius:999px;cursor:pointer;border:.5px solid transparent;transition:.14s;}
+  .op:hover{color:var(--ink);background:rgba(255,255,255,.03);}
+  .op.on{color:var(--ink);background:var(--box);border-color:var(--border-2);}
+  .op i{width:7px;height:7px;border-radius:50%;display:inline-block;}
+
+  /* excluded bar */
+  .excl{display:flex;align-items:center;gap:12px;margin-top:22px;padding:11px 15px;
+    background:var(--warn-bg);border:.5px solid rgba(227,164,78,.28);border-radius:11px;
+    cursor:pointer;transition:background .14s;}
+  .excl:hover{background:rgba(227,164,78,.18);}
+  .excl .ic{color:var(--warn);font-size:15px;line-height:1;}
+  .excl .tx{font-size:13px;color:#e6c98f;}
+  .excl .tx b{color:#f2dcae;font-weight:500;}
+  .excl .go{margin-left:auto;font-size:12.5px;color:var(--warn);white-space:nowrap;}
+
+  /* kpi strip */
+  .eyebrow{margin:26px 0 11px;display:flex;align-items:baseline;gap:10px;}
+  .eyebrow h2{font-size:14px;font-weight:500;margin:0;color:var(--ink);}
+  .eyebrow .sub{font-family:var(--mono);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);}
+
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;
+    background:var(--panel);border:.5px solid var(--border);border-radius:14px;padding:18px 20px;}
+  .kpi{padding:2px 18px;border-left:1px solid var(--border);}
+  .kpi:first-child{border-left:none;padding-left:0;}
+  .kpi .v{font-size:30px;font-weight:500;letter-spacing:-.01em;margin:7px 0 4px;line-height:1;}
+  .kpi .v.warn{color:var(--warn);} .kpi .v.good{color:var(--good);}
+  .kpi .note{font-size:11.5px;color:var(--ink-3);line-height:1.45;}
+  .kpi .note .old{color:var(--bad);}
+  .chip{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.06em;
+    padding:2px 7px;border-radius:6px;background:rgba(255,255,255,.05);color:var(--ink-2);
+    vertical-align:middle;margin-left:8px;}
+
+  /* trend */
+  .trend{margin-top:14px;background:var(--panel);border:.5px solid var(--border);
+    border-radius:14px;padding:16px 20px 10px;}
+  .trend .hd{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px;}
+  .trend .hd h3{font-size:13px;font-weight:500;margin:0;color:var(--ink);}
+  .trend .hd .meta{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);}
+  .trend svg{width:100%;height:auto;display:block;}
+
+  /* weeks */
+  .legend{display:flex;align-items:center;gap:8px;margin:10px 0 14px;flex-wrap:wrap;
+    font-size:11.5px;color:var(--ink-3);}
+  .legend .pip{width:9px;height:9px;border-radius:50%;border:2px solid var(--bg);display:inline-block;vertical-align:-1px;}
+  .legend .tk{display:inline-block;width:1.5px;height:11px;background:var(--target);vertical-align:-2px;opacity:.8;}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:13px;}
+
+  .week{background:var(--box);border:.5px solid var(--border);border-radius:14px;
+    padding:15px 16px 14px;transition:transform .15s,border-color .15s,background .15s;}
+  .week:hover{transform:translateY(-2px);border-color:var(--border-2);background:var(--box-hover);}
+  .week .wtop{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:13px;}
+  .date{font-family:var(--mono);font-size:12.5px;color:var(--ink);letter-spacing:.02em;}
+  .yr{font-family:var(--mono);font-size:10px;color:var(--ink-3);}
+  .stat{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:9.5px;
+    letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:999px;}
+  .stat.ok{background:rgba(255,255,255,.05);color:var(--ink-2);}
+  .stat.live{background:var(--live-bg);color:var(--live);}
+  .stat.inc{background:var(--bad-bg);color:var(--bad);}
+  .stat .d{width:6px;height:6px;border-radius:50%;}
+
+  .hero{display:flex;align-items:baseline;gap:9px;margin-bottom:3px;}
+  .hero .big{font-size:34px;font-weight:500;line-height:.95;letter-spacing:-.01em;}
+  .hero .big.good{color:var(--good);} .hero .big.warn{color:var(--warn);}
+  .hero .big.bad{color:var(--bad);} .hero .big.mut{color:var(--ink-3);}
+  .hero .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);padding-bottom:4px;}
+  .heronote{font-size:11px;color:var(--ink-3);margin-bottom:12px;}
+
+  /* range bar */
+  .bar{position:relative;height:6px;border-radius:999px;background:rgba(255,255,255,.06);margin:14px 0 12px;}
+  .bar .fill{position:absolute;left:0;top:0;bottom:0;border-radius:999px;opacity:.45;}
+  .bar .target{position:absolute;top:-4px;bottom:-4px;width:1.5px;background:var(--target);opacity:.7;}
+  .bar .mark{position:absolute;top:50%;width:11px;height:11px;border-radius:50%;
+    transform:translate(-50%,-50%);border:2px solid var(--box);}
+
+  /* comparison */
+  .cmp{display:flex;flex-direction:column;gap:5px;margin-bottom:13px;}
+  .cmp .row{display:flex;align-items:center;justify-content:space-between;font-size:11.5px;}
+  .cmp .k{color:var(--ink-3);font-family:var(--mono);font-size:10px;letter-spacing:.05em;text-transform:uppercase;}
+  .cmp .val{font-weight:500;display:inline-flex;align-items:center;gap:5px;}
+  .cmp .val.good{color:var(--good);} .cmp .val.warn{color:var(--warn);}
+  .cmp .val.mut{color:var(--ink-3);}
+  .flag{font-family:var(--mono);font-size:9px;letter-spacing:.06em;text-transform:uppercase;
+    padding:2px 7px;border-radius:6px;}
+  .flag.best{background:var(--good-bg);color:var(--good);}
+  .flag.worst{background:var(--bad-bg);color:var(--bad);}
+
+  /* mini stats */
+  .mini{display:grid;grid-template-columns:1fr 1fr 1fr;gap:2px;
+    border-top:.5px solid var(--border);padding-top:11px;}
+  .mini div{display:flex;flex-direction:column;gap:3px;}
+  .mini .k{font-family:var(--mono);font-size:9px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);}
+  .mini .v{font-size:13px;color:var(--ink);font-weight:500;}
+  .mini .v.dim{color:var(--ink-3);font-weight:400;}
+
+  /* current + incomplete variants */
+  .week.cur{border-color:rgba(87,183,207,.35);background:linear-gradient(180deg,var(--live-bg),transparent 60%),var(--box);}
+  .week.cur:hover{border-color:rgba(87,183,207,.55);}
+  .proj{display:flex;align-items:center;justify-content:space-between;font-size:11.5px;
+    background:rgba(255,255,255,.03);border:.5px solid var(--border);border-radius:9px;padding:8px 11px;margin:12px 0;}
+  .proj .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);}
+  .proj .v{color:var(--ink);font-weight:500;}
+  .proj .v small{color:var(--ink-3);font-weight:400;font-size:10px;margin-left:5px;}
+
+  .week.inc{border-style:dashed;opacity:.62;}
+  .week.inc:hover{transform:none;background:var(--box);opacity:.78;}
+  .incnote{font-size:11px;color:var(--ink-3);border-top:.5px solid var(--border);padding-top:10px;margin-top:2px;}
+
+  a.bare{color:inherit;text-decoration:none;}
+  :focus-visible{outline:2px solid var(--live);outline-offset:2px;border-radius:6px;}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;}.week:hover{transform:none;}}
+  @media (max-width:560px){.wrap{padding:18px 16px 40px;}.kpi{border-left:none;padding-left:0;padding-right:0;}.kpi .v{font-size:26px;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- TOPBAR -->
+  <div class="top">
+    <div class="crumb">Cloud Kitchen <span>›</span> <b>CMV &amp; margem</b></div>
+    <div class="kit"><span class="dot"></span> MobyDick Dark Kitchen · 5 operações · Danilo</div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab">Consolidado</div>
+    <div class="tab">Por item</div>
+    <div class="tab on">Semanal</div>
+    <div class="tab">Análise de insumos</div>
+  </div>
+
+  <div class="ops">
+    <span class="lbl">Operação</span>
+    <div class="op on">Todas</div>
+    <div class="op"><i style="background:#54c08c"></i>Aglio Nero</div>
+    <div class="op"><i style="background:#5b9bd5"></i>Loja Terra</div>
+    <div class="op"><i style="background:#a78bdb"></i>Moby Cookies</div>
+    <div class="op"><i style="background:#e0685a"></i>Nippon</div>
+    <div class="op"><i style="background:#d8c24e"></i>Terra Querida</div>
+  </div>
+
+  <!-- EXCLUDED CONTEXT -->
+  <a class="bare" href="#"><div class="excl">
+    <span class="ic">▲</span>
+    <span class="tx"><b>51 itens</b> fora do cálculo de CMV · <b>R$ 7.533</b> não computados no período · ≈14% do custo da última semana</span>
+    <span class="go">Ver itens →</span>
+  </div></a>
+
+  <!-- KPI STRIP (corrected average over valid weeks) -->
+  <div class="eyebrow">
+    <h2>Médias do período</h2>
+    <span class="sub">4 semanas completas válidas · 01/06 → 28/06</span>
+  </div>
+  <div class="kpis">
+    <div class="kpi">
+      <div class="lbl">CMV médio</div>
+      <div class="v warn">36,3%<span class="chip">meta 33%</span></div>
+      <div class="note">Cálculo anterior: <span class="old">46,1%</span> — somava 2 semanas sem faturamento.</div>
+    </div>
+    <div class="kpi">
+      <div class="lbl">Faturamento / semana</div>
+      <div class="v">R$ 150.992</div>
+      <div class="note">média das semanas válidas</div>
+    </div>
+    <div class="kpi">
+      <div class="lbl">Custo / semana</div>
+      <div class="v">R$ 54.759</div>
+      <div class="note">por saídas de estoque</div>
+    </div>
+    <div class="kpi">
+      <div class="lbl">Margem média</div>
+      <div class="v good">63,7%</div>
+      <div class="note">sobre faturamento</div>
+    </div>
+  </div>
+
+  <!-- TREND -->
+  <div class="trend">
+    <div class="hd">
+      <h3>Tendência do CMV</h3>
+      <span class="meta">linha tracejada = meta 33% · abaixo da linha = dentro da meta</span>
+    </div>
+    <svg viewBox="0 0 700 132" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tendência do CMV nas 4 semanas válidas: 39,5%, 36,5%, 32,8%, 36,2%.">
+      <!-- target line -->
+      <line x1="30" y1="86.25" x2="670" y2="86.25" stroke="var(--target)" stroke-width="1" stroke-dasharray="3 4" opacity=".55"/>
+      <text x="676" y="83" fill="var(--ink-3)" font-size="9" font-family="var(--mono)" text-anchor="end" opacity="0">33%</text>
+      <!-- line -->
+      <polyline points="30,22.9 243.3,52.1 456.7,88.2 670,55.05" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="1.5"/>
+      <!-- points -->
+      <circle cx="30" cy="22.9" r="4.5" fill="var(--warn)"/>
+      <circle cx="243.3" cy="52.1" r="4.5" fill="var(--warn)"/>
+      <circle cx="456.7" cy="88.2" r="4.5" fill="var(--good)"/>
+      <circle cx="670" cy="55.05" r="4.5" fill="var(--warn)"/>
+      <!-- value labels -->
+      <text x="30" y="13" fill="var(--ink-2)" font-size="11" font-family="var(--sans)" text-anchor="middle">39,5%</text>
+      <text x="243.3" y="42" fill="var(--ink-2)" font-size="11" font-family="var(--sans)" text-anchor="middle">36,5%</text>
+      <text x="456.7" y="106" fill="var(--good)" font-size="11" font-family="var(--sans)" text-anchor="middle">32,8%</text>
+      <text x="670" y="45" fill="var(--ink-2)" font-size="11" font-family="var(--sans)" text-anchor="middle">36,2%</text>
+      <!-- date labels -->
+      <text x="30" y="126" fill="var(--ink-3)" font-size="9.5" font-family="var(--mono)" text-anchor="middle">01/06</text>
+      <text x="243.3" y="126" fill="var(--ink-3)" font-size="9.5" font-family="var(--mono)" text-anchor="middle">08/06</text>
+      <text x="456.7" y="126" fill="var(--ink-3)" font-size="9.5" font-family="var(--mono)" text-anchor="middle">15/06</text>
+      <text x="670" y="126" fill="var(--ink-3)" font-size="9.5" font-family="var(--mono)" text-anchor="middle">22/06</text>
+    </svg>
+  </div>
+
+  <!-- WEEKS AS BOXES -->
+  <div class="eyebrow" style="margin-top:28px;">
+    <h2>Semanas</h2>
+    <span class="sub">Seg → Dom · clique numa semana p/ ver os insumos</span>
+  </div>
+  <div class="legend">
+    <span><span class="pip" style="background:var(--warn)"></span> posição do CMV entre 32% e 40%</span>
+    <span style="color:var(--ink-3)">·</span>
+    <span><span class="tk"></span> meta 33%</span>
+    <span style="color:var(--ink-3)">·</span>
+    <span>mais à esquerda = melhor</span>
+  </div>
+
+  <div class="grid">
+
+    <!-- CURRENT WEEK -->
+    <div class="week cur" tabindex="0">
+      <div class="wtop">
+        <div><div class="date">29/06 – 05/07</div><div class="yr">2026</div></div>
+        <span class="stat live"><span class="d" style="background:var(--live)"></span>em andamento</span>
+      </div>
+      <div class="hero">
+        <div class="big mut">—</div>
+        <div class="cap">CMV<br>aguardando<br>faturamento</div>
+      </div>
+      <div class="heronote">Semana mal começou — CMV e margem entram ao registrar o faturamento.</div>
+      <div class="proj">
+        <span class="k">Custo acumulado</span>
+        <span class="v">R$ 6.607 <small>dia 1 de 7</small></span>
+      </div>
+      <div class="proj">
+        <span class="k">Projeção de custo</span>
+        <span class="v">~R$ 46k <small>estimativa inicial</small></span>
+      </div>
+      <div class="incnote">Entra na comparação ao fechar a semana.</div>
+    </div>
+
+    <!-- 22/06 -->
+    <div class="week" tabindex="0">
+      <div class="wtop">
+        <div><div class="date">22/06 – 28/06</div><div class="yr">2026</div></div>
+        <span class="stat ok">mais recente</span>
+      </div>
+      <div class="hero"><div class="big warn">36,2%</div><div class="cap">CMV<br>da semana</div></div>
+      <div class="bar">
+        <div class="fill" style="width:52.5%;background:var(--warn)"></div>
+        <div class="target" style="left:12.5%"></div>
+        <div class="mark" style="left:52.5%;background:var(--warn)"></div>
+      </div>
+      <div class="cmp">
+        <div class="row"><span class="k">vs anterior</span><span class="val warn">▲ 3,4pp</span></div>
+        <div class="row"><span class="k">vs média</span><span class="val good">▼ 0,1pp</span></div>
+      </div>
+      <div class="mini">
+        <div><span class="k">Fat.</span><span class="v">R$ 144,5k</span></div>
+        <div><span class="k">Custo</span><span class="v">R$ 52,3k</span></div>
+        <div><span class="k">Margem</span><span class="v">63,8%</span></div>
+      </div>
+    </div>
+
+    <!-- 15/06 -->
+    <div class="week" tabindex="0">
+      <div class="wtop">
+        <div><div class="date">15/06 – 21/06</div><div class="yr">2026</div></div>
+        <span class="flag best">★ melhor</span>
+      </div>
+      <div class="hero"><div class="big good">32,8%</div><div class="cap">CMV<br>da semana</div></div>
+      <div class="bar">
+        <div class="fill" style="width:10%;background:var(--good)"></div>
+        <div class="target" style="left:12.5%"></div>
+        <div class="mark" style="left:10%;background:var(--good)"></div>
+      </div>
+      <div class="cmp">
+        <div class="row"><span class="k">vs anterior</span><span class="val good">▼ 3,7pp</span></div>
+        <div class="row"><span class="k">vs média</span><span class="val good">▼ 3,5pp</span></div>
+      </div>
+      <div class="mini">
+        <div><span class="k">Fat.</span><span class="v">R$ 150,7k</span></div>
+        <div><span class="k">Custo</span><span class="v">R$ 49,4k</span></div>
+        <div><span class="k">Margem</span><span class="v">67,2%</span></div>
+      </div>
+    </div>
+
+    <!-- 08/06 -->
+    <div class="week" tabindex="0">
+      <div class="wtop">
+        <div><div class="date">08/06 – 14/06</div><div class="yr">2026</div></div>
+        <span class="stat ok">válida</span>
+      </div>
+      <div class="hero"><div class="big warn">36,5%</div><div class="cap">CMV<br>da semana</div></div>
+      <div class="bar">
+        <div class="fill" style="width:56.25%;background:var(--warn)"></div>
+        <div class="target" style="left:12.5%"></div>
+        <div class="mark" style="left:56.25%;background:var(--warn)"></div>
+      </div>
+      <div class="cmp">
+        <div class="row"><span class="k">vs anterior</span><span class="val good">▼ 3,0pp</span></div>
+        <div class="row"><span class="k">vs média</span><span class="val warn">▲ 0,2pp</span></div>
+      </div>
+      <div class="mini">
+        <div><span class="k">Fat.</span><span class="v">R$ 156,4k</span></div>
+        <div><span class="k">Custo</span><span class="v">R$ 57,0k</span></div>
+        <div><span class="k">Margem</span><span class="v">63,5%</span></div>
+      </div>
+    </div>
+
+    <!-- 01/06 -->
+    <div class="week" tabindex="0">
+      <div class="wtop">
+        <div><div class="date">01/06 – 07/06</div><div class="yr">2026</div></div>
+        <span class="flag worst">pior</span>
+      </div>
+      <div class="hero"><div class="big bad">39,5%</div><div class="cap">CMV<br>da semana</div></div>
+      <div class="bar">
+        <div class="fill" style="width:93.75%;background:var(--bad)"></div>
+        <div class="target" style="left:12.5%"></div>
+        <div class="mark" style="left:93.75%;background:var(--bad)"></div>
+      </div>
+      <div class="cmp">
+        <div class="row"><span class="k">vs anterior</span><span class="val mut">— primeira</span></div>
+        <div class="row"><span class="k">vs média</span><span class="val warn">▲ 3,2pp</span></div>
+      </div>
+      <div class="mini">
+        <div><span class="k">Fat.</span><span class="v">R$ 152,5k</span></div>
+        <div><span class="k">Custo</span><span class="v">R$ 60,3k</span></div>
+        <div><span class="k">Margem</span><span class="v">60,5%</span></div>
+      </div>
+    </div>
+
+    <!-- 25/05 incomplete -->
+    <div class="week inc" tabindex="0">
+      <div class="wtop">
+        <div><div class="date">25/05 – 31/05</div><div class="yr">2026</div></div>
+        <span class="stat inc"><span class="d" style="background:var(--bad)"></span>dados incompletos</span>
+      </div>
+      <div class="hero"><div class="big mut">—</div><div class="cap">sem<br>faturamento</div></div>
+      <div class="heronote">Faturamento não computado (não sincronizado). Custo existe, mas não há receita para dividir.</div>
+      <div class="mini">
+        <div><span class="k">Fat.</span><span class="v dim">não sincr.</span></div>
+        <div><span class="k">Custo</span><span class="v">R$ 58,0k</span></div>
+        <div><span class="k">Margem</span><span class="v dim">—</span></div>
+      </div>
+      <div class="incnote">Fora da média e da tendência.</div>
+    </div>
+
+    <!-- 18/05 incomplete -->
+    <div class="week inc" tabindex="0">
+      <div class="wtop">
+        <div><div class="date">18/05 – 24/05</div><div class="yr">2026</div></div>
+        <span class="stat inc"><span class="d" style="background:var(--bad)"></span>dados incompletos</span>
+      </div>
+      <div class="hero"><div class="big mut">—</div><div class="cap">sem<br>faturamento</div></div>
+      <div class="heronote">Movimentação parcial de estoque, sem faturamento no período.</div>
+      <div class="mini">
+        <div><span class="k">Fat.</span><span class="v dim">não sincr.</span></div>
+        <div><span class="k">Custo</span><span class="v">R$ 1,1k</span></div>
+        <div><span class="k">Margem</span><span class="v dim">—</span></div>
+      </div>
+      <div class="incnote">Fora da média e da tendência.</div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
