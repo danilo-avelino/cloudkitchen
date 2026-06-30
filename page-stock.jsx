@@ -308,6 +308,10 @@ function Stock({ scope }) {
     !it.cost || Number(it.cost) <= 0
   ).length, [items]);
 
+  // Pendências de lançamento — insumos com saldo negativo (saída sem entrada).
+  // Mesma regra do modal de alerta; respeita categorias com alertas desligados.
+  const pendingCount = useMemo(() => pendingEntryItems(items).length, [items]);
+
   // Lista principal separa itens por flag da categoria:
   //   visibleItems · entram nas abas Todos/Em estoque/Baixo/Ruptura e nos
   //                  contadores · "o que preciso acompanhar"
@@ -580,6 +584,9 @@ function Stock({ scope }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {/* Alerta de pendências de lançamento (saldo negativo) — abre ao entrar */}
+      <PendingEntryAlert stockItems={source === "db" ? items : []} />
+
       {/* KPIs operacionais · espelham o dashboard p/ estoquistas */}
       <div style={{ padding: "16px 28px 4px", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  onClick={() => setFlowDetail("in")} />
@@ -602,6 +609,12 @@ function Stock({ scope }) {
         <StockSubTab active={view === "suppliers"} onClick={() => setView("suppliers")}>Fornecedores</StockSubTab>
         <StockSubTab active={view === "categories"} onClick={() => setView("categories")}>Categorias</StockSubTab>
         <StockSubTab active={view === "wastes"}    onClick={() => setView("wastes")}    tone="crit">Desperdícios</StockSubTab>
+        <StockSubTab active={view === "pending"}   onClick={() => setView("pending")}   tone="crit">
+          Pendências de lançamento
+          {pendingCount > 0 && (
+            <span className="badge" data-tone="crit" style={{ marginLeft: 6 }}>{pendingCount}</span>
+          )}
+        </StockSubTab>
       </div>
 
       {view === "inventory" ? (
@@ -638,6 +651,10 @@ function Stock({ scope }) {
               }
             }}
           />
+        </div>
+      ) : view === "pending" ? (
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "20px 28px 32px" }}>
+          <PendingEntriesView items={items} onRegisterEntry={() => setShowEntry(true)} />
         </div>
       ) : (<>
       {/* Header + filtros · uma linha só */}
@@ -2356,6 +2373,65 @@ function ComposeCmvToggle({ on, onToggle }) {
       }} />
       CMV
     </button>
+  );
+}
+
+// ============= Pendências de lançamento (sub-aba do Estoque) =============
+// Lista viva (log) dos insumos com saldo negativo: saída lançada sem a entrada
+// correspondente. Some sozinho quando a entrada é registrada. Itens em categoria
+// com alertas desligados são omitidos (mesma regra do modal de alerta).
+function PendingEntriesView({ items, onRegisterEntry }) {
+  const pend = useMemo(() => pendingEntryItems(items), [items]);
+
+  if (pend.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--fg-3)" }}>
+        <div style={{ fontSize: 26, marginBottom: 10, color: "var(--ok)" }}>✓</div>
+        <div style={{ fontSize: 14, color: "var(--fg-1)", marginBottom: 4 }}>Nenhuma pendência de lançamento</div>
+        <div style={{ fontSize: 12 }}>Todas as saídas têm a entrada correspondente — nenhum insumo com saldo negativo.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 15 }}>Pendências de lançamento</h2>
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--fg-3)", maxWidth: 640, lineHeight: 1.5 }}>
+            Insumos com <strong style={{ color: "var(--crit)" }}>saldo negativo</strong>: houve saída (requisição/baixa) sem a
+            entrada correspondente. Quase sempre o produto entrou no estoque físico sem a nota lançada — registre a entrada para acertar o saldo.
+          </p>
+        </div>
+        <span style={{ flex: 1 }} />
+        <button className="btn" data-variant="primary" data-size="sm" onClick={onRegisterEntry}>
+          <I.Plus size={13} />Registrar entrada
+        </button>
+      </div>
+
+      <table className="table" data-density="compact">
+        <thead>
+          <tr>
+            <th>Insumo</th>
+            <th>Categoria</th>
+            <th>Fornecedor</th>
+            <th className="num">Saldo</th>
+            <th className="num">Última compra</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pend.map((it) => (
+            <tr key={it.id}>
+              <td className="row-strong">{it.name}</td>
+              <td className="dim">{it.cat}</td>
+              <td className="dim" style={{ fontSize: 11.5 }}>{it.supplier || <span style={{ color: "var(--fg-4)" }}>—</span>}</td>
+              <td className="num" style={{ color: "var(--crit)", fontWeight: 600 }}>{it.qty} {it.unit}</td>
+              <td className="num">R$ {it.cost.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

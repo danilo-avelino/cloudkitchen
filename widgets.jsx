@@ -283,6 +283,63 @@ function SummaryStat({ label, value, tone }) {
   );
 }
 
+// ============= Pendências de lançamento (saldo negativo) =============
+// "Pendência de lançamento" = insumo com saldo negativo no sistema: houve baixa
+// (saída/requisição) sem a entrada correspondente. Quase sempre o produto entrou
+// fisicamente no estoque sem a nota ser lançada. Itens em categoria com alertas
+// desligados ("ignorar alertas") são omitidos — não geram ruído nesse alerta.
+function pendingEntryItems(list) {
+  return (list || [])
+    .filter((i) => Number(i.qty) < 0 && i.catAlertsEnabled !== false)
+    .sort((a, b) => Number(a.qty) - Number(b.qty)); // mais negativo primeiro
+}
+
+// Modal de alerta — abre ao entrar em Estoque/Requisições (desktop) quando há
+// pendências. Lista os itens com saldo negativo p/ o operador lançar a entrada.
+function PendingEntryModal({ items = [], onClose }) {
+  return (
+    <Modal
+      title="Pendências de lançamento"
+      subtitle="Insumos com saída registrada, mas sem a entrada correspondente"
+      width={400}
+      onClose={onClose}
+      footer={<button className="btn" data-variant="primary" data-size="sm" onClick={onClose}>Entendi</button>}
+    >
+      <div style={{ fontSize: 12, color: "var(--fg-2)", lineHeight: 1.45, marginBottom: 12 }}>
+        Provavelmente entraram no estoque físico sem a nota lançada. Lance a <strong style={{ color: "var(--fg-0)" }}>entrada</strong> destes itens no Estoque.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {items.map((it, i) => (
+          <div key={it.id} style={{
+            display: "flex", alignItems: "baseline", gap: 8,
+            padding: "6px 0",
+            borderTop: i === 0 ? "none" : "1px solid var(--line-soft)",
+          }}>
+            <span style={{ color: "var(--crit)", fontSize: 11, lineHeight: "16px" }}>•</span>
+            <span style={{ fontSize: 12.5, color: "var(--fg-0)", flex: 1, minWidth: 0 }}>{it.name}</span>
+            <span style={{ fontSize: 10.5, color: "var(--fg-3)", whiteSpace: "nowrap" }}>{it.cat || "Sem categoria"}</span>
+          </div>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+// Gate: monta junto da página, abre o modal UMA vez por entrada (remontagem)
+// quando há pendências. `stockItems` vem da própria página (já carregado do DB).
+function PendingEntryAlert({ stockItems = [] }) {
+  const pend = useMemo(() => pendingEntryItems(stockItems), [stockItems]);
+  const [open, setOpen] = useState(false);
+  const openedRef = useRef(false);
+  useEffect(() => {
+    if (openedRef.current || pend.length === 0) return; // só abre uma vez por montagem
+    openedRef.current = true;
+    setOpen(true);
+  }, [pend.length]);
+  if (!open || pend.length === 0) return null;
+  return <PendingEntryModal items={pend} onClose={() => setOpen(false)} />;
+}
+
 function PendingFeature({ variant = "badge", label, hint, children, style: extra }) {
   if (variant === "block") {
     return (
@@ -531,4 +588,5 @@ function PageLoading({ label = "Carregando…", hint = "Buscando dados do servid
 Object.assign(window, {
   Modal, ConfirmDialog, FormRow, SummaryStat, notImplemented, PendingFeature, PageLoading,
   parseQtyText, findStockItemByName, computeStockStatus, applyStockMovement,
+  pendingEntryItems, PendingEntryModal, PendingEntryAlert,
 });

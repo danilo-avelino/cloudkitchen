@@ -525,6 +525,10 @@ function Requests({ scope }) {
         </div>
       )}
 
+      {/* Alerta de pendências de lançamento (saldo negativo) — abre ao entrar.
+          Só no desktop: a tela mobile de requisição (MobileRequests) não usa este componente. */}
+      <PendingEntryAlert stockItems={source === "db" ? stockItems : []} />
+
       {creating && (
         <NewRequestModal
           defaultOp={scope !== "all" ? scope : null}

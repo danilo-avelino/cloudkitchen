@@ -19,6 +19,8 @@ const { useState, useEffect, useMemo, useCallback, useRef, useReducer, useContex
 // Componentes expostos em widgets.jsx — consumidores legados usam o identificador solto.
 const LEGACY_WIDGET_IMPORTS = `
 const SummaryStat = window.SummaryStat;
+const PendingEntryAlert = window.PendingEntryAlert;
+const pendingEntryItems = window.pendingEntryItems;
 `;
 
 function injectLegacyGlobals() {
