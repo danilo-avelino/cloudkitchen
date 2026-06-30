@@ -911,7 +911,14 @@ function InventoryDetailModal({ inventory, onClose }) {
             </tr>
           </thead>
           <tbody>
-            {inventory.items.map((it) => {
+            {[...inventory.items].sort((a, b) => {
+              const da = a.counted == null ? null : Number(a.counted) - (a.expected || 0);
+              const db = b.counted == null ? null : Number(b.counted) - (b.expected || 0);
+              if (da == null && db == null) return 0;
+              if (da == null) return 1;  // não contados por último
+              if (db == null) return -1;
+              return Math.abs(db) - Math.abs(da); // maior diferença (em módulo) primeiro
+            }).map((it) => {
               const counted = it.counted == null ? null : Number(it.counted);
               const diff    = counted == null ? null : counted - (it.expected || 0);
               const impact  = diff == null ? null : diff * (it.cost || 0);
