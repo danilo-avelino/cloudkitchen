@@ -173,7 +173,7 @@ function computeDreSummary({ entries, categories, subcategories, period, stockSn
 // Monta um documento A4 standalone e abre em nova janela com window.print() —
 // o usuário salva como PDF. Documento separado de propósito: o CSS de
 // impressão do app (styles.css) é para cupom térmico 80mm e quebraria a DRE.
-function buildDreExportHtml({ summary, categories, subcategories, periodLabel, entryCount, tenantName, stockSnapshot }) {
+function buildDreExportHtml({ summary, categories, subcategories, periodLabel, period, entryCount, tenantName, stockSnapshot }) {
   const fmt = window.fmt;
   const fmtDate = window.fmtDate;
   const { byCat, receita, receitaLiq, lucroBruto, lucroLiq, ei, ef, comprasTotal, cmvReal } = summary;
@@ -206,10 +206,15 @@ function buildDreExportHtml({ summary, categories, subcategories, periodLabel, e
   const now = new Date();
   const genAt = `${String(now.getDate()).padStart(2, "0")}/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
+  // EI/EF rotulados pelas fronteiras contábeis do mês (dia 1 / último dia), não pelo
+  // snapshot_at do cron — mesma regra do DREView.
+  const [_py, _pm] = String(period || "").split("-").map(Number);
+  const eiDate = period ? `${period}-01` : null;
+  const efDate = period ? `${period}-${String(new Date(_py, _pm, 0).getDate()).padStart(2, "0")}` : null;
   const cmvCells = ei > 0
-    ? `<div><span>EI${stockSnapshot?.initialAt ? ` · ${fmtDate(stockSnapshot.initialAt)}` : ""}</span><b>${fmt(ei)}</b></div>
+    ? `<div><span>EI${stockSnapshot?.initialAt && eiDate ? ` · ${fmtDate(eiDate)}` : ""}</span><b>${fmt(ei)}</b></div>
        <div><span>(+) Compras</span><b>${fmt(comprasTotal)}</b></div>
-       <div><span>EF${stockSnapshot?.finalAt ? ` · ${fmtDate(stockSnapshot.finalAt)}` : ""}</span><b>${fmt(ef)}</b></div>`
+       <div><span>EF${stockSnapshot?.finalAt && efDate ? ` · ${fmtDate(efDate)}` : ""}</span><b>${fmt(ef)}</b></div>`
     : `<div><span>(+) Compras · sem inventário inicial</span><b>${fmt(comprasTotal)}</b></div>`;
 
   return `<!doctype html>
@@ -663,7 +668,7 @@ function Dre() {
       const periodLabel = periodOptions.find((o) => o.value === period)?.label || period.replace("-", "/");
       const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
       const html = buildDreExportHtml({
-        summary, categories, subcategories, periodLabel,
+        summary, categories, subcategories, periodLabel, period,
         entryCount: inPeriod.length, tenantName, stockSnapshot,
       });
       const w = window.open("", "_blank");
@@ -875,6 +880,13 @@ function DREView({ entries, categories, subcategories, period, stockSnapshot = {
   const aboveLucroBruto  = sorted.filter((c) => ["revenue", "deduction", "cogs"].includes(c.kind));
   const belowLucroBruto  = sorted.filter((c) => ["expense", "financial"].includes(c.kind));
 
+  // EI/EF são fronteiras contábeis do mês: EI = abertura do dia 1, EF = fechamento do
+  // último dia. O snapshot_at grava o horário do cron (dia 2 na virada, dia 1 do mês
+  // seguinte às 23:59 SP), então rotulamos pelas datas de fronteira, não pelo snapshot_at.
+  const [_py, _pm] = period.split("-").map(Number);
+  const eiDate = `${period}-01`;
+  const efDate = `${period}-${String(new Date(_py, _pm, 0).getDate()).padStart(2, "0")}`;
+
   return (
     <div style={{ padding: "20px 28px 32px", display: "flex", flexDirection: "column", gap: 16 }} className="stagger">
       <div className="card" style={{ borderColor: "var(--accent-line)", background: "linear-gradient(180deg, rgba(45,140,102,0.05), transparent 70%)" }}>
@@ -887,10 +899,10 @@ function DREView({ entries, categories, subcategories, period, stockSnapshot = {
                 : <>Compras <span style={{ color: "var(--fg-3)" }}>(sem inventário inicial)</span></>}
             </div>
           </div>
-          <DreStat label={`EI${stockSnapshot.initialAt ? ` · ${fmtDate(stockSnapshot.initialAt)}` : ""}`} value={fmt(ei)} />
+          <DreStat label={`EI${stockSnapshot.initialAt ? ` · ${fmtDate(eiDate)}` : ""}`} value={fmt(ei)} />
           <DreStat label="(+) Compras" value={fmt(comprasTotal)} />
           {ei > 0 && (
-            <DreStat label={`EF${stockSnapshot.finalAt ? ` · ${fmtDate(stockSnapshot.finalAt)}` : ""}`} value={fmt(ef)} />
+            <DreStat label={`EF${stockSnapshot.finalAt ? ` · ${fmtDate(efDate)}` : ""}`} value={fmt(ef)} />
           )}
           <DreStat label="= CMV real" value={fmt(cmvReal)} accent sub={receita ? `${((cmvReal / receita) * 100).toFixed(1)}% da receita` : ""} />
         </div>

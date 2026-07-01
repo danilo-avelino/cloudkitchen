@@ -68,12 +68,11 @@ function Dashboard({ scope, setPage }) {
     todayConsumption: [],
     cmvDaily: [],
     requests: [],
-    cmvMovements: [], // saídas (kind=out) do mês até hoje, p/ CMV real por operação
     sharedSplits: {}, // { [requestId]: [{op, pct}] } · rateio das requisições de uso compartilhado
     periodMovements: [], // movimentações dentro do range do filtro de período (entradas/saídas KPIs)
     dreCategories: [],
     dreSubcategories: [],
-    financeEntries: [], // do mês corrente, p/ KPI "Compras do mês"
+    financeEntries: [], // do mês do filtro, p/ KPI "Compras do mês"
     fees: null,         // taxas de entrega (Agilizone) no período · { total, byOperation }
   });
 
@@ -141,36 +140,33 @@ function Dashboard({ scope, setPage }) {
       const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
       const endOfDay   = new Date(); endOfDay.setHours(23, 59, 59, 999);
 
-      const toYMD       = new Date().toISOString().slice(0, 10);
-      const _mtdFirst   = new Date(); _mtdFirst.setDate(1); _mtdFirst.setHours(0, 0, 0, 0);
-      const cmvFromYMD  = _mtdFirst.toISOString().slice(0, 10);
-      const currentPeriod = `${_mtdFirst.getFullYear()}-${String(_mtdFirst.getMonth() + 1).padStart(2, "0")}`;
+      // Compras do mês (DRE) segue o filtro: usa a competência do mês inicial do período.
+      const financePeriod = `${fromDate.getFullYear()}-${String(fromDate.getMonth() + 1).padStart(2, "0")}`;
       // Taxas de entrega: o RPC filtra por business_date (data civil) no período do header.
       const feesFromYMD = fromDate.toISOString().slice(0, 10);
       const feesToYMD   = (toDate || new Date()).toISOString().slice(0, 10);
 
-      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, movRes, periodMovRes, dreCatRes, dreSubRes, finRes, feesRes] = await Promise.all([
+      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, periodMovRes, dreCatRes, dreSubRes, finRes, feesRes] = await Promise.all([
         dbGetCurrentContext?.(),
         dbListRevenueEntries(tid, fromISO, toDate ? toISO : null),
         dbListRevenueEntries(tid, prevFromISO, prevToISO),
         dbListStockItems(tid),
         dbListInventories(tid),
         dbTopConsumedItems(tid, startOfDay.toISOString(), endOfDay.toISOString(), 8),
-        dbListCmvDaily(tid, cmvFromYMD, toYMD),
+        // cmvDaily (faturamento por operação dos cards CMV/Ranking): respeita o filtro do header.
+        dbListCmvDaily(tid, feesFromYMD, feesToYMD),
         dbListKitchenRequests(tid, { limit: 8 }),
-        // cmvMovements: fixo no MTD pra casar com cmvDaily nas tabelas de CMV.
-        dbListStockMovements(tid, _mtdFirst.toISOString(), new Date().toISOString(), { limit: 5000 }),
-        // periodMovements: respeita o filtro de período do header (entradas/saídas KPIs).
+        // periodMovements: respeita o filtro de período do header (KPIs de fluxo + cards CMV/Ranking).
         dbListStockMovements(tid, fromISO, toISO, { limit: 5000 }),
         dbListDreCategories?.(tid) || { data: null },
         dbListDreSubcategories?.(tid) || { data: null },
-        dbListFinanceEntries?.(tid, currentPeriod) || { data: null },
+        dbListFinanceEntries?.(tid, financePeriod) || { data: null },
         dbDeliveryFees?.(tid, feesFromYMD, feesToYMD) || { data: null },
       ]);
       if (cancelled) return;
-      // Splits das requisições de uso compartilhado que aparecem nas saídas do MTD —
+      // Splits das requisições de uso compartilhado que aparecem nas saídas do período —
       // p/ ratear o CMV por operação pelos pct (em vez de 100% na operação primária).
-      const cmvMovs = movRes.data || [];
+      const cmvMovs = periodMovRes.data || [];
       const reqIds = cmvMovs
         .filter((mv) => mv.referenceType === "kitchen_request" && mv.referenceId)
         .map((mv) => mv.referenceId);
@@ -184,7 +180,6 @@ function Dashboard({ scope, setPage }) {
         todayConsumption: consRes.data || [],
         cmvDaily:         cmvRes.data || [],
         requests:         reqRes.data || [],
-        cmvMovements:     cmvMovs,
         sharedSplits:     splitsRes.data || {},
         periodMovements:  periodMovRes.data || [],
         dreCategories:    dreCatRes.data || [],
@@ -248,7 +243,13 @@ function Dashboard({ scope, setPage }) {
   // Métricas dos novos módulos (Inventário)
   const moduleMetrics = useMemo(() => computeDashboardMetrics(scope, period, dbData, dbStatus.isOnline), [scope, period, dbData, dbStatus.isOnline]);
 
-  // Compras do mês corrente · soma das subcategorias do grupo CMV (exclui autofeed
+  // Mês (competência) do filtro, p/ o KPI "Compras do mês" — deriva do início do período.
+  const financeMonthLabel = useMemo(
+    () => new Date(`${_dashRangeYMD(period)[0].slice(0, 7)}-01T00:00:00`).toLocaleDateString("pt-BR", { month: "long" }),
+    [period],
+  );
+
+  // Compras do mês do filtro · soma das subcategorias do grupo CMV (exclui autofeed
   // "Ajuste de estoque"). Mesma fórmula do `comprasTotal` da DRE em page-finance.
   const comprasMes = useMemo(() => {
     const cats = dbData.dreCategories || [];
@@ -323,7 +324,7 @@ function Dashboard({ scope, setPage }) {
           title="Ver os 25 insumos mais caros" />
         <KpiCard label="Compras do mês" data={{
           v: `R$ ${(comprasMes / 1000).toFixed(1)}k`,
-          d: new Date().toLocaleDateString("pt-BR", { month: "long" }),
+          d: financeMonthLabel,
           tone: "info",
           sub: "via DRE · CMV",
         }} onClick={() => setPage("finance")} />
@@ -365,8 +366,8 @@ function Dashboard({ scope, setPage }) {
 
       {/* CMV + Ranking */}
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12 }}>
-        <CmvByOpCard setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbStatus.isOnline} />
-        <RankingCard cmvDaily={dbData.cmvDaily} movements={dbData.cmvMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbStatus.isOnline} />
+        <CmvByOpCard setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.periodMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbStatus.isOnline} periodLabel={periodLabel} />
+        <RankingCard cmvDaily={dbData.cmvDaily} movements={dbData.periodMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbStatus.isOnline} />
       </div>
 
       {/* Estoque por categoria */}
@@ -819,8 +820,8 @@ function Spark({ accent }) {
   );
 }
 
-function CmvByOpCard({ setPage, cmvDaily = [], movements = [], sharedSplits = {}, dbOnline = false }) {
-  // CMV real por operação no MTD = COGS ÷ faturamento. Faturamento vem de cmv_daily;
+function CmvByOpCard({ setPage, cmvDaily = [], movements = [], sharedSplits = {}, dbOnline = false, periodLabel = "" }) {
+  // CMV real por operação no período = COGS ÷ faturamento. Faturamento vem de cmv_daily;
   // COGS é recalculado aqui a partir de stock_movements porque revenue_entries.cogs é
   // hoje apenas um placeholder. Mesma fórmula do módulo CMV: consumo = out + loss/
   // expiration COM operação, excluindo compose_cmv=false; custo compartilhado (ajustes
@@ -909,7 +910,7 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], sharedSplits = {}
     <div className="card">
       <div className="card-header">
         <div>
-          <h3 className="card-title">CMV por operação · {new Date().toLocaleDateString("pt-BR", { month: "long" })} até hoje</h3>
+          <h3 className="card-title">CMV por operação · {periodLabel || "período"}</h3>
           <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Saídas de estoque ÷ faturamento</span>
         </div>
         <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setPage && setPage("cmv")}>Ver detalhes <I.ChevronR size={12} /></button>
