@@ -1633,6 +1633,7 @@ function AllocationPanel({ item, onClose }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
   const [movements, setMovements] = useState(null);
   const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
+  const [sharedSplits30, setSharedSplits30] = useState({}); // { [requestId]: [{op, pct}] } das requisições compartilhadas
   const [consumption7d, setConsumption7d] = useState(null);
   const [showHistory, setShowHistory] = useState(false); // modal "Ver histórico" do item
   // Modo de auto min/max: 'off' | 'weekly' | 'monthly'
@@ -1667,10 +1668,10 @@ function AllocationPanel({ item, onClose }) {
   };
 
   useEffect(() => {
-    if (!dbStatus.isOnline || !item.id) { setMovements([]); setMovements30([]); setConsumption7d({ qty: 0, daily: 0, window: 30, hasData: false }); return; }
+    if (!dbStatus.isOnline || !item.id) { setMovements([]); setMovements30([]); setSharedSplits30({}); setConsumption7d({ qty: 0, daily: 0, window: 30, hasData: false }); return; }
     // Zera os dados do insumo anterior pra exibir o estado de carregamento
     // enquanto busca os reais — senão o painel mostra dados do item antigo.
-    setMovements(null); setMovements30(null); setConsumption7d(null);
+    setMovements(null); setMovements30(null); setSharedSplits30({}); setConsumption7d(null);
     let cancelled = false;
     (async () => {
       const ctx = await dbGetCurrentContext();
@@ -1693,6 +1694,17 @@ function AllocationPanel({ item, onClose }) {
       const useMonthly = total30 > 0;
       const daily = useMonthly ? (total30 / 30) : (total7 / 7);
       setMovements30(outs30);
+
+      // A requisição "Uso compartilhado" grava operation_id = operação primária e
+      // guarda o rateio real em splits. Sem isso o consumo compartilhado apareceria
+      // 100% na primária, como se fosse consumo exclusivo dela.
+      const reqIds = outs30
+        .filter((m) => m.referenceType === "kitchen_request" && m.referenceId)
+        .map((m) => m.referenceId);
+      const splitsRes = await (window.dbListSharedSplits?.(tid, reqIds) || { data: {} });
+      if (cancelled) return;
+      setSharedSplits30(splitsRes.data || {});
+
       setConsumption7d({
         qty: useMonthly ? total30 : total7,
         daily,
@@ -1814,15 +1826,37 @@ function AllocationPanel({ item, onClose }) {
         {movements30 == null ? (
           <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Carregando…</div>
         ) : (() => {
-          // Agrupa saídas dos últimos 30d por operação com dados reais
+          // Agrupa saídas dos últimos 30d por operação com dados reais. Saídas de
+          // requisição compartilhada não pertencem a nenhuma operação — vão para uma
+          // linha própria, com o rateio das operações listado como legenda.
           const byOp = new Map();
+          const sharedByOp = new Map(); // qty rateada por operação, só p/ a legenda
           for (const m of movements30) {
-            const key   = m.operationId  || "__shared__";
-            const label = m.operationName || (m.op && m.op !== "—" ? m.op : "Compartilhado");
-            const color = m.operationColor || "var(--fg-3)";
-            if (!byOp.has(key)) byOp.set(key, { label, color, qty: 0 });
-            byOp.get(key).qty += Math.abs(Number(m.delta) || 0);
+            const qty = Math.abs(Number(m.delta) || 0);
+            const splits = (m.referenceType === "kitchen_request" && m.referenceId)
+              ? sharedSplits30[m.referenceId]
+              : null;
+            const key   = splits ? "__shared__" : (m.operationId || "__none__");
+            const label = splits ? "Compartilhado" : (m.operationName || (m.op && m.op !== "—" ? m.op : "Sem operação"));
+            const color = splits ? "var(--fg-2)" : (m.operationColor || "var(--fg-3)");
+            if (!byOp.has(key)) byOp.set(key, { key, label, color, qty: 0 });
+            byOp.get(key).qty += qty;
+            if (splits) {
+              for (const s of splits) {
+                const op = window.MOCK?.opById?.(s.op);
+                const name = op?.name || "—";
+                sharedByOp.set(name, (sharedByOp.get(name) || 0) + qty * ((Number(s.pct) || 0) / 100));
+              }
+            }
           }
+          // Legenda: "Nippon 70% · Loja Terra 30%" ponderado pela qty de cada saída.
+          const sharedTotal = Array.from(sharedByOp.values()).reduce((s, v) => s + v, 0);
+          const sharedLegend = sharedTotal > 0
+            ? Array.from(sharedByOp.entries())
+                .sort((a, b) => b[1] - a[1])
+                .map(([name, v]) => `${name} ${Math.round((v / sharedTotal) * 100)}%`)
+                .join(" · ")
+            : null;
           const entries = Array.from(byOp.values()).filter((e) => e.qty > 0).sort((a, b) => b.qty - a.qty);
           const totalQty = entries.reduce((s, e) => s + e.qty, 0);
           if (entries.length === 0) {
@@ -1833,7 +1867,7 @@ function AllocationPanel({ item, onClose }) {
               {entries.map((e) => {
                 const pct = totalQty > 0 ? (e.qty / totalQty) * 100 : 0;
                 return (
-                  <div key={e.label}>
+                  <div key={e.key}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                       <span style={{ width: 6, height: 6, borderRadius: 50, background: e.color }} />
                       <span style={{ fontSize: 12, color: "var(--fg-0)" }}>{e.label}</span>
@@ -1846,6 +1880,11 @@ function AllocationPanel({ item, onClose }) {
                     <div className="bar" style={{ height: 3 }}>
                       <i style={{ width: `${pct}%`, background: e.color }} />
                     </div>
+                    {e.key === "__shared__" && sharedLegend && (
+                      <div style={{ marginTop: 5, fontSize: 10.5, color: "var(--fg-3)", paddingLeft: 14 }}>
+                        {sharedLegend}
+                      </div>
+                    )}
                   </div>
                 );
               })}
