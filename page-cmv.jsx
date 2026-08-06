@@ -94,6 +94,7 @@ function buildDailyRows(revenueEntries, movements, sharedSplits = {}) {
     // Desperdício compartilhado (sem op) é tratado fora, rateado pelo faturamento.
     if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
     if (mv.composeCmv === false) continue; // respeita flag "não compõe CMV"
+    if (isNonCmvMovement(mv)) continue;    // produção/transferência: conversão de valor, não consumo
     const d = _spDay(mv.at);
     if (!d) continue;
     const cost = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
@@ -127,6 +128,7 @@ function buildDayOpDetail(movements, revenueEntries, sharedSplits, op, isoDate) 
   for (const mv of movements) {
     if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
     if (mv.composeCmv === false) continue;
+    if (isNonCmvMovement(mv)) continue;
     if (_spDay(mv.at) !== isoDate) continue;
     const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
     if (splits && splits.length > 0) {
@@ -157,6 +159,7 @@ function excludedImpact(movements, fromDate, toDate) {
   for (const mv of movements) {
     const isCogsKind = mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration";
     if (!isCogsKind || mv.composeCmv !== false) continue;
+    if (isNonCmvMovement(mv)) continue; // excluído por natureza, não pelo flag do insumo
     const d = _spDay(mv.at);
     if (d < fromDate || d > toDate) continue;
     if (mv.itemId) set.add(mv.itemId);
@@ -173,6 +176,7 @@ function buildItemRows(movements, opFilter) {
   for (const mv of movements) {
     if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
     if (mv.composeCmv === false) continue;
+    if (isNonCmvMovement(mv)) continue;
     if (opFilter && opFilter !== "all" && mv.op !== opFilter) continue;
     const id = mv.itemId || mv.item;
     if (!acc[id]) acc[id] = { id, name: mv.item, unit: mv.unit, category: mv.categoryName, qty: 0, cost: 0 };
@@ -264,6 +268,7 @@ function periodFmt(gran) {
 function cmvOutCost(mv) {
   if (mv.composeCmv === false) return 0;
   if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") return 0;
+  if (isNonCmvMovement(mv)) return 0; // produção/transferência não é consumo
   return Math.abs(Number(mv.delta) || 0) * (Number(mv.unitCost) || 0);
 }
 
@@ -767,6 +772,7 @@ function CMV({ setPage }) {
     for (const mv of movements) {
       if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
       if (mv.composeCmv === false) continue;
+      if (isNonCmvMovement(mv)) continue;
       const splits = mv.referenceId ? sharedSplitsResolved[mv.referenceId] : null;
       if (!splits || splits.length === 0) continue;
       const cost = Math.abs(Number(mv.delta) || 0) * (Number(mv.unitCost) || 0);

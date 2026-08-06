@@ -29,6 +29,52 @@ function _dashRangeYMD(period) {
   return [from.toISOString().slice(0, 10), (to || new Date()).toISOString().slice(0, 10)];
 }
 
+// Range ISO do período do header (from/to) + período anterior de mesmo tamanho.
+// Função pura extraída do useEffect do Dashboard para ser reaproveitada pela
+// versão mobile (MobileDashboard) — mesma semântica de dia civil.
+function dashPeriodRange(period) {
+  // Range começa em 00:00 do dia inicial — evita vazar movimentações de "ontem 23:xx"
+  // no filtro "Hoje" e dá semântica de dia civil em todas as opções.
+  const fromDate = new Date();
+  // toDate limita o range superior (null = sem limite = até agora).
+  // "Ontem"/"Mês passado" são os únicos com limite superior explícito.
+  let toDate = null;
+  if (period === "1d") {
+    fromDate.setHours(0, 0, 0, 0);
+  } else if (period === "yesterday") {
+    fromDate.setDate(fromDate.getDate() - 1);
+    fromDate.setHours(0, 0, 0, 0);
+    toDate = new Date(fromDate);
+    toDate.setHours(23, 59, 59, 999);
+  } else if (period === "7d") {
+    fromDate.setDate(fromDate.getDate() - 6); // 7 dias incluindo hoje
+    fromDate.setHours(0, 0, 0, 0);
+  } else if (period === "30d") {
+    fromDate.setDate(fromDate.getDate() - 29); // 30 dias incluindo hoje
+    fromDate.setHours(0, 0, 0, 0);
+  } else if (period === "lastmonth") {
+    fromDate.setDate(1);
+    fromDate.setMonth(fromDate.getMonth() - 1);
+    fromDate.setHours(0, 0, 0, 0);
+    toDate = new Date(fromDate.getFullYear(), fromDate.getMonth() + 1, 0, 23, 59, 59, 999);
+  } else { // mtd: dia 1 do mês corrente até agora
+    fromDate.setDate(1);
+    fromDate.setHours(0, 0, 0, 0);
+  }
+  const fromISO = fromDate.toISOString();
+  const toISO   = toDate ? toDate.toISOString() : new Date().toISOString();
+  // Período anterior: mesmo tamanho, terminando no início do período atual.
+  const prevToISO = fromDate.toISOString();
+  const prevFromDate = new Date(fromDate);
+  if (period === "1d")             prevFromDate.setDate(prevFromDate.getDate() - 1);
+  else if (period === "yesterday") prevFromDate.setDate(prevFromDate.getDate() - 1);
+  else if (period === "7d")        prevFromDate.setDate(prevFromDate.getDate() - 7);
+  else if (period === "30d")       prevFromDate.setDate(prevFromDate.getDate() - 30);
+  else                             prevFromDate.setMonth(prevFromDate.getMonth() - 1);
+  const prevFromISO = prevFromDate.toISOString();
+  return { fromDate, toDate, fromISO, toISO, prevFromISO, prevToISO };
+}
+
 function Dashboard({ scope, setPage }) {
   const op = MOCK.opById(scope);
   const isConsolidated = scope === "all";
@@ -95,47 +141,9 @@ function Dashboard({ scope, setPage }) {
     setPeriodLoading(true);
 
     const load = async () => {
-      // Range do período começa em 00:00 do dia inicial — evita vazar movimentações
-      // de "ontem 23:xx" no filtro "Hoje" e dá semântica de dia civil em todas as opções.
-      const fromDate = new Date();
-      // toDate limita o range superior (null = sem limite = até agora).
-      // "Ontem" é o único período que tem limite superior explícito (23:59:59 de ontem).
-      let toDate = null;
-      if (period === "1d") {
-        fromDate.setHours(0, 0, 0, 0);
-      } else if (period === "yesterday") {
-        // De 00:00 a 23:59:59 do dia anterior — dia civil completo
-        fromDate.setDate(fromDate.getDate() - 1);
-        fromDate.setHours(0, 0, 0, 0);
-        toDate = new Date(fromDate);
-        toDate.setHours(23, 59, 59, 999);
-      } else if (period === "7d") {
-        fromDate.setDate(fromDate.getDate() - 6); // 7 dias incluindo hoje
-        fromDate.setHours(0, 0, 0, 0);
-      } else if (period === "30d") {
-        fromDate.setDate(fromDate.getDate() - 29); // 30 dias incluindo hoje
-        fromDate.setHours(0, 0, 0, 0);
-      } else if (period === "lastmonth") {
-        // Mês civil completo anterior: dia 1 do mês passado a 23:59:59 do último dia
-        fromDate.setDate(1);
-        fromDate.setMonth(fromDate.getMonth() - 1);
-        fromDate.setHours(0, 0, 0, 0);
-        toDate = new Date(fromDate.getFullYear(), fromDate.getMonth() + 1, 0, 23, 59, 59, 999);
-      } else { // mtd: dia 1 do mês corrente até agora
-        fromDate.setDate(1);
-        fromDate.setHours(0, 0, 0, 0);
-      }
-      const fromISO = fromDate.toISOString();
-      const toISO   = toDate ? toDate.toISOString() : new Date().toISOString();
-      // Período anterior: mesmo tamanho, terminando no início do período atual
-      const prevToISO = fromDate.toISOString();
-      const prevFromDate = new Date(fromDate);
-      if (period === "1d")          prevFromDate.setDate(prevFromDate.getDate() - 1);
-      else if (period === "yesterday") prevFromDate.setDate(prevFromDate.getDate() - 1);
-      else if (period === "7d")     prevFromDate.setDate(prevFromDate.getDate() - 7);
-      else if (period === "30d")    prevFromDate.setDate(prevFromDate.getDate() - 30);
-      else                          prevFromDate.setMonth(prevFromDate.getMonth() - 1);
-      const prevFromISO = prevFromDate.toISOString();
+      // Range do período (from/to + período anterior) — função pura compartilhada
+      // com a versão mobile (MobileDashboard).
+      const { fromDate, toDate, fromISO, toISO, prevFromISO, prevToISO } = dashPeriodRange(period);
 
       const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
       const endOfDay   = new Date(); endOfDay.setHours(23, 59, 59, 999);
@@ -689,6 +697,7 @@ function computeKpi(scope, dbData = {}, period = "7d") {
   let saidasValue = 0;
   for (const mv of (dbData.periodMovements || [])) {
     if (mv.composeCmv === false) continue;
+    if (isNonCmvMovement(mv)) continue; // produção/transferência: conversão de valor, não consumo
     const value = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
     if (mv.kind === "out" || mv.kind === "loss" || mv.kind === "expiration") saidasValue += value;
     else if (mv.kind === "adjust" && (mv.delta || 0) < 0) saidasValue += value;
@@ -843,6 +852,7 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], sharedSplits = {}
     for (const mv of movements) {
       if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
       if (mv.composeCmv === false) continue;
+      if (isNonCmvMovement(mv)) continue;
       const cost = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
       if (!cost) continue;
       const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
@@ -991,6 +1001,7 @@ function RankingCard({ cmvDaily = [], movements = [], sharedSplits = {}, dbOnlin
     for (const mv of movements) {
       if (mv.kind !== "out" && mv.kind !== "loss" && mv.kind !== "expiration") continue;
       if (mv.composeCmv === false) continue;
+      if (isNonCmvMovement(mv)) continue;
       const cost = Math.abs(mv.delta || 0) * (mv.unitCost || 0);
       if (!cost) continue;
       const splits = mv.referenceId ? sharedSplits[mv.referenceId] : null;
@@ -1443,3 +1454,12 @@ window.FlowKpi                 = FlowKpi;
 window.ModuleKpi               = ModuleKpi;
 window.StockFlowDetailModal    = StockFlowDetailModal;
 window.computeDashboardMetrics = computeDashboardMetrics;
+// Expostos p/ a versão mobile (MobileDashboard) — mesma lógica de negócio, layout próprio.
+window.computeKpi              = computeKpi;
+window.dashPeriodRange         = dashPeriodRange;
+window.CmvByOpCard             = CmvByOpCard;
+window.RankingCard             = RankingCard;
+window.TodayConsumptionCard    = TodayConsumptionCard;
+window.StockByCategoryCard     = StockByCategoryCard;
+window.ConsolidatedAlertsCard  = ConsolidatedAlertsCard;
+window.RecentRequestsCard      = RecentRequestsCard;

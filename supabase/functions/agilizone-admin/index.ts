@@ -49,13 +49,21 @@ serve(async (req) => {
       return json({ error: "Forbidden · requer owner/admin" }, 403);
     }
 
+    // trava de exclusividade de logística: tenant tem alguma conta Foody ativa?
+    const foodyActive = async () => {
+      const { count } = await admin.from("foody_accounts")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId).eq("is_active", true);
+      return (count || 0) > 0;
+    };
+
     // ===================== list-accounts =====================
     if (action === "list-accounts") {
       const { data, error } = await admin.from("agilizone_accounts")
         .select("id, label, environment, client_id, store_id, is_active, last_synced_at")
         .eq("tenant_id", tenantId).order("created_at");
       if (error) return json({ error: error.message }, 500);
-      return json({ ok: true, accounts: data || [] });
+      return json({ ok: true, accounts: data || [], otherActive: await foodyActive() });
     }
 
     // ===================== save-account =====================
@@ -67,6 +75,7 @@ serve(async (req) => {
       const env = environment === "sandbox" ? "sandbox" : "production";
 
       let accountId = id;
+      let lockedPaused = false;
       if (id) {
         const patch: Record<string, unknown> = { label: label.trim(), environment: env };
         if (clientId?.trim()) patch.client_id = clientId.trim();
@@ -75,8 +84,10 @@ serve(async (req) => {
         if (error) return json({ error: error.message }, 500);
       } else {
         if (!clientId?.trim()) return json({ error: "clientId obrigatório" }, 400);
+        // trava: conta nova nasce pausada se a Foody estiver ativa
+        lockedPaused = await foodyActive();
         const { data, error } = await admin.from("agilizone_accounts")
-          .insert({ tenant_id: tenantId, label: label.trim(), environment: env, client_id: clientId.trim(), is_active: true })
+          .insert({ tenant_id: tenantId, label: label.trim(), environment: env, client_id: clientId.trim(), is_active: !lockedPaused })
           .select("id").single();
         if (error) return json({ error: error.message }, 500);
         accountId = data.id;
@@ -88,16 +99,19 @@ serve(async (req) => {
           { p_client_id: clientId.trim(), p_secret: clientSecret.trim() });
         if (secErr) return json({ error: `secret: ${secErr.message}` }, 500);
       }
-      return json({ ok: true, id: accountId });
+      return json({ ok: true, id: accountId, lockedPaused });
     }
 
     // ===================== toggle-account =====================
     if (action === "toggle-account") {
       const { id, isActive } = body as { id?: string; isActive?: boolean };
       if (!id) return json({ error: "id required" }, 400);
+      if (isActive && await foodyActive()) {
+        return json({ error: "Desative a integração Foody Delivery antes de ativar a Agilizone." }, 409);
+      }
       const { error } = await admin.from("agilizone_accounts")
         .update({ is_active: !!isActive }).eq("id", id).eq("tenant_id", tenantId);
-      if (error) return json({ error: error.message }, 500);
+      if (error) return json({ error: error.message }, 500);   // trigger de exclusividade é o backstop
       return json({ ok: true });
     }
 

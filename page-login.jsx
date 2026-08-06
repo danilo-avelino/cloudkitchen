@@ -159,12 +159,22 @@ function LoginPage({ onLogin }) {
   };
 
   return (
-    <div style={{
+    <div className="login-screen" style={{
       minHeight: "100vh", display: "grid", placeItems: "center",
       background: "var(--bg-0)", padding: 20,
       fontFamily: "var(--sans)",
     }}>
-      <div style={{
+      {/* Ajustes de celular (≤480px): inputs 16px (anti-zoom iOS), alvos de toque
+          maiores, card full-width e safe-area. Escopado ao login. */}
+      <style>{`
+        @media (max-width: 480px) {
+          .login-screen { padding: calc(20px + env(safe-area-inset-top)) 14px calc(20px + env(safe-area-inset-bottom)) !important; align-content: start; }
+          .login-screen .login-card { width: 100% !important; padding: 26px 20px !important; box-shadow: none !important; border-radius: 12px !important; }
+          .login-screen .input { font-size: 16px !important; height: auto !important; padding: 12px 12px !important; }
+          .login-screen .btn { padding: 14px 16px !important; font-size: 15px !important; }
+        }
+      `}</style>
+      <div className="login-card" style={{
         width: 420, maxWidth: "100%",
         background: "var(--bg-1)", border: "1px solid var(--line)",
         borderRadius: 8, padding: "32px 28px",

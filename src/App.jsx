@@ -15,6 +15,9 @@ const TWEAK_DEFAULS = /*EDITMODE-BEGIN*/{
 const PAGE_SLUGS = {
   dashboard: "dashboard",
   stock:     "estoque",
+  production:  "producao",
+  supply:      "suprimentos",
+  distribution: "central",
   recipes:   "fichas-tecnicas",
   revenue:   "faturamento",
   delivery:  "logistica",
@@ -29,6 +32,8 @@ const PAGE_SLUGS = {
   saas:      "admin",
 };
 const SLUG_TO_PAGE = Object.fromEntries(Object.entries(PAGE_SLUGS).map(([id, s]) => [s, id]));
+// Slug legado: Transformados virou aba do módulo Produção (2026-07-12).
+SLUG_TO_PAGE["transformados"] = "production";
 // Rota standalone (tela cheia, sem shell): página mobile de lançamento de requisição.
 const MOBILE_SLUG = "mobile";
 const _hashSlug = () => window.location.hash.replace(/^#\/?/, "").split(/[/?#]/)[0].trim();
@@ -68,6 +73,9 @@ export function App() {
 
   const handleLogin = (u) => {
     setUser(u);
+    // No celular o toast fica sobre a bottom nav e atrapalha a navegação — só no desktop.
+    const isMobile = window.matchMedia?.("(max-width: 480px)").matches;
+    if (isMobile) return;
     if (u.role === "superadmin") {
       window.showToast(`Bem-vindo, ${u.name} · acesso superadmin`, { tone: "ok", ttl: 4500 });
     } else {
@@ -168,12 +176,24 @@ export function App() {
     window.location.hash = `/${PAGE_SLUGS[page] || "dashboard"}`;
   }
 
-  return <AppShell
+  return <AppShellRouter
     t={t} setTweak={setTweak} scope={scope} setScope={setScope}
     page={page} setPage={setPage} opMenuOpen={opMenuOpen} setOpMenuOpen={setOpMenuOpen}
     toasts={toasts} setToasts={setToasts} user={user} onLogout={handleLogout}
     onSwitchTenant={handleSwitchTenant}
   />;
+}
+
+// Escolhe o shell conforme a largura da tela: MobileApp (celular ≤480px) ou AppShell.
+// Hook precisa viver num componente pra reagir ao resize (não pode ir no App acima
+// do early-return de login/mobile).
+function AppShellRouter(props) {
+  const isMobile = typeof useIsMobile === "function" ? useIsMobile() : false;
+  if (isMobile && typeof MobileApp === "function") {
+    const { setToasts, opMenuOpen, setOpMenuOpen, ...rest } = props;
+    return <MobileApp {...rest} />;
+  }
+  return <AppShell {...props} />;
 }
 
 function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, toasts, setToasts, user, onLogout, onSwitchTenant }) {
@@ -212,6 +232,9 @@ function AppShell({ t, setTweak, scope, setScope, page, setPage, opMenuOpen, set
           {page === "saas"      && <SuperAdmin user={user} onLogout={onLogout} embedded />}
           {page === "dashboard" && <Dashboard scope={scope} setPage={setPage} />}
           {page === "stock"     && <Stock scope={scope} />}
+          {page === "production" && <Production scope={scope} />}
+          {page === "supply"     && <Suprimentos scope={scope} />}
+          {page === "distribution" && <CentralDistribuicao scope={scope} />}
           {page === "recipes"   && <Recipes scope={scope} />}
           {page === "revenue"   && <Revenue scope={scope} />}
           {page === "delivery"  && <DeliveryTimes scope={scope} />}

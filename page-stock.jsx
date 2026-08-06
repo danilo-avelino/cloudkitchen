@@ -4376,3 +4376,4 @@ window.Tabs = Tabs;
 window.WastesView = WastesView;
 window.WasteEntryModal = WasteEntryModal;
 window.StockTopValueModal = StockTopValueModal;
+window.StockScaleBar = StockScaleBar; // reusado no detalhe do item mobile

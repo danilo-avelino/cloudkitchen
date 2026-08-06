@@ -490,7 +490,7 @@ function DeliveryTimes({ scope }) {
       setOpMap(map);
       setOps((o || []).filter((x) => x.id !== "all").map((x) => ({ id: x.id, name: x.name })));
       await refreshShifts(t);
-      const { active } = await dbAgilizoneIntegrationActive(t);
+      const { active } = await dbLogisticsIntegrationActive(t);
       if (cancelled) return;
       setInteg(active);
     })();
@@ -570,13 +570,14 @@ function DeliveryTimes({ scope }) {
           <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 46, height: 46, borderRadius: 12, marginBottom: 14, background: "var(--info-soft)", border: "1px solid var(--info-line)", color: "var(--info)" }}>
             <I.AlertTriangle size={22} />
           </span>
-          <h2 style={{ fontSize: 17, fontWeight: 600, margin: "0 0 10px", color: "var(--fg-0)" }}>Integração Agilizone não ativa</h2>
+          <h2 style={{ fontSize: 17, fontWeight: 600, margin: "0 0 10px", color: "var(--fg-0)" }}>Integração de logística não ativa</h2>
           <p style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: "0 0 8px" }}>
-            A Logística é alimentada pela integração com a <b>Agilizone</b>, o sistema de gestão de delivery.
+            A Logística é alimentada pela integração com a <b>Agilizone</b> ou a <b>Foody Delivery</b>,
+            os sistemas de gestão de delivery (uma ativa por vez).
           </p>
           <p style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.6, margin: 0 }}>
-            Entre em contato com a <b>Agilizone</b> para realizar a integração. Depois, ative-a e atrele as
-            marcas às operações em <b>Configurações → Agilizone</b>.
+            Configure a integração e atrele as marcas/pontos de coleta às operações em
+            <b> Configurações → Agilizone</b> ou <b>Configurações → Foody Delivery</b>.
           </p>
         </div>
       </div>
@@ -660,7 +661,7 @@ function DeliveryTimes({ scope }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       <div style={{ padding: "20px 28px 0" }}>
-        <div className="h-eyebrow" style={{ marginBottom: 6 }}>Operação · Agilizone</div>
+        <div className="h-eyebrow" style={{ marginBottom: 6 }}>Operação · Delivery</div>
         <h1 className="h-title">Logística</h1>
 
         {/* sub-abas */}
@@ -715,8 +716,8 @@ function DeliveryTimes({ scope }) {
         {view === "tempos" && (
           !hasTimeData ? (
             <div style={{ fontSize: 13, color: "var(--fg-3)", maxWidth: 620 }}>
-              Sem dados de delivery no período/filtro. Verifique se há operações com marcas
-              atreladas em <b>Configurações → Agilizone</b> e se o ingest já rodou.
+              Sem dados de delivery no período/filtro. Verifique se há operações com marcas/pontos
+              atrelados em <b>Configurações → Agilizone / Foody Delivery</b> e se o ingest já rodou.
             </div>
           ) : (
             <>
@@ -842,8 +843,8 @@ function DeliveryTimes({ scope }) {
         {view === "bairros" && (
           hoods.length === 0 ? (
             <div style={{ fontSize: 13, color: "var(--fg-3)", maxWidth: 620 }}>
-              Sem pedidos no período/filtro. Verifique se há operações com marcas atreladas
-              em <b>Configurações → Agilizone</b> e se o ingest já rodou.
+              Sem pedidos no período/filtro. Verifique se há operações com marcas/pontos atrelados
+              em <b>Configurações → Agilizone / Foody Delivery</b> e se o ingest já rodou.
             </div>
           ) : (
             <>

@@ -48,6 +48,7 @@ serve(async (req) => {
 
     // Try to create user with password (already confirmed, no email needed)
     let userId: string | null = null;
+    let linkedExisting = false;
     const { data: created, error: createErr } = await admin.auth.admin.createUser({
       email,
       password,
@@ -56,7 +57,12 @@ serve(async (req) => {
     });
 
     if (createErr) {
-      // If user already exists, look them up and reset their password
+      // O e-mail já tem conta na plataforma. NUNCA redefinir a senha de uma conta
+      // existente aqui: o caller só é owner/admin do PRÓPRIO tenant e o e-mail é um
+      // identificador GLOBAL — resetar a senha permitiria tomar a conta de outro
+      // tenant (ou de um superadmin). Apenas vinculamos o usuário existente a este
+      // tenant (membership multi-tenant); a senha dele fica intacta. Troca de senha
+      // de membro do próprio tenant é feita pelo fluxo `update-member`.
       const msg = String(createErr.message || "").toLowerCase();
       if (msg.includes("already") || msg.includes("registered") || msg.includes("exists")) {
         const { data: list, error: listErr } = await admin.auth.admin.listUsers({ page: 1, perPage: 200 });
@@ -68,7 +74,7 @@ serve(async (req) => {
           return new Response(JSON.stringify({ error: createErr.message }), { status: 500, headers: corsHeaders });
         }
         userId = existing.id;
-        await admin.auth.admin.updateUserById(existing.id, { password, email_confirm: true });
+        linkedExisting = true;
       } else {
         return new Response(JSON.stringify({ error: createErr.message }), { status: 500, headers: corsHeaders });
       }
@@ -105,7 +111,10 @@ serve(async (req) => {
       await admin.from("profiles").update({ full_name: name.trim() }).eq("id", userId);
     }
 
-    return new Response(JSON.stringify({ userId, email }), { status: 201, headers: corsHeaders });
+    return new Response(
+      JSON.stringify({ userId, email, linkedExisting, passwordApplied: !linkedExisting }),
+      { status: 201, headers: corsHeaders },
+    );
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500, headers: corsHeaders });
   }

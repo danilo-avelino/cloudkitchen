@@ -34,6 +34,7 @@ function Shopping({ embedded = false, onSave = null, stockItems: stockItemsProp 
   const baseSuggestions = useMemo(() => {
     return (stockItems || [])
       .filter((it) => it.catAutoShoppingEnabled !== false)
+      .filter((it) => it.itemKind !== "transformed") // transformados são produzidos, não comprados
       .filter((it) => it.qty < it.reorder)
       .map((it) => {
         const target = it.max && it.max > it.reorder ? it.max : it.reorder * 2;

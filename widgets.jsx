@@ -236,6 +236,16 @@ function computeStockStatus(it) {
   return "ok";
 }
 
+// Movimentações que convertem/transferem valor sem consumo NÃO compõem CMV:
+// produção/porcionamento ('production_order') e transferências da rede de
+// suprimentos ('supply_transfer'). A exceção é a saída "direto na cozinha"
+// ('supply_transfer_kitchen'), que é consumo real e conta normalmente.
+// Espelha PRD-PRODUCAO-E-DISTRIBUICAO.md §3.2.
+const NON_CMV_REFERENCE_TYPES = ["production_order", "supply_transfer"];
+function isNonCmvMovement(mv) {
+  return NON_CMV_REFERENCE_TYPES.includes(mv?.referenceType);
+}
+
 // Aplica uma movimentação no item:
 //   deltaQty > 0  → entrada (substitui o custo do insumo pelo da última compra)
 //   deltaQty < 0  → saída
@@ -588,5 +598,6 @@ function PageLoading({ label = "Carregando…", hint = "Buscando dados do servid
 Object.assign(window, {
   Modal, ConfirmDialog, FormRow, SummaryStat, notImplemented, PendingFeature, PageLoading,
   parseQtyText, findStockItemByName, computeStockStatus, applyStockMovement,
+  isNonCmvMovement, NON_CMV_REFERENCE_TYPES,
   pendingEntryItems, PendingEntryModal, PendingEntryAlert,
 });

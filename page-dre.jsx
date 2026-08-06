@@ -887,6 +887,16 @@ function DREView({ entries, categories, subcategories, period, stockSnapshot = {
   const eiDate = `${period}-01`;
   const efDate = `${period}-${String(new Date(_py, _pm, 0).getDate()).padStart(2, "0")}`;
 
+  // Visão gerencial da central de distribuição (decisão do PRD §12.4): total
+  // repassado à rede no mês. Fonte: lançamentos automáticos na subcategoria
+  // "Repasses à rede (−)" (valores negativos — aqui exibidos em absoluto).
+  // Só aparece quando há repasses, então não polui a DRE de tenants comuns.
+  const repassesSub = subcategories.find((s) => (s.name || s.label || "") === "Repasses à rede (−)");
+  const repassesMes = repassesSub
+    ? Math.abs(entries.filter((e) => e.cat === repassesSub.id)
+        .reduce((s, e) => s + (Number(e.value) || 0), 0))
+    : 0;
+
   return (
     <div style={{ padding: "20px 28px 32px", display: "flex", flexDirection: "column", gap: 16 }} className="stagger">
       <div className="card" style={{ borderColor: "var(--accent-line)", background: "linear-gradient(180deg, rgba(45,140,102,0.05), transparent 70%)" }}>
@@ -907,6 +917,21 @@ function DREView({ entries, categories, subcategories, period, stockSnapshot = {
           <DreStat label="= CMV real" value={fmt(cmvReal)} accent sub={receita ? `${((cmvReal / receita) * 100).toFixed(1)}% da receita` : ""} />
         </div>
       </div>
+
+      {repassesMes > 0 && (
+        <div className="card">
+          <div className="card-body" style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr", gap: 20, alignItems: "center" }}>
+            <div>
+              <div className="h-eyebrow" style={{ marginBottom: 6 }}>Rede de suprimentos · visão gerencial</div>
+              <div style={{ fontSize: 12.5, color: "var(--fg-2)", lineHeight: 1.5 }}>
+                Valor repassado (a custo) aos tenants da rede no mês. Não é receita — já está
+                abatido das Compras acima, então o CMV real mede só o consumo próprio.
+              </div>
+            </div>
+            <DreStat label="Repasses à rede no mês" value={fmt(repassesMes)} />
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="card-header">

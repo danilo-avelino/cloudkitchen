@@ -220,7 +220,8 @@ function Purchases() {
 
   // Atalho legado: gera + salva uma lista direto a partir do estoque
   const handleNewListAuto = () => {
-    const candidates = stockItems.filter((it) => it.qty < it.reorder);
+    // Transformados são produzidos (módulo Produção), não comprados — fora da lista
+    const candidates = stockItems.filter((it) => it.itemKind !== "transformed" && it.qty < it.reorder);
     if (candidates.length === 0) {
       window.showToast("Sem itens abaixo do mínimo · nada a comprar", { tone: "warn" });
       return;
@@ -234,7 +235,7 @@ function Purchases() {
   const handleGenerateForItems = (selectedItemIds) => {
     const ids = new Set(selectedItemIds);
     const candidates = stockItems
-      .filter((it) => it.qty < it.reorder)
+      .filter((it) => it.itemKind !== "transformed" && it.qty < it.reorder)
       .filter((it) => ids.has(it.id));
     if (candidates.length === 0) {
       window.showToast("Nenhum item selecionado", { tone: "warn" });
@@ -2229,8 +2230,9 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
   const NO_SUPPLIER = "Sem fornecedor cadastrado";
 
   // Candidatos (qty < reorder) já com buyQty + estCost calculados
+  // (transformados ficam de fora — são produzidos, não comprados)
   const candidates = useMemo(() => {
-    return (stockItems || []).filter((it) => it.qty < it.reorder).map((it) => {
+    return (stockItems || []).filter((it) => it.itemKind !== "transformed" && it.qty < it.reorder).map((it) => {
       const target = it.max && it.max > it.reorder ? it.max : it.reorder * 2;
       const buyQty = Math.max(0, Number((target - it.qty).toFixed(2)));
       const estCost = Number((buyQty * (it.cost || 0)).toFixed(2));

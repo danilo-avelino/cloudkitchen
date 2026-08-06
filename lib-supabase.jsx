@@ -489,6 +489,11 @@ function mapStockItemFromDb(row) {
     // Modo do auto min/max: 'off' | 'weekly' | 'monthly'. Fallback p/ rows antigas
     // que só têm o boolean: enabled vira 'weekly'.
     autoMinMode: row.auto_min_mode || (row.auto_min_enabled === true ? "weekly" : "off"),
+    // Produção/porcionamento: 'raw' (insumo bruto) | 'transformed' (transformado).
+    // portionQty/portionUnit = tamanho da porção (ex.: 0.1 kg = porção de 100g).
+    itemKind:    row.item_kind || "raw",
+    portionQty:  row.portion_qty != null ? Number(row.portion_qty) : null,
+    portionUnit: row.portion_unit || null,
     alloc,
     notes:     row.notes,
   };
@@ -517,6 +522,7 @@ async function dbListStockItems(tenantId) {
       .select(`
         id, code, name, unit, unit_cost, current_qty, reorder_point,
         max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
+        item_kind, portion_qty, portion_unit,
         category_id, supplier_id,
         category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
         supplier:suppliers(id, name),
@@ -547,10 +553,14 @@ async function dbInsertStockItem(tenantId, item) {
     compose_cmv:     item.composeCmv !== false,
     category_id:     item.catId || null,
     supplier_id:     item.supplierId || null,
+    item_kind:       item.itemKind === "transformed" ? "transformed" : "raw",
+    portion_qty:     item.portionQty != null && Number(item.portionQty) > 0 ? Number(item.portionQty) : null,
+    portion_unit:    item.portionUnit || null,
     notes:           item.notes || null,
   }).select(`
     id, code, name, unit, unit_cost, current_qty, reorder_point,
     max_qty, expiration_date, compose_cmv, notes, status,
+    item_kind, portion_qty, portion_unit,
     category_id, supplier_id,
     category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
     supplier:suppliers(id, name),
@@ -574,10 +584,14 @@ async function dbUpdateStockItem(id, patch) {
   if (patch.composeCmv  !== undefined) update.compose_cmv = !!patch.composeCmv;
   if (patch.catId       !== undefined) update.category_id = patch.catId || null;
   if (patch.supplierId  !== undefined) update.supplier_id = patch.supplierId || null;
+  if (patch.itemKind    !== undefined) update.item_kind = patch.itemKind === "transformed" ? "transformed" : "raw";
+  if (patch.portionQty  !== undefined) update.portion_qty = patch.portionQty != null && Number(patch.portionQty) > 0 ? Number(patch.portionQty) : null;
+  if (patch.portionUnit !== undefined) update.portion_unit = patch.portionUnit || null;
   if (patch.notes       !== undefined) update.notes = patch.notes;
   const { data, error } = await _client.from("stock_items").update(update).eq("id", id).select(`
     id, code, name, unit, unit_cost, current_qty, reorder_point,
     max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
+    item_kind, portion_qty, portion_unit,
     category_id, supplier_id,
     category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
     supplier:suppliers(id, name),
@@ -1979,6 +1993,45 @@ async function dbAgilizoneIntegrationActive(tenantId) {
   return { active: (count || 0) > 0, error: null };
 }
 
+// ---- Foody Delivery (integração) · edge function foody-admin ----
+async function _foodyAdmin(payload) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  try {
+    const { data: { session } } = await _client.auth.getSession();
+    if (!session) return { data: null, error: new Error("Não autenticado") };
+    const url = window.SK_CONFIG?.supabaseUrl + "/functions/v1/foody-admin";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + session.access_token },
+      body: JSON.stringify(payload),
+    });
+    const raw = await res.text();
+    let json = null; try { json = raw ? JSON.parse(raw) : null; } catch (_) { /* non-json */ }
+    if (!res.ok) return { data: null, error: new Error(`[${res.status}] ${json?.error || raw || res.statusText}`) };
+    return { data: json, error: null };
+  } catch (e) { return { data: null, error: e }; }
+}
+async function dbFoodyListAccounts(tenantId) { return _foodyAdmin({ tenantId, action: "list-accounts" }); }
+async function dbFoodySaveAccount(tenantId, acc) { return _foodyAdmin({ tenantId, action: "save-account", ...acc }); }
+async function dbFoodyToggleAccount(tenantId, id, isActive) { return _foodyAdmin({ tenantId, action: "toggle-account", id, isActive }); }
+async function dbFoodyListPointMap(tenantId, accountId) { return _foodyAdmin({ tenantId, action: "list-point-map", accountId }); }
+async function dbFoodyDiscoverPoints(tenantId, accountId) { return _foodyAdmin({ tenantId, action: "discover-points", accountId }); }
+async function dbFoodySavePointMap(tenantId, accountId, mappings) { return _foodyAdmin({ tenantId, action: "save-point-map", accountId, mappings }); }
+async function dbFoodySync(tenantId, accountId, lookbackDays) { return _foodyAdmin({ tenantId, action: "sync", accountId, lookbackDays }); }
+
+// Logística ativa? = tenant tem marca (Agilizone) OU ponto de coleta (Foody)
+// atrelado. Os dois maps são legíveis por membro via RLS. Em erro, assume
+// ativa (não esconde o módulo por falha transitória).
+async function dbLogisticsIntegrationActive(tenantId) {
+  if (!isDbOnline() || !_client) return { active: false, error: null };
+  const [agz, foody] = await Promise.all([
+    _client.from("agilizone_brand_map").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId),
+    _client.from("foody_point_map").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId),
+  ]);
+  if (agz.error && foody.error) return { active: true, error: agz.error };
+  return { active: ((agz.count || 0) + (foody.count || 0)) > 0, error: null };
+}
+
 // Garante sessão válida antes de um RPC autenticado (renova token expirado).
 // Sem isto, um token lapsado faz a chamada cair como `anon` → "permission denied".
 async function _ensureSession() {
@@ -2794,6 +2847,10 @@ async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
       .select("stock_item_id, qty, unit_cost, stock_item:stock_items(name, unit)")
       .eq("tenant_id", tenantId)
       .eq("kind", "out")
+      // Produção/transferência da rede não é consumo (conversão de valor) — fora
+      // do "top consumidos". O .or preserva movimentos com reference_type NULL,
+      // que um not.in simples derrubaria (NULL not in (...) é NULL no SQL).
+      .or("reference_type.is.null,reference_type.not.in.(production_order,supply_transfer)")
       // Datado pela baixa (performed_at), igual ao resto da aba; created_at é a
       // data de inserção da linha e desalinhava a box do período operacional.
       .gte("performed_at", fromDate)
@@ -2905,7 +2962,7 @@ async function dbListTenantsAdmin() {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const { data, error } = await _client
     .from("tenants")
-    .select("id, slug, name, legal_name, cnpj, plan, status, trial_ends_at, created_at, updated_at")
+    .select("id, slug, name, legal_name, cnpj, plan, status, kind, trial_ends_at, created_at, updated_at")
     .order("created_at", { ascending: false });
   if (error) return { data: null, source: "mock", error };
 
@@ -3018,6 +3075,7 @@ async function dbUpdateTenantAdmin(id, patch) {
   if (patch.cnpj       !== undefined) update.cnpj = patch.cnpj;
   if (patch.plan       !== undefined) update.plan = patch.plan;
   if (patch.status     !== undefined) update.status = patch.status;
+  if (patch.kind       !== undefined) update.kind = patch.kind;
   if (patch.trial_ends_at !== undefined) update.trial_ends_at = patch.trial_ends_at;
   const { data, error } = await _client
     .from("tenants").update(update).eq("id", id)
@@ -3189,6 +3247,625 @@ async function dbCrmWhatsappStatus(tenantId) {
 }
 
 // =====================================================================
+// PRODUÇÃO & PORCIONAMENTO (módulo 'production') + receitas de produção
+// Fluxo: draft → issued (baixa insumos) → completed (entrada transformados).
+// As transições disparam triggers no banco (tg_production_order_transition):
+// o front só grava returned_qty e flipa o status.
+// =====================================================================
+const _PROD_ORDER_FIELDS = `
+  id, code, status, total_input_cost, input_weight, output_weight, yield_pct, waste_qty,
+  notes, created_by, issued_at, issued_by, completed_at, completed_by, created_at,
+  inputs:production_order_inputs(id, stock_item_id, display_name, qty, unit, unit_cost, line_cost, sort_order),
+  outputs:production_order_outputs(id, stock_item_id, display_name, expected_qty, returned_qty, weight_qty, cost_share, unit_cost, sort_order)
+`;
+
+function mapProductionOrderFromDb(row) {
+  const sortLines = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0);
+  const inputs = (row.inputs || []).slice().sort(sortLines).map((it) => ({
+    id: it.id, itemId: it.stock_item_id, name: it.display_name,
+    qty: Number(it.qty) || 0, unit: it.unit,
+    unitCost: Number(it.unit_cost) || 0, lineCost: Number(it.line_cost) || 0,
+  }));
+  const outputs = (row.outputs || []).slice().sort(sortLines).map((it) => ({
+    id: it.id, itemId: it.stock_item_id, name: it.display_name,
+    expectedQty: it.expected_qty != null ? Number(it.expected_qty) : null,
+    returnedQty: it.returned_qty != null ? Number(it.returned_qty) : null,
+    weightQty:   it.weight_qty   != null ? Number(it.weight_qty)   : null,
+    costShare:   it.cost_share   != null ? Number(it.cost_share)   : null,
+    unitCost:    it.unit_cost    != null ? Number(it.unit_cost)    : null,
+  }));
+  return {
+    id:     row.id,
+    code:   row.code || row.id?.slice(0, 8),
+    status: row.status,
+    totalInputCost: row.total_input_cost != null ? Number(row.total_input_cost) : null,
+    inputWeight:  row.input_weight  != null ? Number(row.input_weight)  : null,
+    outputWeight: row.output_weight != null ? Number(row.output_weight) : null,
+    yieldPct:     row.yield_pct     != null ? Number(row.yield_pct)     : null,
+    wasteQty:     row.waste_qty     != null ? Number(row.waste_qty)     : null,
+    notes:  row.notes,
+    createdAt:   row.created_at,
+    issuedAt:    row.issued_at,
+    completedAt: row.completed_at,
+    inputs, outputs,
+    // Custo estimado enquanto draft (snapshot só existe após o issue)
+    estCost: row.total_input_cost != null
+      ? Number(row.total_input_cost)
+      : inputs.reduce((s, it) => s + it.lineCost, 0),
+  };
+}
+
+async function dbListProductionOrders(tenantId, { limit = 200 } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client.from("production_orders")
+    .select(_PROD_ORDER_FIELDS)
+    .eq("tenant_id", tenantId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) return { data: null, source: "mock", error };
+  return { data: (data || []).map(mapProductionOrderFromDb), source: "db", error: null };
+}
+
+// Cria ordem em rascunho. inputs: [{itemId, name, qty, unit}]; outputs: [{itemId, name, expectedQty}]
+async function dbInsertProductionOrder(tenantId, draft) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data: { session } = {} } = await _client.auth.getSession();
+  const { data: row, error } = await _client.from("production_orders").insert({
+    tenant_id:  tenantId,
+    code:       draft.code || null,
+    status:     "draft",
+    notes:      draft.notes || null,
+    created_by: session?.user?.id || null,
+  }).select("id, code").single();
+  if (error) return { data: null, error };
+
+  const inputRows = (draft.inputs || []).map((it, i) => ({
+    order_id:      row.id,
+    stock_item_id: it.itemId,
+    display_name:  it.name,
+    qty:           Number(it.qty) || 0,
+    unit:          it.unit || "un",
+    sort_order:    i,
+  }));
+  if (inputRows.length > 0) {
+    const { error: iErr } = await _client.from("production_order_inputs").insert(inputRows);
+    if (iErr) return { data: row, error: iErr };
+  }
+  const outputRows = (draft.outputs || []).map((it, i) => ({
+    order_id:      row.id,
+    stock_item_id: it.itemId,
+    display_name:  it.name,
+    expected_qty:  it.expectedQty != null && Number(it.expectedQty) > 0 ? Number(it.expectedQty) : null,
+    sort_order:    i,
+  }));
+  if (outputRows.length > 0) {
+    const { error: oErr } = await _client.from("production_order_outputs").insert(outputRows);
+    if (oErr) return { data: row, error: oErr };
+  }
+  return { data: row, error: null };
+}
+
+// Substitui as linhas de uma ordem em rascunho (edição do draft).
+async function dbReplaceProductionOrderLines(orderId, inputs, outputs, header = {}) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  if (Object.prototype.hasOwnProperty.call(header, "notes")) {
+    const { error: hErr } = await _client.from("production_orders")
+      .update({ notes: header.notes ?? null }).eq("id", orderId);
+    if (hErr) return { error: hErr };
+  }
+  const delIn = await _client.from("production_order_inputs").delete().eq("order_id", orderId);
+  if (delIn.error) return { error: delIn.error };
+  const delOut = await _client.from("production_order_outputs").delete().eq("order_id", orderId);
+  if (delOut.error) return { error: delOut.error };
+  const inputRows = (inputs || []).map((it, i) => ({
+    order_id: orderId, stock_item_id: it.itemId, display_name: it.name,
+    qty: Number(it.qty) || 0, unit: it.unit || "un", sort_order: i,
+  }));
+  if (inputRows.length > 0) {
+    const { error } = await _client.from("production_order_inputs").insert(inputRows);
+    if (error) return { error };
+  }
+  const outputRows = (outputs || []).map((it, i) => ({
+    order_id: orderId, stock_item_id: it.itemId, display_name: it.name,
+    expected_qty: it.expectedQty != null && Number(it.expectedQty) > 0 ? Number(it.expectedQty) : null,
+    sort_order: i,
+  }));
+  if (outputRows.length > 0) {
+    const { error } = await _client.from("production_order_outputs").insert(outputRows);
+    if (error) return { error };
+  }
+  return { error: null };
+}
+
+// draft → issued (trigger faz snapshot de custos + baixa dos insumos)
+async function dbIssueProductionOrder(orderId, userId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("production_orders")
+    .update({ status: "issued", issued_at: new Date().toISOString(), issued_by: userId || null })
+    .eq("id", orderId).eq("status", "draft")
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("Ordem não está mais em rascunho (recarregue a página)") };
+  return { error: null };
+}
+
+// issued → completed (devolução). A ordem de saída não pré-define transformados:
+// as saídas são criadas AQUI, com as porções devolvidas, e o trigger calcula
+// rateio por peso, movimentos de entrada e aproveitamento.
+// outputs: [{itemId, name, returnedQty}]
+async function dbCompleteProductionOrder(orderId, outputs, userId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  // Substitui as saídas (cobre re-tentativa e rascunhos antigos com saídas pré-definidas)
+  const del = await _client.from("production_order_outputs").delete().eq("order_id", orderId);
+  if (del.error) return { error: del.error };
+  const rows = (outputs || [])
+    .filter((o) => Number(o.returnedQty) > 0)
+    .map((o, i) => ({
+      order_id:      orderId,
+      stock_item_id: o.itemId,
+      display_name:  o.name,
+      returned_qty:  Number(o.returnedQty),
+      sort_order:    i,
+    }));
+  if (rows.length === 0) return { error: new Error("Informe as porções devolvidas de pelo menos um transformado") };
+  const ins = await _client.from("production_order_outputs").insert(rows);
+  if (ins.error) return { error: ins.error };
+
+  const { data, error } = await _client.from("production_orders")
+    .update({ status: "completed", completed_at: new Date().toISOString(), completed_by: userId || null })
+    .eq("id", orderId).eq("status", "issued")
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("Ordem não está mais aguardando retorno (recarregue a página)") };
+  return { error: null };
+}
+
+// Ordens aguardando retorno da produção (etapa crítica de desvio) — alimenta
+// o badge da sidebar e os alertas de tempo de espera na página.
+async function dbListProductionPending(tenantId) {
+  if (!isDbOnline() || !_client) return { data: [], error: null };
+  const { data, error } = await _client.from("production_orders")
+    .select("id, code, issued_at, total_input_cost")
+    .eq("tenant_id", tenantId)
+    .eq("status", "issued")
+    .order("issued_at", { ascending: true });
+  if (error) return { data: [], error };
+  return {
+    data: (data || []).map((r) => ({
+      id: r.id, code: r.code, issuedAt: r.issued_at,
+      totalInputCost: r.total_input_cost != null ? Number(r.total_input_cost) : null,
+    })),
+    error: null,
+  };
+}
+
+// draft/issued → cancelled (de issued o trigger gera movimentos inversos)
+async function dbCancelProductionOrder(orderId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("production_orders")
+    .update({ status: "cancelled" })
+    .eq("id", orderId).in("status", ["draft", "issued"])
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("Ordem não pode mais ser cancelada (recarregue a página)") };
+  return { error: null };
+}
+
+async function dbDeleteProductionOrder(orderId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("production_orders")
+    .delete().eq("id", orderId).select("id");
+  if (error) return { error };
+  if (!data || data.length === 0) {
+    return { error: new Error("Sem permissão para excluir esta ordem (ou ela já não existe)") };
+  }
+  return { error: null };
+}
+
+// ---------- Receitas de produção (templates de lote) ------------------
+const _PROD_RECIPE_FIELDS = `
+  id, name, notes, created_at,
+  inputs:production_recipe_inputs(id, stock_item_id, qty, unit, sort_order),
+  outputs:production_recipe_outputs(id, stock_item_id, expected_qty, sort_order)
+`;
+
+function mapProductionRecipeFromDb(row) {
+  const sortLines = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0);
+  return {
+    id:    row.id,
+    name:  row.name,
+    notes: row.notes,
+    inputs: (row.inputs || []).slice().sort(sortLines).map((it) => ({
+      itemId: it.stock_item_id, qty: Number(it.qty) || 0, unit: it.unit,
+    })),
+    outputs: (row.outputs || []).slice().sort(sortLines).map((it) => ({
+      itemId: it.stock_item_id,
+      expectedQty: it.expected_qty != null ? Number(it.expected_qty) : null,
+    })),
+  };
+}
+
+async function dbListProductionRecipes(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const { data, error } = await _client.from("production_recipes")
+    .select(_PROD_RECIPE_FIELDS)
+    .eq("tenant_id", tenantId)
+    .order("name", { ascending: true });
+  if (error) return { data: null, source: "mock", error };
+  return { data: (data || []).map(mapProductionRecipeFromDb), source: "db", error: null };
+}
+
+// Cria/atualiza receita (id nulo = criar). Substitui todas as linhas.
+async function dbSaveProductionRecipe(tenantId, recipe) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  let recipeId = recipe.id || null;
+  if (recipeId) {
+    const { error } = await _client.from("production_recipes")
+      .update({ name: recipe.name, notes: recipe.notes || null }).eq("id", recipeId);
+    if (error) return { data: null, error };
+    const d1 = await _client.from("production_recipe_inputs").delete().eq("recipe_id", recipeId);
+    if (d1.error) return { data: null, error: d1.error };
+    const d2 = await _client.from("production_recipe_outputs").delete().eq("recipe_id", recipeId);
+    if (d2.error) return { data: null, error: d2.error };
+  } else {
+    const { data, error } = await _client.from("production_recipes")
+      .insert({ tenant_id: tenantId, name: recipe.name, notes: recipe.notes || null })
+      .select("id").single();
+    if (error) return { data: null, error };
+    recipeId = data.id;
+  }
+  const inputRows = (recipe.inputs || []).map((it, i) => ({
+    recipe_id: recipeId, stock_item_id: it.itemId,
+    qty: Number(it.qty) || 0, unit: it.unit || "un", sort_order: i,
+  }));
+  if (inputRows.length > 0) {
+    const { error } = await _client.from("production_recipe_inputs").insert(inputRows);
+    if (error) return { data: { id: recipeId }, error };
+  }
+  const outputRows = (recipe.outputs || []).map((it, i) => ({
+    recipe_id: recipeId, stock_item_id: it.itemId,
+    expected_qty: it.expectedQty != null && Number(it.expectedQty) > 0 ? Number(it.expectedQty) : null,
+    sort_order: i,
+  }));
+  if (outputRows.length > 0) {
+    const { error } = await _client.from("production_recipe_outputs").insert(outputRows);
+    if (error) return { data: { id: recipeId }, error };
+  }
+  return { data: { id: recipeId }, error: null };
+}
+
+async function dbDeleteProductionRecipe(recipeId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("production_recipes")
+    .delete().eq("id", recipeId).select("id");
+  if (error) return { error };
+  if (!data || data.length === 0) {
+    return { error: new Error("Sem permissão para excluir esta receita (ou ela já não existe)") };
+  }
+  return { error: null };
+}
+
+// =====================================================================
+// REDE DE SUPRIMENTOS (módulos 'supply' e 'distribution')
+// Rede = central de distribuição + tenants membros. Transferências mudam de
+// status por UPDATE simples — triggers SECURITY DEFINER no banco fazem os
+// efeitos (baixa/entrada, ledger de gastos, lançamentos financeiros).
+// =====================================================================
+
+// Checagem leve pro Sidebar: o tenant participa (ou foi convidado) de alguma
+// rede como membro? Evita chamar a RPC pesada só pra decidir visibilidade.
+async function dbSupplyMembershipStatus(tenantId) {
+  if (!isDbOnline() || !_client) return { data: { member: false }, error: null };
+  const { data, error } = await _client.from("supply_members")
+    .select("status")
+    .eq("member_tenant_id", tenantId)
+    .in("status", ["invited", "active"])
+    .limit(1);
+  if (error) return { data: { member: false }, error };
+  return { data: { member: (data || []).length > 0 }, error: null };
+}
+
+// Visão geral da rede do tenant (como central e/ou membro) via RPC.
+async function dbSupplyOverview(tenantId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.rpc("supply_network_overview", { p_tenant: tenantId });
+  if (error) return { data: null, error };
+  return { data, error: null };
+}
+
+async function dbSupplyLookupByCode(centralId, code) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.rpc("supply_lookup_tenant_by_code", { p_central: centralId, p_code: code });
+  if (error) return { data: null, error };
+  return { data: (Array.isArray(data) && data[0]) || null, error: null };
+}
+
+async function dbSupplyInvite(centralId, code) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.rpc("supply_invite_tenant", { p_central: centralId, p_code: code });
+  return { error };
+}
+
+async function dbSupplyRespondInvite(centralId, memberId, accept) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.rpc("supply_respond_invite", { p_central: centralId, p_member: memberId, p_accept: !!accept });
+  return { error };
+}
+
+async function dbSupplyRemoveMember(centralId, memberId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.rpc("supply_remove_member", { p_central: centralId, p_member: memberId });
+  return { error };
+}
+
+// Catálogo do fornecedor (id/nome/unidade — sem custo nem saldo).
+async function dbSupplyCatalog(viewerId, supplierId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.rpc("supply_list_catalog", { p_viewer: viewerId, p_supplier: supplierId });
+  if (error) return { data: null, error };
+  return {
+    data: (data || []).map((r) => ({
+      id: r.item_id, name: r.name, unit: r.unit, itemKind: r.item_kind,
+      category: r.category_name, portionQty: r.portion_qty != null ? Number(r.portion_qty) : null,
+      portionUnit: r.portion_unit,
+    })),
+    error: null,
+  };
+}
+
+const _SUPPLY_TRANSFER_FIELDS = `
+  id, central_tenant_id, from_tenant_id, to_tenant_id, from_name, to_name, code, status,
+  request_id, direct_to_kitchen, receive_operation_id, total_value, notes,
+  created_at, sent_at, received_at,
+  items:supply_transfer_items(id, from_item_id, to_item_id, display_name, item_kind, category_name,
+    qty, unit, unit_cost, portion_qty, portion_unit, sort_order)
+`;
+
+function mapSupplyTransferFromDb(row) {
+  const items = (row.items || []).slice()
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .map((it) => ({
+      id: it.id, fromItemId: it.from_item_id, toItemId: it.to_item_id,
+      name: it.display_name, itemKind: it.item_kind, category: it.category_name,
+      qty: Number(it.qty) || 0, unit: it.unit, unitCost: Number(it.unit_cost) || 0,
+      portionQty: it.portion_qty != null ? Number(it.portion_qty) : null,
+      portionUnit: it.portion_unit,
+    }));
+  return {
+    id: row.id,
+    centralId: row.central_tenant_id,
+    fromTenantId: row.from_tenant_id,
+    toTenantId: row.to_tenant_id,
+    fromName: row.from_name,
+    toName: row.to_name,
+    code: row.code || row.id?.slice(0, 8),
+    status: row.status,
+    requestId: row.request_id,
+    directToKitchen: !!row.direct_to_kitchen,
+    receiveOperationId: row.receive_operation_id,
+    totalValue: row.total_value != null ? Number(row.total_value) : null,
+    notes: row.notes,
+    createdAt: row.created_at, sentAt: row.sent_at, receivedAt: row.received_at,
+    items,
+    estValue: row.total_value != null
+      ? Number(row.total_value)
+      : items.reduce((s, it) => s + it.qty * it.unitCost, 0),
+  };
+}
+
+async function dbSupplyListTransfers(tenantId, { limit = 300 } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("supply_transfers")
+    .select(_SUPPLY_TRANSFER_FIELDS)
+    .or(`from_tenant_id.eq.${tenantId},to_tenant_id.eq.${tenantId},central_tenant_id.eq.${tenantId}`)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) return { data: null, error };
+  return { data: (data || []).map(mapSupplyTransferFromDb), error: null };
+}
+
+// Cria transferência em rascunho. items: [{fromItemId, name, qty, unit}]
+async function dbSupplyCreateTransfer(t) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data: { session } = {} } = await _client.auth.getSession();
+  const { data: row, error } = await _client.from("supply_transfers").insert({
+    central_tenant_id: t.centralId,
+    from_tenant_id:    t.fromTenantId,
+    to_tenant_id:      t.toTenantId,
+    request_id:        t.requestId || null,
+    direct_to_kitchen: !!t.directToKitchen,
+    notes:             t.notes || null,
+    created_by:        session?.user?.id || null,
+  }).select("id, code").single();
+  if (error) return { data: null, error };
+  const itemRows = (t.items || []).map((it, i) => ({
+    transfer_id:  row.id,
+    from_item_id: it.fromItemId,
+    display_name: it.name,
+    qty:          Number(it.qty) || 0,
+    unit:         it.unit || "un",
+    sort_order:   i,
+  }));
+  if (itemRows.length > 0) {
+    const { error: iErr } = await _client.from("supply_transfer_items").insert(itemRows);
+    if (iErr) return { data: row, error: iErr };
+  }
+  return { data: row, error: null };
+}
+
+// draft → sent (trigger: guard de saldo + baixa no remetente + total)
+async function dbSupplySendTransfer(id, userId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("supply_transfers")
+    .update({ status: "sent", sent_at: new Date().toISOString(), sent_by: userId || null })
+    .eq("id", id).eq("status", "draft")
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("Transferência não está mais em rascunho (recarregue)") };
+  return { error: null };
+}
+
+// sent → received. overrides: [{fromItemId, toItemId}] — mapeamentos escolhidos
+// pelo destinatário (viram supply_item_links antes da confirmação).
+async function dbSupplyReceiveTransfer(transfer, { directToKitchen, operationId, overrides, userId }) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  for (const ov of overrides || []) {
+    if (!ov.fromItemId || !ov.toItemId) continue;
+    const { error } = await _client.from("supply_item_links").upsert({
+      central_tenant_id: transfer.centralId,
+      from_item_id:      ov.fromItemId,
+      to_tenant_id:      transfer.toTenantId,
+      to_item_id:        ov.toItemId,
+    }, { onConflict: "central_tenant_id,from_item_id,to_tenant_id" });
+    if (error) return { error };
+  }
+  const { data, error } = await _client.from("supply_transfers")
+    .update({
+      status: "received",
+      direct_to_kitchen: !!directToKitchen,
+      receive_operation_id: directToKitchen ? (operationId || null) : null,
+      received_at: new Date().toISOString(),
+      received_by: userId || null,
+    })
+    .eq("id", transfer.id).eq("status", "sent")
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("Transferência não está mais como enviada (recarregue)") };
+  return { error: null };
+}
+
+async function dbSupplyCancelTransfer(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("supply_transfers")
+    .update({ status: "cancelled" })
+    .eq("id", id).in("status", ["draft", "sent"])
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("Transferência não pode mais ser cancelada (recarregue)") };
+  return { error: null };
+}
+
+async function dbSupplyDeleteTransfer(id) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("supply_transfers")
+    .delete().eq("id", id).select("id");
+  if (error) return { error };
+  if (!data || data.length === 0) return { error: new Error("Sem permissão para excluir (ou já não existe)") };
+  return { error: null };
+}
+
+const _SUPPLY_REQUEST_FIELDS = `
+  id, central_tenant_id, requester_tenant_id, supplier_tenant_id, requester_name, supplier_name,
+  code, status, notes, rejection_reason, requested_at, responded_at, created_at,
+  items:supply_request_items(id, supplier_item_id, display_name, qty, unit, sort_order)
+`;
+
+function mapSupplyRequestFromDb(row) {
+  return {
+    id: row.id,
+    centralId: row.central_tenant_id,
+    requesterTenantId: row.requester_tenant_id,
+    supplierTenantId: row.supplier_tenant_id,
+    requesterName: row.requester_name,
+    supplierName: row.supplier_name,
+    code: row.code || row.id?.slice(0, 8),
+    status: row.status,
+    notes: row.notes,
+    rejectionReason: row.rejection_reason,
+    requestedAt: row.requested_at,
+    respondedAt: row.responded_at,
+    items: (row.items || []).slice()
+      .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+      .map((it) => ({
+        id: it.id, supplierItemId: it.supplier_item_id, name: it.display_name,
+        qty: Number(it.qty) || 0, unit: it.unit,
+      })),
+  };
+}
+
+async function dbSupplyListRequests(tenantId, { limit = 300 } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.from("supply_requests")
+    .select(_SUPPLY_REQUEST_FIELDS)
+    .or(`requester_tenant_id.eq.${tenantId},supplier_tenant_id.eq.${tenantId},central_tenant_id.eq.${tenantId}`)
+    .order("requested_at", { ascending: false })
+    .limit(limit);
+  if (error) return { data: null, error };
+  return { data: (data || []).map(mapSupplyRequestFromDb), error: null };
+}
+
+// Cria solicitação. items: [{supplierItemId, name, qty, unit}]
+async function dbSupplyCreateRequest(r) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data: row, error } = await _client.from("supply_requests").insert({
+    central_tenant_id:   r.centralId,
+    requester_tenant_id: r.requesterId,
+    supplier_tenant_id:  r.supplierId,
+    notes:               r.notes || null,
+  }).select("id, code").single();
+  if (error) return { data: null, error };
+  const itemRows = (r.items || []).map((it, i) => ({
+    request_id:       row.id,
+    supplier_item_id: it.supplierItemId,
+    display_name:     it.name,
+    qty:              Number(it.qty) || 0,
+    unit:             it.unit || "un",
+    sort_order:       i,
+  }));
+  if (itemRows.length > 0) {
+    const { error: iErr } = await _client.from("supply_request_items").insert(itemRows);
+    if (iErr) return { data: row, error: iErr };
+  }
+  return { data: row, error: null };
+}
+
+// approve/reject (fornecedor) · cancel (solicitante). Trigger valida os lados.
+async function dbSupplyUpdateRequestStatus(id, status, { reason, userId } = {}) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const update = { status };
+  if (status === "rejected") update.rejection_reason = reason || null;
+  if (status === "approved" || status === "rejected") {
+    update.responded_at = new Date().toISOString();
+    update.responded_by = userId || null;
+  }
+  const { data, error } = await _client.from("supply_requests")
+    .update(update).eq("id", id)
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: new Error("Solicitação não encontrada (ou sem permissão)") };
+  return { error: null };
+}
+
+// Extrato de gastos. Como membro: só os próprios; como central: rede toda.
+async function dbSupplyListLedger(tenantId, { centralId = null, limit = 500 } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  let q = _client.from("supply_ledger_entries")
+    .select("id, central_tenant_id, tenant_id, delta, kind, transfer_id, notes, created_at")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (centralId) q = q.eq("central_tenant_id", centralId);
+  q = q.or(`tenant_id.eq.${tenantId},central_tenant_id.eq.${tenantId}`);
+  const { data, error } = await q;
+  if (error) return { data: null, error };
+  return {
+    data: (data || []).map((r) => ({
+      id: r.id, centralId: r.central_tenant_id, tenantId: r.tenant_id,
+      delta: Number(r.delta) || 0, kind: r.kind, transferId: r.transfer_id,
+      notes: r.notes, createdAt: r.created_at,
+    })),
+    error: null,
+  };
+}
+
+async function dbSupplyLedgerAdjust(centralId, tenantId, delta, notes) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.rpc("supply_ledger_adjust", {
+    p_central: centralId, p_tenant: tenantId, p_delta: delta, p_notes: notes || null,
+  });
+  return { error };
+}
+
+// =====================================================================
 // Exposição global
 // =====================================================================
 Object.assign(window, {
@@ -3220,6 +3897,8 @@ Object.assign(window, {
   dbListMembers, dbInviteMember, dbUpdateMember, dbUpdateMemberRole, dbUpdateMemberProfile, dbRemoveMember,
   dbAgilizoneListAccounts, dbAgilizoneSaveAccount, dbAgilizoneToggleAccount, dbAgilizoneDiscoverBrands, dbAgilizoneSaveBrandMap,
   dbAgilizoneListBrandMap, dbAgilizoneSync, dbAgilizoneIntegrationActive,
+  dbFoodyListAccounts, dbFoodySaveAccount, dbFoodyToggleAccount, dbFoodyListPointMap, dbFoodyDiscoverPoints,
+  dbFoodySavePointMap, dbFoodySync, dbLogisticsIntegrationActive,
   dbDeliveryMetrics, dbDeliveryFees, dbMenuSales, dbMenuAddons, dbMenuBaskets, dbMenuItemInsights,
   dbNeighborhoodStats, dbRadiusStats,
   dbDeliveryTimeseries, dbListDeliveryShifts, dbInsertDeliveryShift, dbUpdateDeliveryShift, dbDeleteDeliveryShift,
@@ -3239,6 +3918,18 @@ Object.assign(window, {
   dbCrmListContacts, dbCrmInsertContact, dbCrmUpdateContact, dbCrmDeleteContact,
   dbCrmGetOrCreateDefaultPipeline, dbCrmListDeals, dbCrmInsertDeal, dbCrmUpdateDeal, dbCrmDeleteDeal,
   dbCrmWhatsappStatus,
+  dbListProductionOrders, dbInsertProductionOrder, dbReplaceProductionOrderLines,
+  dbIssueProductionOrder, dbCompleteProductionOrder, dbCancelProductionOrder, dbDeleteProductionOrder,
+  dbListProductionPending,
+  dbListProductionRecipes, dbSaveProductionRecipe, dbDeleteProductionRecipe,
+  mapProductionOrderFromDb, mapProductionRecipeFromDb,
+  dbSupplyMembershipStatus,
+  dbSupplyOverview, dbSupplyLookupByCode, dbSupplyInvite, dbSupplyRespondInvite, dbSupplyRemoveMember,
+  dbSupplyCatalog, dbSupplyListTransfers, dbSupplyCreateTransfer, dbSupplySendTransfer,
+  dbSupplyReceiveTransfer, dbSupplyCancelTransfer, dbSupplyDeleteTransfer,
+  dbSupplyListRequests, dbSupplyCreateRequest, dbSupplyUpdateRequestStatus,
+  dbSupplyListLedger, dbSupplyLedgerAdjust,
+  mapSupplyTransferFromDb, mapSupplyRequestFromDb,
   dbSubscribeTable,
   getSession, useSession,
   mapStockItemFromDb, mapRevenueFromDb, mapKitchenRequestFromDb, mapPurchaseOrderFromDb, mapGoodsReceiptFromDb,

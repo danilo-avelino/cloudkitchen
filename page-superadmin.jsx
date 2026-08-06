@@ -49,6 +49,7 @@ function _saMapTenantFromDb(row) {
     ownerName:  row.ownerName || null,
     ownerUserId: row.ownerUserId || null,
     trialEndsAt: row.trial_ends_at || null,
+    kind:       row.kind || "standard",
   };
 }
 
@@ -1623,6 +1624,7 @@ function EditTenantModal({ tenant, existingSlugs, onCancel, onSave, busy = false
   const [cnpj, setCnpj]           = useState(tenant.cnpj || "");
   const [plan, setPlan]           = useState(tenant.plan || "trial");
   const [status, setStatus]       = useState(tenant.status || "active");
+  const [kind, setKind]           = useState(tenant.kind || "standard");
   const [trialEndsAt, setTrialEndsAt] = useState(
     tenant.trialEndsAt ? String(tenant.trialEndsAt).slice(0, 10) : ""
   );
@@ -1638,7 +1640,7 @@ function EditTenantModal({ tenant, existingSlugs, onCancel, onSave, busy = false
       slug: slug.trim(),
       legal_name: legalName.trim() || null,
       cnpj: cnpj.trim() || null,
-      plan, status,
+      plan, status, kind,
       trial_ends_at: trialEndsAt || null,
     });
   };
@@ -1713,7 +1715,7 @@ function EditTenantModal({ tenant, existingSlugs, onCancel, onSave, busy = false
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 4 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
         <FormRow label="Status">
           <select className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="active">Ativo</option>
@@ -1725,6 +1727,16 @@ function EditTenantModal({ tenant, existingSlugs, onCancel, onSave, busy = false
         <FormRow label="Fim do trial" hint="opcional · só se aplicar">
           <input className="input mono" type="date" value={trialEndsAt}
                  onChange={(e) => setTrialEndsAt(e.target.value)} />
+        </FormRow>
+      </div>
+
+      <div style={{ marginBottom: 4 }}>
+        <FormRow label="Tipo de tenant"
+                 hint="Central de distribuição habilita o módulo Central (rede de suprimentos, transferências e gastos por tenant).">
+          <select className="select" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="standard">Cozinha (padrão)</option>
+            <option value="distribution_center">Central de distribuição</option>
+          </select>
         </FormRow>
       </div>
     </Modal>

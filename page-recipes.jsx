@@ -1259,7 +1259,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
 
 // ===== Modal de adicionar/editar insumo (com suporte a Preparos como fonte) =====
 // Combo com busca por digitação · filtra estoque/preparos em tempo real
-function IngredientSearchCombo({ sources, sourceKey, name, onPick, onTypeName }) {
+function IngredientSearchCombo({ sources, sourceKey, name, onPick, onTypeName, autoFocus }) {
   const selected = sources.find((s) => s.key === sourceKey);
   const [query, setQuery] = useState(selected ? selected.name : (name || ""));
   const [open, setOpen] = useState(false);
@@ -1305,6 +1305,7 @@ function IngredientSearchCombo({ sources, sourceKey, name, onPick, onTypeName })
     <div ref={wrapRef} style={{ position: "relative" }}>
       <input
         className="input"
+        autoFocus={autoFocus}
         value={query}
         onChange={(e) => handleType(e.target.value)}
         onFocus={() => setOpen(true)}
@@ -1486,6 +1487,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <FormRow label="Insumo (estoque ou preparo)" hint="Digite para filtrar · preparos têm 🔧 · clique pra selecionar.">
           <IngredientSearchCombo
+            autoFocus
             sources={sources}
             sourceKey={sourceKey}
             name={name}
@@ -1505,7 +1507,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 1fr", gap: 12 }}>
           <FormRow label="Quantidade">
-            <input className="input mono" inputMode="decimal" autoFocus value={qtyVal}
+            <input className="input mono" inputMode="decimal" value={qtyVal}
                    onChange={(e) => setQtyVal(e.target.value)} placeholder="0,16" />
           </FormRow>
           <FormRow label="Unidade" hint={sourceKey ? "vem da origem" : null}>

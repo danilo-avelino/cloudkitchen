@@ -3,16 +3,18 @@
 
 // Catálogo único de módulos do app — espelha src/App.jsx e page-settings.jsx
 // "saas" é exclusivo do superadmin (gestão multi-tenant da plataforma).
-const APP_MODULES = ["dashboard","stock","recipes","revenue","delivery","cardapio","crm","requests","purchases","cmv","finance","dre","settings"];
+// "transformed" deixou de ser módulo próprio em 2026-07-12 — virou abas do módulo Produção.
+const APP_MODULES = ["dashboard","stock","production","supply","distribution","recipes","revenue","delivery","cardapio","crm","requests","purchases","cmv","finance","dre","settings"];
 const SUPERADMIN_MODULES = ["saas"];
 
 // Preset padrão por role do banco quando o membro não tem `modules` customizado
+// (espelhado em app.role_default_modules no banco e ROLE_MODULE_PRESETS em page-settings.jsx)
 const ROLE_DEFAULT_MODULES = {
   owner:      APP_MODULES,
   admin:      APP_MODULES,
   manager:    APP_MODULES.filter((m) => m !== "settings"),
-  kitchen:    ["dashboard", "stock", "requests", "recipes"],
-  stock:      ["dashboard", "stock", "requests", "purchases"],
+  kitchen:    ["dashboard", "stock", "requests", "recipes", "production"],
+  stock:      ["dashboard", "stock", "requests", "purchases", "production", "supply"],
   accountant: ["dashboard", "revenue", "cmv", "finance", "dre"],
   viewer:     ["dashboard"],
 };
@@ -58,11 +60,20 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   // Checklist financeiro: itens vencidos / próximos do vencimento neste mês.
   const [financeOverdue, setFinanceOverdue] = useState(0);
   const [financeSoon,    setFinanceSoon]    = useState(0);
+  // Rede de suprimentos: 'distribution' só p/ tenant central; 'supply' só p/
+  // tenant membro/convidado de alguma rede. null = ainda carregando (esconde).
+  const [supplyVis, setSupplyVis] = useState(null);
+  // Produção: ordens de saída aguardando devolução (etapa crítica de desvio).
+  // Tom escala com a idade da mais antiga: warn ≥4h, crit ≥12h.
+  const [prodPending, setProdPending] = useState(0);
+  const [prodPendingTone, setProdPendingTone] = useState("warn");
 
   useEffect(() => {
     if (!dbStatus.isOnline || !user?.tenantId) {
       setStockCrit(0); setStockOut(0); setPendingReq(0);
       setFinanceOverdue(0); setFinanceSoon(0);
+      setSupplyVis({ distribution: false, supply: false });
+      setProdPending(0);
       return;
     }
     let cancelled = false;
@@ -104,6 +115,28 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
         }
         setFinanceOverdue(over);
         setFinanceSoon(sn);
+
+        // Visibilidade dos módulos da rede de suprimentos (além do gate de módulos):
+        // Central só p/ tenant kind='distribution_center'; Suprimentos p/ quem tem
+        // convite (pendente ou aceito — o aceite mora lá) E p/ centrais de
+        // distribuição (pedido do usuário em 2026-07-12).
+        const [ctx, memRes, prodRes] = await Promise.all([
+          typeof dbGetCurrentContext === "function" ? dbGetCurrentContext() : Promise.resolve(null),
+          typeof dbSupplyMembershipStatus === "function" ? dbSupplyMembershipStatus(user.tenantId) : Promise.resolve({ data: { member: false } }),
+          typeof dbListProductionPending === "function" ? dbListProductionPending(user.tenantId) : Promise.resolve({ data: [] }),
+        ]);
+        if (cancelled) return;
+        const pend = prodRes?.data || [];
+        setProdPending(pend.length);
+        const oldestMs = pend.length
+          ? Math.max(...pend.map((p) => Date.now() - new Date(p.issuedAt || Date.now()).getTime()))
+          : 0;
+        setProdPendingTone(oldestMs >= 12 * 3600000 ? "crit" : "warn");
+        const isCentral = ctx?.tenant?.kind === "distribution_center";
+        setSupplyVis({
+          distribution: isCentral,
+          supply: isCentral || memRes?.data?.member === true,
+        });
       } catch (e) {
         console.warn("[sidebar] falha ao carregar badges:", e);
       }
@@ -118,6 +151,9 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   const allNav = [
     { id: "dashboard",  label: "Dashboard",      icon: I.Dashboard },
     { id: "stock",      label: "Estoque",         icon: I.Stock,       badge: stockCrit || null, badgeTone: stockOut > 0 ? "crit" : "warn" },
+    { id: "production", label: "Produção",        icon: I.Play,        badge: prodPending || null, badgeTone: prodPendingTone },
+    { id: "supply",       label: "Suprimentos",   icon: I.Truck },
+    { id: "distribution", label: "Central",       icon: I.Truck },
     { id: "recipes",    label: "Fichas técnicas", icon: I.Recipe },
     { id: "revenue",    label: "Faturamento",     icon: I.Revenue },
     { id: "delivery",   label: "Logística",       icon: I.Clock },
@@ -129,7 +165,14 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
     { id: "finance",    label: "Financeiro",      icon: I.Finance, badge: (financeOverdue || financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
     { id: "dre",        label: "DRE & Fechamento", icon: I.Lock },
     { id: "settings",   label: "Configurações",   icon: I.Settings },
-  ].filter((item) => has(item.id));
+  ].filter((item) => has(item.id))
+   // Módulos da rede: além do gate de módulos, dependem do tipo/vínculo do
+   // tenant (carregados async — escondidos até supplyVis resolver).
+   .filter((item) => {
+     if (item.id === "distribution") return supplyVis?.distribution === true;
+     if (item.id === "supply")       return supplyVis?.supply === true;
+     return true;
+   });
 
   const initials = user?.name?.split(" ").map((n) => n[0]).slice(0, 2).join("") || "?";
   const tenantName = isPureSuper
@@ -267,6 +310,9 @@ function Topbar({ page, scope, theme, setTheme, user, onLogout, onSwitchTenant, 
     saas: "Gestão SaaS",
     dashboard: "Dashboard",
     stock: "Estoque",
+    production: "Produção & Porcionamento",
+    supply: "Suprimentos",
+    distribution: "Central de Distribuição",
     recipes: "Fichas técnicas",
     revenue: "Faturamento",
     delivery: "Logística",

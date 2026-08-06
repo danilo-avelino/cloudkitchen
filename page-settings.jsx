@@ -1,3 +1,34 @@
+// Código do tenant na rede de suprimentos (tenants.supply_code) — é com ele
+// que uma central de distribuição convida esta conta. Visível pra todo tenant.
+function SupplyCodeChip() {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const [code, setCode] = useState(null);
+  useEffect(() => {
+    if (!dbStatus.isOnline) return;
+    let cancelled = false;
+    (async () => {
+      const ctx = await dbGetCurrentContext?.();
+      if (!cancelled) setCode(ctx?.tenant?.supply_code || null);
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline]);
+  if (!code) return null;
+  const pretty = code.length === 8 ? `${code.slice(0, 4)} ${code.slice(4)}` : code;
+  return (
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 8,
+      padding: "5px 10px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4 }}>
+      <span style={{ fontSize: 11, color: "var(--fg-3)" }}>Código da rede de suprimentos:</span>
+      <span style={{ fontFamily: "var(--mono)", fontSize: 12.5, letterSpacing: "0.1em", color: "var(--fg-0)" }}>{pretty}</span>
+      <button className="btn" data-variant="ghost" data-size="sm" title="Copiar código"
+        onClick={() => {
+          try { navigator.clipboard.writeText(code); window.showToast?.("Código copiado", { tone: "ok" }); } catch {}
+        }}>
+        Copiar
+      </button>
+    </div>
+  );
+}
+
 // Settings — operations, users, billing
 function Settings() {
   const [tab, setTab] = useState("operations");
@@ -12,12 +43,14 @@ function Settings() {
       <div style={{ padding: "20px 28px 0" }}>
         <div className="h-eyebrow" style={{ marginBottom: 6 }}>{headerParts.join(" · ")}</div>
         <h1 className="h-title">Configurações</h1>
+        <SupplyCodeChip />
         <div style={{ display: "flex", gap: 0, marginTop: 16, borderBottom: "1px solid var(--line)" }}>
           {[
             ["operations",   "Operações"],
             ["users",        "Usuários & permissões"],
             ["integrations", "Integrações"],
             ["agilizone",    "Agilizone"],
+            ["foody",        "Foody Delivery"],
             ["whatsapp",     "WhatsApp"],
             ["billing",      "Plano & cobrança"],
           ].map(([id, label]) => {
@@ -40,6 +73,7 @@ function Settings() {
         {tab === "users"        && <UsersTab />}
         {tab === "integrations" && <IntegrationsTab />}
         {tab === "agilizone"    && <AgilizoneTab />}
+        {tab === "foody"        && <FoodyTab />}
         {tab === "whatsapp"     && <WhatsAppTab />}
         {tab === "billing"      && <BillingTab />}
       </div>
@@ -532,7 +566,7 @@ function UsersTab() {
     } else {
       // Create member with password (no email confirmation)
       if (dbStatus.isOnline && tenantId) {
-        const { error } = await dbInviteMember?.(tenantId, {
+        const { data, error } = await dbInviteMember?.(tenantId, {
           email: u.email,
           password: u.password,
           name: u.name,
@@ -547,7 +581,14 @@ function UsersTab() {
         // Reload members
         const res = await dbListMembers?.(tenantId);
         if (res?.data) setUsers(res.data);
-        window.showToast(`${u.name || u.email} criado com acesso ativo`, { tone: "ok" });
+        if (data?.linkedExisting) {
+          window.showToast(
+            `${u.name || u.email} já tinha conta na plataforma — vinculado a este tenant. A senha NÃO foi alterada; a pessoa entra com a senha atual dela.`,
+            { tone: "warn", ttl: 6000 },
+          );
+        } else {
+          window.showToast(`${u.name || u.email} criado com acesso ativo`, { tone: "ok" });
+        }
       } else {
         setUsers([...users, { ...u, last: "criado agora", userId: null }]);
         window.showToast(`${u.name || u.email} criado com acesso ativo`, { tone: "ok" });
@@ -616,6 +657,9 @@ function UsersTab() {
 const USER_MODULES = [
   { id: "dashboard", label: "Dashboard"        },
   { id: "stock",     label: "Estoque"          },
+  { id: "production", label: "Produção"        },
+  { id: "supply",     label: "Suprimentos"     },
+  { id: "distribution", label: "Central de Distribuição" },
   { id: "recipes",   label: "Fichas técnicas"  },
   { id: "revenue",   label: "Faturamento"      },
   { id: "crm",       label: "CRM"              },
@@ -629,11 +673,12 @@ const USER_MODULES = [
 const ALL_MODULE_IDS = USER_MODULES.map((m) => m.id);
 
 // Sugestão padrão de módulos por papel — usuário pode customizar livremente depois.
+// (espelhado em ROLE_DEFAULT_MODULES no shell.jsx e app.role_default_modules no banco)
 const ROLE_MODULE_PRESETS = {
   "Super Admin":      ALL_MODULE_IDS,
   "Gestor de marca":  ALL_MODULE_IDS.filter((m) => m !== "settings"),
-  "Operador cozinha": ["dashboard", "stock", "requests", "recipes"],
-  "Estoquista":       ["dashboard", "stock", "requests", "purchases"],
+  "Operador cozinha": ["dashboard", "stock", "requests", "recipes", "production"],
+  "Estoquista":       ["dashboard", "stock", "requests", "purchases", "production", "supply"],
   "Contador":         ["dashboard", "revenue", "cmv", "finance", "dre"],
   "Visualização":     ["dashboard"],
 };
@@ -1137,11 +1182,13 @@ function AgilizoneTab() {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null); // conta em edição; {} = nova
+  const [otherActive, setOtherActive] = useState(false); // trava: Foody Delivery ativa?
 
   const reload = async (tenantId) => {
     const { data, error } = await dbAgilizoneListAccounts(tenantId);
     if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
     setAccounts(data?.accounts || []);
+    setOtherActive(!!data?.otherActive);
   };
 
   useEffect(() => {
@@ -1187,6 +1234,16 @@ function AgilizoneTab() {
         </button>
       </div>
 
+      {otherActive && (
+        <div style={{ fontSize: 12, color: "var(--warn)", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 6, padding: "10px 14px", display: "flex", gap: 8 }}>
+          <I.AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>
+            A integração <b>Foody Delivery</b> está ativa. Só uma integração de logística pode estar
+            ativa por vez — desative-a em <b>Configurações → Foody Delivery</b> antes de ativar a Agilizone.
+          </span>
+        </div>
+      )}
+
       {accounts.length === 0 ? (
         <div style={{ fontSize: 12.5, color: "var(--fg-3)", padding: "16px 0" }}>
           Nenhuma conta Agilizone cadastrada. Clique em <b>Nova conta</b> para começar.
@@ -1194,7 +1251,7 @@ function AgilizoneTab() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {accounts.map((acc) => (
-            <AgilizoneAccountCard key={acc.id} tid={tid} acc={acc} ops={ops}
+            <AgilizoneAccountCard key={acc.id} tid={tid} acc={acc} ops={ops} lockActive={otherActive}
               onEdit={() => setEditing(acc)} onChanged={() => reload(tid)} />
           ))}
         </div>
@@ -1209,7 +1266,7 @@ function AgilizoneTab() {
   );
 }
 
-function AgilizoneAccountCard({ tid, acc, ops, onEdit, onChanged }) {
+function AgilizoneAccountCard({ tid, acc, ops, lockActive, onEdit, onChanged }) {
   const [brands, setBrands] = useState(null);  // null = carregando salvos
   const [map, setMap]       = useState({});    // merchant -> operationId | ""
   const [pulling, setPulling]   = useState(false);
@@ -1285,7 +1342,9 @@ function AgilizoneAccountCard({ tid, acc, ops, onEdit, onChanged }) {
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button className="btn" data-size="sm" onClick={onEdit} disabled={pulling || saving || toggling}>Editar</button>
-            <button className="btn" data-size="sm" onClick={toggle} disabled={toggling}>
+            <button className="btn" data-size="sm" onClick={toggle}
+              disabled={toggling || (!acc.is_active && lockActive)}
+              title={!acc.is_active && lockActive ? "Desative a integração Foody Delivery antes de ativar a Agilizone" : undefined}>
               {toggling ? "…" : acc.is_active ? "Pausar" : "Ativar"}
             </button>
             <button className="btn" data-variant="primary" data-size="sm" onClick={pull} disabled={pulling}>
@@ -1360,9 +1419,13 @@ function AgilizoneAccountModal({ tid, initial, onClose, onSaved }) {
     try {
       const payload = { id: initial?.id, label: label.trim(), environment, clientId: clientId.trim() };
       if (clientSecret.trim()) payload.clientSecret = clientSecret.trim();
-      const { error } = await dbAgilizoneSaveAccount(tid, payload);
+      const { data, error } = await dbAgilizoneSaveAccount(tid, payload);
       if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
-      window.showToast?.("Conta Agilizone salva", { tone: "ok" });
+      if (data?.lockedPaused) {
+        window.showToast?.("Conta criada PAUSADA — desative a Foody Delivery para ativá-la.", { tone: "warn", ttl: 6000 });
+      } else {
+        window.showToast?.("Conta Agilizone salva", { tone: "ok" });
+      }
       onSaved?.();
     } finally { setSaving(false); }
   };
@@ -1391,6 +1454,278 @@ function AgilizoneAccountModal({ tid, initial, onClose, onSaved }) {
         <FormRow label="Client Secret" hint={isEdit ? "deixe em branco para manter o atual" : ""}>
           <input className="input mono" type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)}
                  placeholder={isEdit ? "••••••••" : "uuid do secret"} />
+        </FormRow>
+      </div>
+    </Modal>
+  );
+}
+
+// ===== Aba Foody Delivery (integração org-level) =====
+// A Foody Delivery é o sistema de gestão de logística (last-mile). Aqui o tenant
+// cadastra o token de API, ativa a integração e atrela cada ponto de coleta
+// (collectionPoint.name) a uma operação. Tudo via edge function foody-admin
+// (service_role) — o token nunca volta pro cliente.
+// TRAVA: só uma integração de logística ativa por vez (Agilizone × Foody).
+function FoodyTab() {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const [tid, setTid] = useState(null);
+  const [ops, setOps] = useState([]);
+  const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null); // conta em edição; {} = nova
+  const [otherActive, setOtherActive] = useState(false); // trava: Agilizone ativa?
+
+  const reload = async (tenantId) => {
+    const { data, error } = await dbFoodyListAccounts(tenantId);
+    if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+    setAccounts(data?.accounts || []);
+    setOtherActive(!!data?.otherActive);
+  };
+
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setLoading(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const ctx = await dbGetCurrentContext();
+        const t = ctx?.tenant?.id || null;
+        if (cancelled) return;
+        setTid(t);
+        if (!t) return;
+        const { data: opsData } = await dbListOperations(t);
+        if (cancelled) return;
+        setOps((opsData || []).filter((o) => o.id !== "all").map((r) => ({ id: r.id, name: r.name, short: r.short_label })));
+        await reload(t);
+      } finally { if (!cancelled) setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.state, dbStatus.isOnline]);
+
+  if (loading) return <PageLoading label="Carregando integração Foody Delivery…" variant="table" hint="" />;
+
+  if (!dbStatus.isOnline || !tid) {
+    return (
+      <div style={{ fontSize: 12.5, color: "var(--warn)", padding: "10px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 4 }}>
+        A integração Foody Delivery só pode ser gerenciada com Supabase online.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13, maxWidth: 640 }}>
+          A Foody Delivery gerencia a logística de entrega dos pedidos. Cadastre o token de API,
+          ative a integração e atrele cada ponto de coleta a uma operação — Logística e faturamento
+          são alimentados automaticamente.
+        </p>
+        <button className="btn" data-variant="primary" data-size="sm" onClick={() => setEditing({})}>
+          <I.Plus size={13} />Nova conta
+        </button>
+      </div>
+
+      {otherActive && (
+        <div style={{ fontSize: 12, color: "var(--warn)", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 6, padding: "10px 14px", display: "flex", gap: 8 }}>
+          <I.AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>
+            A integração <b>Agilizone</b> está ativa. Só uma integração de logística pode estar
+            ativa por vez — desative-a em <b>Configurações → Agilizone</b> antes de ativar a Foody Delivery.
+          </span>
+        </div>
+      )}
+
+      {accounts.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--fg-3)", padding: "16px 0" }}>
+          Nenhuma conta Foody Delivery cadastrada. Clique em <b>Nova conta</b> para começar.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {accounts.map((acc) => (
+            <FoodyAccountCard key={acc.id} tid={tid} acc={acc} ops={ops} lockActive={otherActive}
+              onEdit={() => setEditing(acc)} onChanged={() => reload(tid)} />
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <FoodyAccountModal tid={tid} initial={editing.id ? editing : null}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); reload(tid); }} />
+      )}
+    </div>
+  );
+}
+
+function FoodyAccountCard({ tid, acc, ops, lockActive, onEdit, onChanged }) {
+  const [points, setPoints] = useState(null);  // null = carregando salvos
+  const [map, setMap]       = useState({});    // point -> operationId | ""
+  const [pulling, setPulling]   = useState(false);
+  const [saving, setSaving]     = useState(false);
+  const [toggling, setToggling] = useState(false);
+
+  // persistência: carrega os mapeamentos já salvos ao montar (sem chamar a Foody)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await dbFoodyListPointMap(tid, acc.id);
+      if (cancelled) return;
+      const ps = error ? [] : (data?.points || []);
+      setPoints(ps);
+      setMap(Object.fromEntries(ps.map((p) => [p.point, p.operationId || ""])));
+    })();
+    return () => { cancelled = true; };
+  }, [tid, acc.id]);
+
+  // Atualizar: busca pontos ao vivo na Foody (acha novos) preservando seleções
+  const pull = async () => {
+    if (pulling) return;
+    setPulling(true);
+    try {
+      const { data, error } = await dbFoodyDiscoverPoints(tid, acc.id);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      const ps = data?.points || [];
+      setPoints(ps);
+      setMap((prev) => Object.fromEntries(ps.map((p) => [p.point, prev[p.point] ?? (p.operationId || "")])));
+      window.showToast?.(`${ps.length} ponto(s) de coleta encontrado(s)`, { tone: "ok" });
+    } finally { setPulling(false); }
+  };
+
+  const toggle = async () => {
+    if (toggling) return;
+    setToggling(true);
+    try {
+      const { error } = await dbFoodyToggleAccount(tid, acc.id, !acc.is_active);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      window.showToast?.(acc.is_active ? "Integração pausada" : "Integração ativada", { tone: "ok" });
+      onChanged?.();
+    } finally { setToggling(false); }
+  };
+
+  const saveMap = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const mappings = (points || []).map((p) => ({ point: p.point, operationId: map[p.point] || null }));
+      const { data, error } = await dbFoodySavePointMap(tid, acc.id, mappings);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      window.showToast?.(`Mapeamento salvo · ${data?.saved || 0} vinculado(s)${data?.ingestQueued ? " · sincronizando pedidos…" : ""}`, { tone: "ok" });
+      onChanged?.();
+    } finally { setSaving(false); }
+  };
+
+  const maskedToken = acc.token_hint ? `token ····${acc.token_hint}` : "token configurado";
+  const mappedCount = points ? points.filter((p) => map[p.point]).length : 0;
+
+  return (
+    <div className="card">
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div>
+            <div style={{ color: "var(--fg-0)", fontWeight: 500, display: "flex", alignItems: "center", gap: 8 }}>
+              {acc.label}
+              <span className="badge" data-tone={acc.is_active ? "ok" : "warn"}>{acc.is_active ? "Ativa" : "Pausada"}</span>
+            </div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", marginTop: 2 }}>
+              {maskedToken}{acc.last_synced_at ? ` · sync ${new Date(acc.last_synced_at).toLocaleString("pt-BR")}` : " · nunca sincronizado"}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" data-size="sm" onClick={onEdit} disabled={pulling || saving || toggling}>Editar</button>
+            <button className="btn" data-size="sm" onClick={toggle}
+              disabled={toggling || (!acc.is_active && lockActive)}
+              title={!acc.is_active && lockActive ? "Desative a integração Agilizone antes de ativar a Foody Delivery" : undefined}>
+              {toggling ? "…" : acc.is_active ? "Pausar" : "Ativar"}
+            </button>
+            <button className="btn" data-variant="primary" data-size="sm" onClick={pull} disabled={pulling}>
+              {pulling ? "Atualizando…" : "Atualizar pontos"}
+            </button>
+          </div>
+        </div>
+
+        {points && (
+          points.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "var(--fg-3)" }}>
+              Nenhum ponto de coleta vinculado ainda. Clique em <b>Atualizar pontos</b> para buscar na Foody.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 11.5, color: "var(--fg-3)" }}>
+                {points.length} ponto(s) de coleta · {mappedCount} vinculado(s). Pontos em “—” ficam fora
+                da Logística e do faturamento.
+              </div>
+              <table className="table">
+                <thead>
+                  <tr><th>Ponto de coleta (Foody)</th><th style={{ width: 80 }}>Pedidos</th><th style={{ width: 260 }}>Operação</th></tr>
+                </thead>
+                <tbody>
+                  {points.map((p) => (
+                    <tr key={p.point}>
+                      <td>{p.point}</td>
+                      <td style={{ fontFamily: "var(--mono)", color: "var(--fg-3)" }}>{p.count}</td>
+                      <td>
+                        <select className="input" value={map[p.point] || ""}
+                          onChange={(e) => setMap((m) => ({ ...m, [p.point]: e.target.value }))}>
+                          <option value="">— ignorar —</option>
+                          {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button className="btn" data-variant="primary" data-size="sm" onClick={saveMap} disabled={saving}>
+                  {saving ? "Salvando…" : "Salvar mapeamentos"}
+                </button>
+              </div>
+            </div>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FoodyAccountModal({ tid, initial, onClose, onSaved }) {
+  const [label, setLabel]       = useState(initial?.label || "");
+  const [apiToken, setApiToken] = useState("");
+  const [saving, setSaving]     = useState(false);
+  const isEdit = !!initial?.id;
+  const valid = label.trim() && (isEdit || apiToken.trim());
+
+  const save = async () => {
+    if (saving || !valid) return;
+    setSaving(true);
+    try {
+      const payload = { id: initial?.id, label: label.trim() };
+      if (apiToken.trim()) payload.apiToken = apiToken.trim();
+      const { data, error } = await dbFoodySaveAccount(tid, payload);
+      if (error) { window.showToast?.(error.message, { tone: "crit" }); return; }
+      if (data?.lockedPaused) {
+        window.showToast?.("Conta criada PAUSADA — desative a Agilizone para ativá-la.", { tone: "warn", ttl: 6000 });
+      } else {
+        window.showToast?.("Conta Foody Delivery salva", { tone: "ok" });
+      }
+      onSaved?.();
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal title={isEdit ? "Editar conta Foody Delivery" : "Nova conta Foody Delivery"} onClose={onClose} width={520}
+      footer={<>
+        <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+        <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || saving} onClick={save}>
+          {saving ? "Salvando…" : isEdit ? "Salvar" : "Criar conta"}
+        </button>
+      </>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <FormRow label="Nome da loja">
+          <input className="input" autoFocus value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Ex.: Dark Aldeota" />
+        </FormRow>
+        <FormRow label="Token de API" hint={isEdit ? "deixe em branco para manter o atual" : "Foody · Minha Conta → APIs e Hooks"}>
+          <input className="input mono" type="password" value={apiToken} onChange={(e) => setApiToken(e.target.value)}
+                 placeholder={isEdit ? "••••••••" : "token da conta Foody"} />
         </FormRow>
       </div>
     </Modal>
