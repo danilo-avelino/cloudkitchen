@@ -164,14 +164,19 @@ function LoginPage({ onLogin }) {
       background: "var(--bg-0)", padding: 20,
       fontFamily: "var(--sans)",
     }}>
-      {/* Ajustes de celular (≤480px): inputs 16px (anti-zoom iOS), alvos de toque
-          maiores, card full-width e safe-area. Escopado ao login. */}
+      {/* Escopado ao login. Duas faixas separadas de propósito:
+          · toque (celular OU tablet) → input 16px evita o zoom automático do
+            iOS no focus, e alvos maiores. Vale no iPad igual.
+          · ≤480px → só layout: card full-width e safe-area, que num tablet
+            deixaria o card esticado. */}
       <style>{`
+        @media (pointer: coarse) and (hover: none) {
+          .login-screen .input { font-size: 16px !important; height: auto !important; padding: 12px 12px !important; }
+          .login-screen .btn { padding: 14px 16px !important; font-size: 15px !important; }
+        }
         @media (max-width: 480px) {
           .login-screen { padding: calc(20px + env(safe-area-inset-top)) 14px calc(20px + env(safe-area-inset-bottom)) !important; align-content: start; }
           .login-screen .login-card { width: 100% !important; padding: 26px 20px !important; box-shadow: none !important; border-radius: 12px !important; }
-          .login-screen .input { font-size: 16px !important; height: auto !important; padding: 12px 12px !important; }
-          .login-screen .btn { padding: 14px 16px !important; font-size: 15px !important; }
         }
       `}</style>
       <div className="login-card" style={{

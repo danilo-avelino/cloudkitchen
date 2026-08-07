@@ -10,8 +10,22 @@
 //     que preenchem o pai (height:100%), NÃO position:fixed.
 //   - Os SHEETS que elas abrem são overlays fixed (BottomSheet / FullSheet).
 
-// Breakpoint único de celular. Mantido aqui pra ser a fonte da verdade.
-const MOBILE_QUERY = "(max-width: 480px)";
+// Detecção única de "usar o shell mobile". Fonte da verdade — quem precisar da
+// mesma regra (JS ou CSS) importa daqui, não redeclara o literal.
+//
+// Duas condições, em OU:
+//   1. (max-width: 480px)           → desktop com janela estreita continua indo
+//                                     pro mobile, como antes.
+//   2. toque + até 1366px           → tablet. Largura sozinha não resolvia: iPad
+//                                     reporta 768–1366px CSS e caía no desktop.
+//
+// `pointer: coarse` + `hover: none` descrevem o mecanismo de entrada PRIMÁRIO —
+// verdadeiro em celular/tablet (inclusive iPadOS, que mente na UA se dizendo
+// Macintosh), falso em notebook com touchscreen, onde o primário é o trackpad.
+// O teto de 1366px é o iPad Pro 12.9" deitado, maior tablet corrente; segura
+// monitor/kiosk de toque grande no shell de desktop. Portrait e landscape do
+// mesmo aparelho ficam ambos abaixo do teto, então girar não troca de shell.
+const MOBILE_QUERY = "(max-width: 480px), (pointer: coarse) and (hover: none) and (max-width: 1366px)";
 
 function useIsMobile() {
   const [m, setM] = useState(() =>

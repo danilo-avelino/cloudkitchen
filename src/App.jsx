@@ -73,8 +73,9 @@ export function App() {
 
   const handleLogin = (u) => {
     setUser(u);
-    // No celular o toast fica sobre a bottom nav e atrapalha a navegação — só no desktop.
-    const isMobile = window.matchMedia?.("(max-width: 480px)").matches;
+    // No mobile o toast fica sobre a bottom nav e atrapalha a navegação — só no desktop.
+    // Usa o MOBILE_QUERY de mobile-ui.jsx pra não divergir do shell escolhido.
+    const isMobile = window.matchMedia?.(window.MOBILE_QUERY || "(max-width: 480px)").matches;
     if (isMobile) return;
     if (u.role === "superadmin") {
       window.showToast(`Bem-vindo, ${u.name} · acesso superadmin`, { tone: "ok", ttl: 4500 });
