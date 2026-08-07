@@ -64,6 +64,36 @@ function computeInvMetrics(items) {
   };
 }
 
+// ===================== Ajustes suspeitos =====================
+// A finalização grava um stock_movement `adjust` irreversível para cada item
+// com counted ≠ expected. Erro de contagem/digitação vira perda contábil real,
+// então o wizard trava antes de gravar e pede confirmação item a item.
+// O corte é por valor: R$ alto sozinho já basta; desvio percentual grande só
+// entra se também mover dinheiro relevante.
+const SUSPECT_ABS_BRL     = 150;   // |impacto financeiro| do ajuste
+const SUSPECT_PCT         = 0.5;   // 50% de desvio sobre o esperado
+const SUSPECT_PCT_MIN_BRL = 30;    // piso de R$ p/ a regra percentual valer
+
+// Recebe os items no formato do wizard ({ expected, counted, cost, ... }) e
+// devolve só os suspeitos, do maior impacto pro menor.
+function findSuspectAdjustments(items) {
+  return (items || [])
+    .filter((it) => it && it.stock_item_id && it.counted != null)
+    .map((it) => {
+      const diff   = Number(it.counted) - Number(it.expected || 0);
+      const impact = diff * (Number(it.cost) || 0);
+      return { ...it, diff, impact, pct: it.expected > 0 ? Math.abs(diff) / it.expected : null };
+    })
+    .filter((r) => {
+      if (Math.abs(r.diff) < 0.001) return false;
+      if (Math.abs(r.impact) >= SUSPECT_ABS_BRL) return true;
+      if (Math.abs(r.impact) < SUSPECT_PCT_MIN_BRL) return false;
+      // pct null = esperado 0 · item que "apareceu" do nada também é suspeito
+      return r.pct == null ? r.counted > 0 : r.pct >= SUSPECT_PCT;
+    })
+    .sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
+}
+
 // Agrupa items por categoria e calcula métricas em cada grupo
 function metricsByCategory(items) {
   const groups = {};
@@ -1162,7 +1192,10 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
     }
   };
 
-  const finalize = async () => {
+  // ids dos ajustes suspeitos aguardando confirmação · null = modal fechado
+  const [review, setReview] = useState(null);
+
+  const doFinalize = async () => {
     if (saving) return;
     setSaving(true);
     try {
@@ -1179,8 +1212,20 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
     }
   };
 
+  // Gate: ajuste de valor fora do padrão vira baixa/entrada irreversível no
+  // estoque, então trava aqui e obriga a confirmar (ou corrigir) um a um.
+  const finalize = () => {
+    if (saving) return;
+    if (suspects.length > 0) {
+      setReview(suspects.map((s) => s.stock_item_id));
+      return;
+    }
+    doFinalize();
+  };
+
   // Métricas da prévia (passo 3)
-  const preview = computeInvMetrics(submitItems);
+  const preview  = computeInvMetrics(submitItems);
+  const suspects = findSuspectAdjustments(submitItems);
 
   return (
     <Modal
@@ -1392,6 +1437,22 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
             </div>
           )}
 
+          {suspects.length > 0 && (
+            <div style={{
+              padding: "10px 12px", background: "var(--crit-soft)",
+              border: "1px solid var(--crit-line)", borderRadius: 4,
+              display: "flex", alignItems: "center", gap: 10, marginBottom: 14,
+              fontSize: 12, color: "var(--fg-1)",
+            }}>
+              <I.AlertTriangle size={13} style={{ color: "var(--crit)" }} />
+              <span>
+                <strong style={{ color: "var(--crit)" }}>{suspects.length}</strong>{" "}
+                {suspects.length === 1 ? "ajuste com valor fora do padrão" : "ajustes com valor fora do padrão"}.
+                Ao finalizar, você vai confirmar {suspects.length === 1 ? "ele" : "cada um deles"} antes da baixa no estoque.
+              </span>
+            </div>
+          )}
+
           <div className="h-eyebrow" style={{ marginBottom: 8 }}>Resumo da contagem</div>
           <CountingTable
             items={scopedItems}
@@ -1401,6 +1462,187 @@ function NewInventoryModal({ stockItems, initial, onCancel, onSave }) {
           />
         </div>
       )}
+
+      {review && ReactDOM.createPortal(
+        <SuspectReviewModal
+          items={submitItems}
+          ids={review}
+          counts={counts}
+          onSetCount={setCount}
+          saving={saving}
+          onCancel={() => setReview(null)}
+          onDone={() => { setReview(null); doFinalize(); }}
+        />,
+        document.body,
+      )}
+    </Modal>
+  );
+}
+
+// ===================== Confirmação de ajustes suspeitos =====================
+// Abre antes de gravar a finalização. Percorre um suspeito por vez; em cada um o
+// usuário confirma o ajuste ou corrige a contagem na hora — a correção volta
+// direto pro state `counts` do wizard, então os números do card são recalculados
+// ao vivo e o item pode deixar de ser suspeito.
+function SuspectReviewModal({ items, ids, counts, onSetCount, onCancel, onDone, saving }) {
+  const [idx,     setIdx]     = useState(0);
+  const [decided, setDecided] = useState({});   // { stock_item_id: true }
+  const [editing, setEditing] = useState(false);
+  const [draft,   setDraft]   = useState("");
+
+  const byId = useMemo(() => {
+    const m = {};
+    (items || []).forEach((it) => { m[it.stock_item_id] = it; });
+    return m;
+  }, [items]);
+
+  // Lista congelada na abertura (ids), mas com valores lidos ao vivo — corrigir
+  // um item não reordena nem remove cards no meio da revisão.
+  const rows = ids.map((id) => {
+    const it     = byId[id] || { stock_item_id: id, name: id, expected: 0, counted: null, cost: 0, unit: "" };
+    const diff   = it.counted == null ? null : Number(it.counted) - Number(it.expected || 0);
+    const impact = diff == null ? 0 : diff * (Number(it.cost) || 0);
+    return { ...it, id, diff, impact, stillSuspect: findSuspectAdjustments([it]).length > 0 };
+  });
+
+  const cur       = rows[idx];
+  const isLast    = idx === rows.length - 1;
+  const doneCount = rows.filter((r) => decided[r.id]).length;
+  const totImpact = rows.reduce((s, r) => s + r.impact, 0);
+
+  const startEdit = () => {
+    const raw = counts[cur.id];
+    setDraft(raw == null ? "" : String(raw));
+    setEditing(true);
+  };
+  const saveEdit = () => {
+    onSetCount(cur.id, draft.trim());
+    setEditing(false);
+  };
+  const confirmCur = () => {
+    setDecided((d) => ({ ...d, [cur.id]: true }));
+    setEditing(false);
+    if (isLast) onDone();
+    else setIdx((i) => i + 1);
+  };
+
+  const pctLabel = cur.expected > 0 && cur.diff != null
+    ? `${cur.diff > 0 ? "+" : "−"}${Math.round(Math.abs(cur.diff) / cur.expected * 100)}%`
+    : "—";
+
+  return (
+    <Modal
+      title="Confirme os ajustes suspeitos"
+      subtitle={`${rows.length} ${rows.length === 1 ? "ajuste move" : "ajustes movem"} um valor fora do padrão · impacto somado ${totImpact >= 0 ? "+" : "−"}${_fmtBRLi(Math.abs(totImpact)).replace("R$ ", "R$ ")}`}
+      onClose={saving ? undefined : onCancel}
+      width={560}
+      footer={
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn" data-size="sm" onClick={() => setIdx((i) => i - 1)}
+                  disabled={idx === 0 || saving}>
+            <I.Chevron size={11} style={{ transform: "rotate(90deg)" }} />Anterior
+          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {editing ? (
+              <>
+                <button className="btn" data-size="sm" onClick={() => setEditing(false)} disabled={saving}>
+                  Cancelar
+                </button>
+                <button className="btn" data-variant="primary" data-size="sm" onClick={saveEdit} disabled={saving}>
+                  <I.Check size={12} />Salvar correção
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="btn" data-size="sm" onClick={startEdit} disabled={saving}>
+                  Corrigir contagem
+                </button>
+                <button className="btn" data-variant="primary" data-size="sm" onClick={confirmCur} disabled={saving}>
+                  <I.Check size={12} />
+                  {saving ? "Finalizando…" : isLast ? "Confirmar e finalizar" : "Confirmar ajuste"}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      }
+    >
+      {/* Trilha de progresso · um traço por suspeito */}
+      <div style={{ display: "flex", gap: 3, marginBottom: 6 }}>
+        {rows.map((r, i) => (
+          <div key={r.id} style={{
+            flex: 1, height: 3, borderRadius: 2,
+            background: decided[r.id] ? "var(--ok)" : i === idx ? "var(--accent-bright)" : "var(--bg-3)",
+            transition: "background 200ms ease",
+          }} />
+        ))}
+      </div>
+      <div className="mono" style={{
+        fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em",
+        textTransform: "uppercase", marginBottom: 14,
+      }}>
+        Ajuste {idx + 1} de {rows.length} · {doneCount} confirmado(s)
+      </div>
+
+      {/* Card do item em revisão */}
+      <div style={{
+        padding: "16px 16px 14px",
+        background: "var(--bg-2)",
+        border: `1px solid ${cur.stillSuspect ? "var(--crit-line)" : "var(--ok-line)"}`,
+        borderRadius: 6,
+      }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 500, color: "var(--fg-0)" }}>{cur.name}</div>
+            <div className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", marginTop: 3 }}>
+              {cur.cat || "sem categoria"} · custo {_fmtBRLi(cur.cost)}/{cur.unit}
+            </div>
+          </div>
+          <span className="badge" data-tone={cur.stillSuspect ? "crit" : "ok"}>
+            {cur.stillSuspect ? "Suspeito" : "Dentro do normal"}
+          </span>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+          <DetailKpi label="Esperado (sistema)" value={`${cur.expected} ${cur.unit}`} />
+          <DetailKpi label="Contado" value={cur.counted == null ? "—" : `${cur.counted} ${cur.unit}`} />
+          <DetailKpi
+            label="Diferença"
+            value={cur.diff == null ? "—" : `${cur.diff > 0 ? "+" : ""}${Number(cur.diff.toFixed(2))} ${cur.unit}`}
+            sub={pctLabel !== "—" ? `${pctLabel} do esperado` : undefined}
+            tone={cur.diff == null ? "neutral" : cur.diff < 0 ? "crit" : "info"}
+          />
+          <DetailKpi
+            label="Impacto no estoque"
+            value={`${cur.impact >= 0 ? "+" : "−"}${_fmtBRLi(Math.abs(cur.impact)).replace("R$ ", "R$ ")}`}
+            tone={cur.impact < 0 ? "crit" : cur.impact > 0 ? "info" : "ok"}
+            sub={cur.impact < 0 ? "perda" : cur.impact > 0 ? "sobra" : "sem impacto"}
+          />
+        </div>
+
+        {editing && (
+          <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
+            <FormRow label="Nova contagem" hint="Deixe vazio para marcar o item como não contado (nenhum ajuste é gerado).">
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  className="input mono" inputMode="decimal" autoFocus
+                  value={draft}
+                  placeholder="0"
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveEdit(); } }}
+                  style={{ width: 120, textAlign: "right" }}
+                />
+                <span className="mono" style={{ fontSize: 12, color: "var(--fg-3)" }}>{cur.unit}</span>
+              </div>
+            </FormRow>
+          </div>
+        )}
+      </div>
+
+      <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 12, lineHeight: 1.5 }}>
+        Confirmar aplica a diferença como movimento de ajuste no estoque — isso não pode ser
+        desfeito, só corrigido com um movimento inverso. Se a contagem estiver errada, corrija agora.
+      </div>
     </Modal>
   );
 }
