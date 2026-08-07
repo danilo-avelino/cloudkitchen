@@ -6,7 +6,7 @@
 // permite lançar mobile PÁGINA POR PÁGINA sem quebrar o resto.
 
 // id → componente mobile dedicado (lidos lazy do window no render).
-const MOBILE_PAGE_IDS = ["dashboard", "stock", "purchases", "requests", "revenue"];
+const MOBILE_PAGE_IDS = ["dashboard", "stock", "purchases", "requests", "revenue", "cmv"];
 
 // Config de navegação (espelha shell.jsx · label + ícone por módulo).
 const MNAV = [
@@ -22,7 +22,7 @@ const MNAV = [
   { id: "crm",          label: "CRM",              icon: "WhatsApp" },
   { id: "requests",     label: "Requisições",      icon: "Request" },
   { id: "purchases",    label: "Compras",          icon: "ShoppingList" },
-  { id: "cmv",          label: "CMV & margem",     icon: "CMV" },
+  { id: "cmv",          label: "CMV & margem",     icon: "CMV", short: "CMV" },
   { id: "finance",      label: "Financeiro",       icon: "Finance" },
   { id: "dre",          label: "DRE & Fechamento", icon: "Lock" },
   { id: "settings",     label: "Configurações",    icon: "Settings" },
@@ -47,9 +47,10 @@ function MobileApp({ t, setTweak, scope, setScope, page, setPage, toasts, user, 
 
   const setTheme = (v) => setTweak && setTweak("theme", v);
 
-  // Atalhos da barra inferior: 4 primeiros por prioridade + "Mais".
-  const primary = MNAV_PRIORITY.filter((id) => allowed.includes(id)).slice(0, 4);
-  const showMore = allowed.length > primary.length;
+  // Atalhos da barra inferior: 4 primeiros por prioridade + CMV fixado + "Mais".
+  let primary = MNAV_PRIORITY.filter((id) => allowed.includes(id)).slice(0, 4);
+  if (allowed.includes("cmv") && !primary.includes("cmv")) primary = [...primary, "cmv"];
+  const showMore = allowed.some((id) => !primary.includes(id));
 
   // Componente mobile dedicado (lazy do window) ou fallback desktop.
   const MobilePageComp = MOBILE_PAGE_IDS.includes(page) ? window[mobileCompName(page)] : null;
@@ -125,7 +126,7 @@ function BottomNavItem({ nav, active, onClick }) {
     }}>
       <Ico size={19} stroke={active ? 2 : 1.5} />
       <span style={{ fontSize: 10, fontWeight: active ? 600 : 400, whiteSpace: "nowrap", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}>
-        {nav.label}
+        {nav.short || nav.label}
       </span>
     </button>
   );
@@ -243,7 +244,7 @@ function DesktopPageRender({ page, Comp, scope, setPage, user, onLogout }) {
 
 // Nome do componente mobile dedicado por página.
 function mobileCompName(page) {
-  return { dashboard: "MobileDashboard", stock: "MobileStock", purchases: "MobilePurchases", requests: "MobileRequestsBoard", revenue: "MobileRevenue" }[page] || null;
+  return { dashboard: "MobileDashboard", stock: "MobileStock", purchases: "MobilePurchases", requests: "MobileRequestsBoard", revenue: "MobileRevenue", cmv: "MobileCMV" }[page] || null;
 }
 // Nome do componente desktop por página (globais).
 function desktopCompName(page) {

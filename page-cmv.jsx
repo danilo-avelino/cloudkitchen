@@ -3177,3 +3177,16 @@ function CmvBar({ pct, max, tone }) {
 
 window.CMV = CMV;
 window.cmvTone = cmvTone;
+window.buildDailyRows = buildDailyRows; // reusado pela versão mobile (MobileCMV)
+window.getDateRange = getDateRange;     // idem — mesma semântica de período
+window.buildItemRows = buildItemRows;
+window.buildWeeklyRows = buildWeeklyRows;
+window.buildItemByPeriod = buildItemByPeriod;
+window.cmvWeekMonday = weekMonday;
+window.cmvMonthKeyOf = monthKeyOf;
+window.cmvWeekRangeShort = weekRangeShort;
+window.cmvWeekRangeFull = weekRangeFull;
+window.getInsumoDetail = getInsumoDetail;   // reusado pelo modal de insumo mobile
+window.InsumoModalBody = InsumoModalBody;    // conteúdo do modal (responsivo)
+window.cmvPeriodFmt = periodFmt;
+window.buildWeekDetail = buildWeekDetail;    // reusado pelo modal da semana mobile
