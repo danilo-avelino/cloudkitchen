@@ -1,5 +1,22 @@
 # Plano de Adaptação Mobile — StockKitchen
 
+## Status do rollout (atualizado 2026-08-07)
+
+**Adaptadas (telas mobile dedicadas, ligadas no `MOBILE_PAGE_IDS`):**
+Estoque · Compras · Dashboard · Requisições (quadro de gestão; criação usa `#/mobile`) · Faturamento.
+
+**Paridade de abas conferida/completada (2026-08-07):**
+- Estoque mobile agora tem as 6 abas do desktop: Insumos · Pendências · Inventário · **Fornecedores** · **Categorias** · Desperdícios. (Fornecedores/Categorias/Inventário/Desperdícios reusam os componentes do desktop via `window.*`.)
+- Compras mobile agora tem as 2 abas do desktop: **Listas salvas** · **Nova lista** (embed do `Shopping` para sugestão editável), além do botão "Nova lista (auto)".
+
+**Pendentes (caem no fallback desktop com aviso, funcionais):**
+Produção · CMV · Financeiro · DRE · Fichas técnicas · Logística · Cardápio · CRM · Suprimentos · Central · Configurações.
+
+Cada pendente segue o mesmo molde: novo `page-mobile-<x>.jsx` → `window.Mobile<X>`; registrar em `src/main.jsx`; adicionar id em `MOBILE_PAGE_IDS` e no map de `mobileCompName` (mobile-shell.jsx). Produção e as analíticas (CMV/DRE) têm fluxos transacionais/tabelas densas — exigem mais cuidado.
+
+---
+
+
 **Abordagem escolhida:** telas mobile **dedicadas** (não responsivo in-place), no
 mesmo padrão que já funciona em `page-mobile-requests.jsx` (`#/mobile`).
 **Alvo prioritário:** celular **≤480px** (estoquista/operador em pé, uma coluna,

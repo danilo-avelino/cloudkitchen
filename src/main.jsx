@@ -79,6 +79,8 @@ async function bootstrap() {
   await import("../page-purchases.jsx");
   await import("../page-mobile-stock.jsx");
   await import("../page-mobile-purchases.jsx");
+  await import("../page-mobile-requests-board.jsx");
+  await import("../page-mobile-revenue.jsx");
   await import("../page-shopping.jsx");
   await import("../page-cmv.jsx");
   await import("../page-finance.jsx");

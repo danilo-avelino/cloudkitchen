@@ -4374,6 +4374,8 @@ function StockTopValueModal({ items, onClose }) {
 window.Stock = Stock;
 window.Tabs = Tabs;
 window.WastesView = WastesView;
+window.SuppliersView = SuppliersView;   // reusado na aba Fornecedores mobile
+window.CategoriesView = CategoriesView; // reusado na aba Categorias mobile
 window.WasteEntryModal = WasteEntryModal;
 window.StockTopValueModal = StockTopValueModal;
 window.StockScaleBar = StockScaleBar; // reusado no detalhe do item mobile

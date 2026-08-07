@@ -6,7 +6,7 @@
 // permite lançar mobile PÁGINA POR PÁGINA sem quebrar o resto.
 
 // id → componente mobile dedicado (lidos lazy do window no render).
-const MOBILE_PAGE_IDS = ["dashboard", "stock", "purchases"];
+const MOBILE_PAGE_IDS = ["dashboard", "stock", "purchases", "requests", "revenue"];
 
 // Config de navegação (espelha shell.jsx · label + ícone por módulo).
 const MNAV = [
@@ -243,7 +243,7 @@ function DesktopPageRender({ page, Comp, scope, setPage, user, onLogout }) {
 
 // Nome do componente mobile dedicado por página.
 function mobileCompName(page) {
-  return { dashboard: "MobileDashboard", stock: "MobileStock", purchases: "MobilePurchases" }[page] || null;
+  return { dashboard: "MobileDashboard", stock: "MobileStock", purchases: "MobilePurchases", requests: "MobileRequestsBoard", revenue: "MobileRevenue" }[page] || null;
 }
 // Nome do componente desktop por página (globais).
 function desktopCompName(page) {

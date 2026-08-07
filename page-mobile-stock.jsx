@@ -27,9 +27,10 @@ const _mRecalc = (it) => {
 
 function MobileStock({ scope = "all" }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
-  const [tab, setTab] = useState("items"); // items | pending | inventory | wastes
+  const [tab, setTab] = useState("items"); // items | pending | suppliers | categories | inventory | wastes
   const [items, setItems] = useState(MOCK.STOCK_ITEMS || []);
   const [categories, setCategories] = useState([]);
+  const [dbCategories, setDbCategories] = useState([]); // [{id,name,...}] p/ CategoriesView
   const [suppliers, setSuppliers] = useState([]);
   const [movements, setMovements] = useState([]);
   const [tenantId, setTenantId] = useState(null);
@@ -66,7 +67,7 @@ function MobileStock({ scope = "all" }) {
         ]);
         if (cancelled) return;
         if (itemsRes.source === "db") { setItems(itemsRes.data || []); setSource("db"); }
-        if (catsRes.data) setCategories(catsRes.data.map((c) => c.name).sort());
+        if (catsRes.data) { setDbCategories(catsRes.data); setCategories(catsRes.data.map((c) => c.name).sort()); }
         if (supRes?.data) setSuppliers(supRes.data.map((s) => ({ id: s.id, name: s.name })));
       } finally {
         if (!cancelled) setPageLoading(false);
@@ -102,6 +103,69 @@ function MobileStock({ scope = "all" }) {
       const { data } = await dbListStockItems(tenantId);
       if (data) setItems(data);
     }
+  };
+
+  // ===== Categorias · CRUD (mesma lógica do desktop) =====
+  const createCategory = async (name) => {
+    const v = String(name || "").trim();
+    if (!v) return null;
+    if (allCats.includes(v)) { window.showToast?.(`Categoria "${v}" já existe`, { tone: "warn" }); return null; }
+    if (source === "db" && tenantId && typeof dbInsertStockCategory === "function") {
+      const { data, error } = await dbInsertStockCategory(tenantId, v);
+      if (error) { window.showToast?.(`Erro ao criar: ${error.message}`, { tone: "crit", ttl: 4500 }); return null; }
+      if (data) setDbCategories((prev) => [...prev, data]);
+    }
+    setCategories((prev) => [...prev, v].sort());
+    window.showToast?.(`Categoria "${v}" criada`, { tone: "ok" });
+    return v;
+  };
+  const renameCategory = async (oldName, newName) => {
+    const target = String(newName || "").trim();
+    if (!target || target === oldName) return;
+    if (source === "db" && typeof dbRenameStockCategory === "function") {
+      const dbCat = dbCategories.find((c) => c.name === oldName);
+      if (dbCat?.id) {
+        const { data, error } = await dbRenameStockCategory(dbCat.id, target);
+        if (error) { window.showToast?.(`Erro ao renomear: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+        setDbCategories((prev) => prev.map((c) => c.id === dbCat.id ? data : c));
+      }
+    }
+    setCategories((prev) => { const w = prev.filter((c) => c !== oldName); return w.includes(target) ? w : [...w, target].sort(); });
+    setItems((prev) => prev.map((it) => it.cat === oldName ? { ...it, cat: target } : it));
+    window.showToast?.(`Categoria renomeada para "${target}"`, { tone: "ok" });
+  };
+  const updateCategoryFlags = async (catName, patch) => {
+    if (source !== "db" || typeof dbUpdateStockCategory !== "function") { window.showToast?.("Conecte ao Supabase pra ajustar flags", { tone: "warn" }); return false; }
+    const dbCat = dbCategories.find((c) => c.name === catName);
+    if (!dbCat?.id) { window.showToast?.(`Categoria "${catName}" precisa ser salva primeiro`, { tone: "warn" }); return false; }
+    const { data, error } = await dbUpdateStockCategory(dbCat.id, patch);
+    if (error) { window.showToast?.(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
+    setDbCategories((prev) => prev.map((c) => c.id === dbCat.id ? data : c));
+    setItems((prev) => prev.map((it) => it.catId === dbCat.id ? { ...it, catAlertsEnabled: data.alerts_enabled !== false, catAutoShoppingEnabled: data.auto_shopping_enabled !== false } : it));
+    return true;
+  };
+  const setCategoryAutoMinMax = async (catName, enabled) => {
+    if (source !== "db" || typeof dbSetCategoryAutoMinMax !== "function") { window.showToast?.("Conecte ao Supabase pra alterar auto min/max", { tone: "warn" }); return false; }
+    const dbCat = dbCategories.find((c) => c.name === catName);
+    if (!dbCat?.id) { window.showToast?.(`Categoria "${catName}" precisa ser salva primeiro`, { tone: "warn" }); return false; }
+    const { error } = await dbSetCategoryAutoMinMax(dbCat.id, enabled);
+    if (error) { window.showToast?.(`Erro ao aplicar: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
+    setDbCategories((prev) => prev.map((c) => c.id === dbCat.id ? { ...c, auto_min_max_enabled: !!enabled } : c));
+    await refetchItems();
+    return true;
+  };
+  const deleteCategory = async (name) => {
+    if (items.some((it) => it.cat === name)) { window.showToast?.(`Há insumos em "${name}" · migre-os antes de excluir`, { tone: "warn", ttl: 4500 }); return; }
+    if (source === "db" && typeof dbDeleteStockCategory === "function") {
+      const dbCat = dbCategories.find((c) => c.name === name);
+      if (dbCat?.id) {
+        const { error } = await dbDeleteStockCategory(dbCat.id);
+        if (error) { window.showToast?.(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+        setDbCategories((prev) => prev.filter((c) => c.id !== dbCat.id));
+      }
+    }
+    setCategories((prev) => prev.filter((c) => c !== name));
+    window.showToast?.(`Categoria "${name}" excluída`, { tone: "warn" });
   };
 
   const allCats = useMemo(() =>
@@ -253,6 +317,8 @@ function MobileStock({ scope = "all" }) {
         { id: "items", label: "Insumos", count: totals.all },
         { id: "pending", label: "Pendências", count: pendingItems.length || null, tone: "crit" },
         { id: "inventory", label: "Inventário" },
+        { id: "suppliers", label: "Fornecedores" },
+        { id: "categories", label: "Categorias" },
         { id: "wastes", label: "Desperdícios", tone: "crit" },
       ]} />
 
@@ -341,6 +407,30 @@ function MobileStock({ scope = "all" }) {
         </MobileScroll>
       )}
 
+      {tab === "suppliers" && (
+        <MobileScroll style={{ padding: "14px" }}>
+          {typeof SuppliersView === "function" ? <SuppliersView /> : <div style={{ padding: 24, color: "var(--fg-3)" }}>Fornecedores indisponível.</div>}
+        </MobileScroll>
+      )}
+
+      {tab === "categories" && (
+        <MobileScroll style={{ padding: "14px" }}>
+          {typeof CategoriesView === "function" ? (
+            <CategoriesView
+              categories={allCats}
+              dbCategories={dbCategories}
+              items={items}
+              isDb={source === "db"}
+              onCreate={createCategory}
+              onRename={renameCategory}
+              onUpdateFlags={updateCategoryFlags}
+              onSetAutoMinMax={setCategoryAutoMinMax}
+              onDelete={deleteCategory}
+            />
+          ) : <div style={{ padding: 24, color: "var(--fg-3)" }}>Categorias indisponível.</div>}
+        </MobileScroll>
+      )}
+
       {tab === "wastes" && (
         <MobileScroll style={{ padding: "14px" }}>
           {typeof WastesView === "function"
@@ -401,8 +491,8 @@ function MobileStock({ scope = "all" }) {
       {flowDetail && window.StockFlowDetailModal && (
         <window.StockFlowDetailModal direction={flowDetail} periodLabel="Mês atual" movements={movements} onClose={() => setFlowDetail(null)} />
       )}
-      {valueModal && window.StockTopValueModal && (
-        <window.StockTopValueModal items={items} onClose={() => setValueModal(false)} />
+      {valueModal && (
+        <StockValueSheet items={items} onClose={() => setValueModal(false)} />
       )}
     </MobilePage>
   );
@@ -924,6 +1014,45 @@ function StockFilterSheet({ statusFilter, setStatusFilter, catFilter, setCatFilt
             })}
           </div>
         </>
+      )}
+    </BottomSheet>
+  );
+}
+
+// ===== Valor em estoque · Top 25 (simplificado p/ mobile: item · qtd · valor) =====
+function StockValueSheet({ items, onClose }) {
+  const top = useMemo(() => (Array.isArray(items) ? items : [])
+    .map((it) => ({ ...it, _value: Math.max(0, Number(it.qty) || 0) * (Number(it.cost) || 0) }))
+    .filter((it) => it._value > 0)
+    .sort((a, b) => b._value - a._value)
+    .slice(0, 25), [items]);
+  const totalTop = top.reduce((s, it) => s + it._value, 0);
+  const totalAll = (items || []).reduce((s, it) => s + Math.max(0, Number(it.qty) || 0) * (Number(it.cost) || 0), 0);
+  const sharePct = totalAll > 0 ? (totalTop / totalAll) * 100 : 0;
+
+  return (
+    <BottomSheet
+      title="Valor em estoque · Top 25"
+      subtitle={`${top.length} insumos · ${_brl(totalTop)} (${sharePct.toFixed(0)}% do total)`}
+      onClose={onClose}
+    >
+      {top.length === 0 ? (
+        <div style={{ padding: "32px 0", textAlign: "center", color: "var(--fg-3)", fontSize: 13 }}>
+          Nenhum insumo com valor em estoque.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {top.map((it, i) => (
+            <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderBottom: "1px solid var(--line-soft)" }}>
+              <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-4)", width: 20, textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, color: "var(--fg-0)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.name}</div>
+                <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 2 }}>{Number(Math.max(0, it.qty) || 0).toLocaleString("pt-BR")} {it.unit}</div>
+              </div>
+              <span style={{ fontFamily: "var(--mono)", fontSize: 13.5, color: "var(--fg-0)", fontWeight: 600, whiteSpace: "nowrap" }}>{_brl(it._value)}</span>
+            </div>
+          ))}
+        </div>
       )}
     </BottomSheet>
   );
