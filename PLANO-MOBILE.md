@@ -3,16 +3,99 @@
 ## Status do rollout (atualizado 2026-08-07)
 
 **Adaptadas (telas mobile dedicadas, ligadas no `MOBILE_PAGE_IDS`):**
-Estoque · Compras · Dashboard · Requisições (quadro de gestão; criação usa `#/mobile`) · Faturamento · CMV & margem (fixado na bottom nav como "CMV").
+Estoque · Compras · Dashboard · Requisições (quadro de gestão; criação usa `#/mobile`) · Faturamento · CMV & margem (fixado na bottom nav como "CMV") · **Produção** (ordens: criar/emitir/devolução/cancelar) · **Financeiro** (lançamentos + checklist) · **Fichas técnicas** (consulta read-only).
 
 **Paridade de abas conferida/completada (2026-08-07):**
 - Estoque mobile agora tem as 6 abas do desktop: Insumos · Pendências · Inventário · **Fornecedores** · **Categorias** · Desperdícios. (Fornecedores/Categorias/Inventário/Desperdícios reusam os componentes do desktop via `window.*`.)
 - Compras mobile agora tem as 2 abas do desktop: **Listas salvas** · **Nova lista** (embed do `Shopping` para sugestão editável), além do botão "Nova lista (auto)".
 
-**Pendentes (caem no fallback desktop com aviso, funcionais):**
-Produção · Financeiro · DRE · Fichas técnicas · Logística · Cardápio · CRM · Suprimentos · Central · Configurações.
+**Pendentes (caem no fallback desktop; marcados com a tag `desktop` no drawer):**
+DRE & Fechamento · Logística · Análise de Cardápio · CRM · Suprimentos · Central · Configurações.
 
-Cada pendente segue o mesmo molde: novo `page-mobile-<x>.jsx` → `window.Mobile<X>`; registrar em `src/main.jsx`; adicionar id em `MOBILE_PAGE_IDS` e no map de `mobileCompName` (mobile-shell.jsx). Produção e as analíticas (CMV/DRE) têm fluxos transacionais/tabelas densas — exigem mais cuidado.
+Cada pendente segue o mesmo molde: novo `page-mobile-<x>.jsx` → `window.Mobile<X>`; registrar em `src/main.jsx`; adicionar id em `MOBILE_PAGE_IDS` e no map de `mobileCompName` (mobile-shell.jsx). O drawer já lê `MOBILE_PAGE_IDS` para marcar o que falta.
+
+---
+
+## Planejamento para adaptar TODOS os módulos pendentes
+
+Regras que valem para todos (já usadas nas telas prontas):
+- Fork **só de layout/interação**; toda escrita chama as mesmas funções `db*` do desktop.
+- Reaproveitar builders/cálculos do desktop **exportando-os no `window`** (como feito no CMV) em vez de reescrever — fonte única da verdade.
+- Layout de coluna única, **sem scroll lateral**: KPIs em `StatStrip`/grid, tabelas densas viram **cards** ou listas, tabs viram `SegTabs`/`WrapTabs`, modais viram `BottomSheet`/`FullSheet`.
+- Guard de duplo-clique + "Carregando…" em toda ação (regra 7 do CLAUDE.md).
+
+Ordem sugerida (valor operacional no celular → menor):
+
+### 1. Produção (`page-mobile-production.jsx`) — **alta**
+Operador na cozinha. Desktop: `page-production.jsx` (só online).
+- Abas (`SegTabs`): Ordens · Catálogo · Fichas · (Consumo por tenant, se central).
+- KPIs em faixa: aguardando devolução · valor em produção · produções 30d · aproveitamento.
+- Lista de **ordens em cards** (código, insumos→saídas, status, tempo aguardando).
+- Detalhe da ordem em `FullSheet` com ações **Emitir** (`dbIssueProductionOrder`), **Devolução** (form mobile), **Cancelar**/**Excluir** (`db*ProductionOrder`).
+- Precisa: extrair/expor `ProductionOrderForm`/`ProductionReturnModal` **ou** recriar os forms mobile (consumo de insumos + saída de porções + cálculo de aproveitamento). Cuidado: mexem em estoque.
+- Risco/esforço: **alto** (2 forms transacionais).
+
+### 2. Financeiro (`page-mobile-finance.jsx`) — **alta**
+Lançar contas/checklist no celular. Desktop: `page-finance.jsx`.
+- Abas: Lançamentos · Checklist de fechamento · (Conciliação = "em breve" no mobile).
+- Faixa de KPIs do mês (receitas/despesas/resultado) + seletor de mês.
+- Lançamentos como cards por dia; `FullSheet` para criar/editar (categoria/subcategoria, valor `_parseBR`, data, notas) via `dbInsertFinanceEntry`/`dbUpdate…`.
+- Checklist: lista de itens com status filled/pending por período (reusa `getChecklistUrgency`).
+- Esforço: **médio**.
+
+### 3. DRE & Fechamento (`page-mobile-dre.jsx`) — **média**
+Analítico/tabelão. Desktop: `page-dre.jsx`.
+- Foco leitura: seletor de mês + **DRE empilhada** (grupos → linhas) em cards colapsáveis, valor e % à direita; comparativo vs. mês anterior como badge.
+- Aba Fechamento: lista de impeditivos + botão fechar mês (`closing_periods`), com guard.
+- Exportar os cálculos da DRE do desktop no `window` p/ reuso.
+- Esforço: **médio-alto** (muita hierarquia; sem scroll lateral exige empilhar).
+
+### 4. Fichas técnicas (`page-mobile-recipes.jsx`) — **média**
+Consulta na cozinha. Desktop: `page-recipes.jsx`.
+- Lista de fichas (busca) → detalhe em `FullSheet`: ingredientes (insumo·qtd·custo), custo total, rendimento, custo por porção.
+- Edição pode ficar para a v2 (começar read-only + criar depois).
+- Esforço: **médio**.
+
+### 5. Logística (`page-mobile-delivery.jsx`) — **média**
+Tempos/entregadores/bairros. Desktop: `page-delivery.jsx` (Agilizone/Foody).
+- Abas: Tempos · Entregadores · Bairros · Raios · Turnos.
+- KPIs de tempo (preparo/coleta/entrega/total) em faixa; gráfico de camada vira **barras empilhadas simples** ou lista; rankings em cards.
+- Reusar os RPCs `dbDeliveryTimeseries`/`dbDeliveryFees`.
+- Esforço: **médio** (adaptar o gráfico SVG p/ largura).
+
+### 6. Análise de Cardápio (`page-mobile-cardapio.jsx`) — **média**
+Matriz de engenharia de cardápio. Desktop: `page-cardapio.jsx`.
+- Quadrantes (estrela/vaca/enigma/abacaxi) como **chips filtráveis** + lista de pratos em cards (margem, popularidade, classificação).
+- O scatter/quadrante vira lista agrupada por classificação (sem gráfico denso).
+- Esforço: **médio**.
+
+### 7. Suprimentos (`page-mobile-supply.jsx`) — **média** (visível só p/ membros da rede)
+Desktop: `page-supply.jsx`. Pedidos/transferências recebidas da central.
+- Lista de transferências/pedidos em cards + ação de confirmar recebimento (reusa fluxo de estoque).
+- Esforço: **médio**.
+
+### 8. Central de Distribuição (`page-mobile-distribution.jsx`) — **média** (só tenant central)
+Desktop: `page-distribution.jsx`. Espelho da rede pelo lado da central.
+- Pedidos das lojas em cards + separar/enviar; consumo por tenant.
+- Esforço: **médio**.
+
+### 9. CRM (`page-mobile-crm.jsx`) — **baixa**
+Desktop: `page-crm.jsx` (hoje avaliação/stub WhatsApp).
+- Enquanto for stub, manter fallback com o aviso; adaptar quando virar módulo real.
+- Esforço: **baixo** (ou adiar).
+
+### 10. Configurações (`page-mobile-settings.jsx`) — **baixa**
+Desktop: `page-settings.jsx` (operações, membros, métodos, categorias, turnos…).
+- Muitas sub-telas de gestão — pouco uso no celular. Sugerido: manter fallback e, se preciso, expor só **perfil + trocar tema/tenant** (já no drawer) e "Operações" em cards.
+- Esforço: **baixo-médio** (ou manter no desktop).
+
+### Faseamento sugerido
+1. **Bloco operacional:** Produção → Financeiro → Fichas técnicas.
+2. **Bloco analítico:** DRE → Logística → Cardápio.
+3. **Bloco rede:** Suprimentos → Central.
+4. **Cauda:** CRM e Configurações (ou manter no fallback).
+
+Cada módulo: criar `page-mobile-<x>.jsx`, exportar do desktop o que for cálculo, registrar em `src/main.jsx` + `MOBILE_PAGE_IDS` + `mobileCompName`, e verificar com `vite build`. O drawer passa a marcar o módulo como adaptado automaticamente (some a tag `desktop`).
 
 ---
 

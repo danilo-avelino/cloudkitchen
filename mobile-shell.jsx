@@ -6,7 +6,7 @@
 // permite lançar mobile PÁGINA POR PÁGINA sem quebrar o resto.
 
 // id → componente mobile dedicado (lidos lazy do window no render).
-const MOBILE_PAGE_IDS = ["dashboard", "stock", "purchases", "requests", "revenue", "cmv"];
+const MOBILE_PAGE_IDS = ["dashboard", "stock", "purchases", "requests", "revenue", "cmv", "production", "finance", "recipes"];
 
 // Config de navegação (espelha shell.jsx · label + ícone por módulo).
 const MNAV = [
@@ -158,6 +158,8 @@ function MobileDrawer({ allowed, page, user, theme, onNavigate, onSwitchTenant, 
           {items.map((nav) => {
             const Ico = I[nav.icon] || I.Dashboard;
             const active = page === nav.id;
+            // Módulos sem tela mobile dedicada abrem a versão desktop (não otimizada).
+            const adapted = MOBILE_PAGE_IDS.includes(nav.id);
             return (
               <button key={nav.id} onClick={() => onNavigate(nav.id)} style={{
                 display: "flex", alignItems: "center", gap: 12, width: "100%",
@@ -166,7 +168,14 @@ function MobileDrawer({ allowed, page, user, theme, onNavigate, onSwitchTenant, 
                 color: active ? "var(--fg-0)" : "var(--fg-1)", textAlign: "left",
               }}>
                 <Ico size={17} stroke={1.5} style={{ color: active ? "var(--accent-bright)" : "var(--fg-2)", flexShrink: 0 }} />
-                <span style={{ fontSize: 14 }}>{nav.label}</span>
+                <span style={{ flex: 1, fontSize: 14, color: adapted ? undefined : "var(--fg-2)" }}>{nav.label}</span>
+                {!adapted && (
+                  <span style={{
+                    flexShrink: 0, fontFamily: "var(--mono)", fontSize: 9, letterSpacing: "0.04em", textTransform: "uppercase",
+                    color: "var(--fg-3)", background: "var(--bg-2)", border: "1px solid var(--line)",
+                    borderRadius: 999, padding: "2px 7px",
+                  }}>desktop</span>
+                )}
               </button>
             );
           })}
@@ -244,7 +253,7 @@ function DesktopPageRender({ page, Comp, scope, setPage, user, onLogout }) {
 
 // Nome do componente mobile dedicado por página.
 function mobileCompName(page) {
-  return { dashboard: "MobileDashboard", stock: "MobileStock", purchases: "MobilePurchases", requests: "MobileRequestsBoard", revenue: "MobileRevenue", cmv: "MobileCMV" }[page] || null;
+  return { dashboard: "MobileDashboard", stock: "MobileStock", purchases: "MobilePurchases", requests: "MobileRequestsBoard", revenue: "MobileRevenue", cmv: "MobileCMV", production: "MobileProduction", finance: "MobileFinance", recipes: "MobileRecipes" }[page] || null;
 }
 // Nome do componente desktop por página (globais).
 function desktopCompName(page) {

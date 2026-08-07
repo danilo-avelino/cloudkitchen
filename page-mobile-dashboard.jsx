@@ -135,27 +135,27 @@ function MobileDashboard({ scope = "all", setPage }) {
   const metrics = useMemo(() => window.computeDashboardMetrics(scope, period, dbData, dbOnline), [scope, period, dbData, dbOnline]);
   const flows = useMemo(() => _mDashFlows(dbData.periodMovements), [dbData.periodMovements]);
 
-  const alertTone = metrics.alerts.ruptura > 0 ? "crit" : metrics.alerts.total > 0 ? "warn" : "ok";
   const stats = [
     { label: `Faturamento`, value: kk.revenue.v, sub: periodLabel.toLowerCase(), onClick: () => setPage?.("revenue") },
     { label: "CMV do estoque", value: kk.cmv.v, sub: kk.cmv.sub, onClick: () => setPage?.("cmv") },
     { label: "Valor em estoque", value: kk.stockValue.v, sub: kk.stockValue.d, onClick: () => setPage?.("stock") },
     { label: "Entradas", value: _dBRL(flows.entradas), tone: "in", sub: periodLabel.toLowerCase() },
     { label: "Saídas", value: _dBRL(flows.saidas), tone: "out", sub: periodLabel.toLowerCase() },
-    { label: "Alertas de estoque", value: String(metrics.alerts.total), tone: alertTone, sub: `${metrics.alerts.ruptura} ruptura · ${metrics.alerts.baixo} baixo`, onClick: () => setPage?.("stock") },
     { label: "Precisão de estoque", value: metrics.inv.accuracy != null ? `${metrics.inv.accuracy.toFixed(0)}%` : "—", sub: metrics.inv.lastDate ? `últ. ${metrics.inv.lastDate}` : "sem inventários", onClick: () => setPage?.("stock") },
   ];
 
   return (
     <MobilePage>
       <SegTabs value={period} onChange={setPeriod} options={_M_PERIOD_OPTS} />
-      <MobileScroll style={{ padding: "4px 0 20px" }}>
+      <MobileScroll style={{ padding: "4px 0 20px", overflowX: "hidden" }}>
         {pageLoading ? (
           <div style={{ padding: 48, textAlign: "center", color: "var(--fg-3)", fontSize: 13 }}>Carregando dashboard…</div>
         ) : (
           <>
-            <StatStrip stats={stats} />
-            <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "8px 14px 0" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: "10px 14px 4px" }}>
+              {stats.map((s, i) => <_DashTile key={i} stat={s} />)}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "8px 14px 0", minWidth: 0 }}>
               <window.CmvByOpCard setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.periodMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbOnline} periodLabel={periodLabel} />
               <window.RankingCard cmvDaily={dbData.cmvDaily} movements={dbData.periodMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbOnline} />
               <window.ConsolidatedAlertsCard setPage={setPage} stock={dbData.stock} dbOnline={dbOnline} />
@@ -166,6 +166,22 @@ function MobileDashboard({ scope = "all", setPage }) {
         )}
       </MobileScroll>
     </MobilePage>
+  );
+}
+
+// KPI em tile (grid 2 colunas) — não rola lateralmente.
+function _DashTile({ stat }) {
+  const color = stat.tone === "crit" ? "var(--crit)" : stat.tone === "warn" ? "var(--warn)"
+    : stat.tone === "ok" ? "var(--ok)" : stat.tone === "in" ? "var(--ok)" : stat.tone === "out" ? "var(--crit)" : "var(--fg-0)";
+  return (
+    <button onClick={stat.onClick} disabled={!stat.onClick} style={{
+      minWidth: 0, textAlign: "left", padding: "12px", borderRadius: 10,
+      background: "var(--bg-2)", border: "1px solid var(--line)", cursor: stat.onClick ? "pointer" : "default",
+    }}>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{stat.label}</div>
+      <div style={{ fontSize: 19, fontWeight: 700, marginTop: 4, color, letterSpacing: "-0.01em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{stat.value}</div>
+      {stat.sub && <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{stat.sub}</div>}
+    </button>
   );
 }
 

@@ -114,4 +114,6 @@ Sem USAGE em `public`, edge functions caem em 500 com `permission denied for sch
 ---
 7. Botões. Em todos os novos botões devemos adicionar um guard de duplo-clique e aviso de Carregando
 
+8. Se forem feitas modificações em uma pagina, sempre lembre de alterara sua versão mobile
+
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

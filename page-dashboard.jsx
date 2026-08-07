@@ -339,7 +339,7 @@ function Dashboard({ scope, setPage }) {
       </div>
 
       {/* Fluxos de estoque + KPIs operacionais — linha única compacta */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
         <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("in")} loading={periodLoading} />
         <FlowKpi label="Saídas de estoque"   value={stockFlows.saidas}   tone="out" sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("out")} loading={periodLoading} />
         <ModuleKpi label="Precisão de estoque"
@@ -347,11 +347,6 @@ function Dashboard({ scope, setPage }) {
           sub={moduleMetrics.inv.lastDate ? `último em ${moduleMetrics.inv.lastDate}` : "sem inventários"}
           tone={moduleMetrics.inv.accuracy >= 95 ? "ok" : moduleMetrics.inv.accuracy >= 90 ? "info" : "warn"}
           onClick={() => setPage("stock")} icon={<I.Box size={11} />} />
-        <ModuleKpi label="Alertas de estoque"
-          value={moduleMetrics.alerts.total}
-          sub={`${moduleMetrics.alerts.ruptura} ruptura · ${moduleMetrics.alerts.baixo} baixo · ${moduleMetrics.alerts.acimaMax} acima do máx`}
-          tone={moduleMetrics.alerts.ruptura > 0 ? "crit" : moduleMetrics.alerts.total > 0 ? "warn" : "ok"}
-          onClick={() => setPage("stock")} icon={<I.AlertTriangle size={11} />} />
       </div>
 
       {/* Tempos gerais de delivery (Agilizone) — só quando há pedidos no período/operação */}
