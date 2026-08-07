@@ -213,16 +213,6 @@ function MobileStock({ scope = "all" }) {
     return { entradas, saidas };
   }, [movements]);
 
-  const alerts = useMemo(() => {
-    let ruptura = 0, baixo = 0;
-    for (const i of visible) {
-      const qty = Number(i.qty) || 0, reorder = Number(i.reorder) || 0;
-      if (qty <= 0) ruptura += 1;
-      else if (reorder > 0 && qty < reorder) baixo += 1;
-    }
-    return { total: ruptura + baixo, ruptura, baixo };
-  }, [visible]);
-
   const pendingItems = useMemo(() =>
     (typeof pendingEntryItems === "function" ? pendingEntryItems(source === "db" ? items : []) : []),
     [items, source]
@@ -324,12 +314,11 @@ function MobileStock({ scope = "all" }) {
 
       {tab === "items" && (
         <>
-          <StatStrip stats={[
-            { label: "Entradas mês", value: _brlShort(flows.entradas), tone: "in", onClick: () => setFlowDetail("in") },
-            { label: "Saídas mês", value: _brlShort(flows.saidas), tone: "out", onClick: () => setFlowDetail("out") },
-            { label: "Valor estoque", value: _brlShort(totalValue), onClick: () => setValueModal(true) },
-            { label: "Alertas", value: alerts.total, sub: `${alerts.ruptura} ruptura · ${alerts.baixo} baixo`, tone: alerts.ruptura > 0 ? "crit" : alerts.total > 0 ? "warn" : "ok", onClick: () => { setStatusFilter("crit"); } },
-          ]} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, padding: "12px 14px" }}>
+            <_StockTile label="Entradas mês" value={_brlShort(flows.entradas)} color="var(--ok)" onClick={() => setFlowDetail("in")} />
+            <_StockTile label="Saídas mês" value={_brlShort(flows.saidas)} color="var(--crit)" onClick={() => setFlowDetail("out")} />
+            <_StockTile label="Valor estoque" value={_brlShort(totalValue)} onClick={() => setValueModal(true)} />
+          </div>
 
           <div style={{ padding: "0 14px 10px", display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}><MSearch value={search} onChange={setSearch} placeholder="Buscar insumo…" /></div>
@@ -1055,6 +1044,20 @@ function StockValueSheet({ items, onClose }) {
         </div>
       )}
     </BottomSheet>
+  );
+}
+
+// KPI em tile (grid) — não rola lateralmente.
+function _StockTile({ label, value, sub, color, onClick }) {
+  return (
+    <button onClick={onClick} disabled={!onClick} style={{
+      minWidth: 0, textAlign: "left", padding: "10px 12px", borderRadius: 10,
+      background: "var(--bg-2)", border: "1px solid var(--line)", cursor: onClick ? "pointer" : "default",
+    }}>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 9, color: "var(--fg-3)", letterSpacing: "0.05em", textTransform: "uppercase", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
+      <div style={{ fontSize: 17, fontWeight: 700, marginTop: 4, color: color || "var(--fg-0)", letterSpacing: "-0.01em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: "var(--fg-3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>}
+    </button>
   );
 }
 

@@ -1973,5 +1973,6 @@ function NewSubcategoryRow({ categoryId, onCancel, onSave }) {
 }
 
 window.Dre = Dre;
+window.computeDreSummary = computeDreSummary; // reusado pela versão mobile (MobileDre)
 // DreStat é usado também pelo Checklist de fechamento do Financeiro (page-finance.jsx).
 window.DreStat = DreStat;

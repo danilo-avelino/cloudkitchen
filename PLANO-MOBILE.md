@@ -9,8 +9,14 @@ Estoque · Compras · Dashboard · Requisições (quadro de gestão; criação u
 - Estoque mobile agora tem as 6 abas do desktop: Insumos · Pendências · Inventário · **Fornecedores** · **Categorias** · Desperdícios. (Fornecedores/Categorias/Inventário/Desperdícios reusam os componentes do desktop via `window.*`.)
 - Compras mobile agora tem as 2 abas do desktop: **Listas salvas** · **Nova lista** (embed do `Shopping` para sugestão editável), além do botão "Nova lista (auto)".
 
-**Pendentes (caem no fallback desktop; marcados com a tag `desktop` no drawer):**
-DRE & Fechamento · Logística · Análise de Cardápio · CRM · Suprimentos · Central · Configurações.
+**Pendentes:** nenhum — **todos os 16 módulos têm tela mobile dedicada** (2026-08-07).
+
+Adaptados no último bloco: DRE & Fechamento (P&L + detalhamento + fechar/reabrir mês),
+Logística (Tempos/Entregadores/Bairros, read), Análise de Cardápio (Itens/Adicionais, read),
+CRM (Contatos CRUD + Negócios + Conversas/Campanhas "em breve"), Suprimentos (membro:
+código + convites + transferências/pedidos, read), Central (central: membros + transferências
++ pedidos, read). Fluxos transacionais de rede (criar/receber transferência, ledger) e
+integrações/faturas seguem no desktop.
 
 Cada pendente segue o mesmo molde: novo `page-mobile-<x>.jsx` → `window.Mobile<X>`; registrar em `src/main.jsx`; adicionar id em `MOBILE_PAGE_IDS` e no map de `mobileCompName` (mobile-shell.jsx). O drawer já lê `MOBILE_PAGE_IDS` para marcar o que falta.
 

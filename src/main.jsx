@@ -85,6 +85,13 @@ async function bootstrap() {
   await import("../page-mobile-production.jsx");
   await import("../page-mobile-finance.jsx");
   await import("../page-mobile-recipes.jsx");
+  await import("../page-mobile-settings.jsx");
+  await import("../page-mobile-dre.jsx");
+  await import("../page-mobile-delivery.jsx");
+  await import("../page-mobile-cardapio.jsx");
+  await import("../page-mobile-crm.jsx");
+  await import("../page-mobile-supply.jsx");
+  await import("../page-mobile-distribution.jsx");
   await import("../page-shopping.jsx");
   await import("../page-cmv.jsx");
   await import("../page-finance.jsx");
