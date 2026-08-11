@@ -36,11 +36,25 @@ function useIsMobile() {
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
     const mq = window.matchMedia(MOBILE_QUERY);
-    const on = (e) => setM(e.matches);
+    // Congela a decisão enquanto o navegador imprime. Ao entrar no modo de
+    // impressão o Chrome re-layouta a página no tamanho do @page — 80mm (~302px)
+    // no cupom térmico das requisições — e isso dispara `change` no
+    // (max-width: 480px) acima. Sem o guard, o AppShell vira MobileApp no meio
+    // do window.print(): a página desmonta, o código depois do print não roda
+    // (a requisição saía no papel mas nunca era marcada como impressa) e o app
+    // "reinicia" quando o diálogo fecha.
+    let printing = false;
+    const on = (e) => { if (!printing) setM(e.matches); };
+    const onBeforePrint = () => { printing = true; };
+    const onAfterPrint  = () => { printing = false; };
+    window.addEventListener("beforeprint", onBeforePrint);
+    window.addEventListener("afterprint", onAfterPrint);
     // addEventListener é o caminho moderno; Safari antigo usa addListener.
     if (mq.addEventListener) mq.addEventListener("change", on);
     else mq.addListener(on);
     return () => {
+      window.removeEventListener("beforeprint", onBeforePrint);
+      window.removeEventListener("afterprint", onAfterPrint);
       if (mq.removeEventListener) mq.removeEventListener("change", on);
       else mq.removeListener(on);
     };

@@ -23,6 +23,9 @@ function fmtReqStampTitle(iso) {
   return d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+// Requisições já enviadas para a impressora (só marcação visual, ✅ no card).
+const PRINTED_KEY = "stockkitchen.requests.printed.v1";
+
 function Requests({ scope }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   // Lançamentos existentes com status "approved" são tratados como "pending" no novo fluxo
@@ -47,7 +50,7 @@ function Requests({ scope }) {
   const [editingReq, setEditingReq] = useState(null);
   const [printingReq, setPrintingReq] = useState(null);
   const [printedIds, setPrintedIds] = useState(() => {
-    try { return new Set(JSON.parse(localStorage.getItem("stockkitchen.requests.printed.v1")) || []); }
+    try { return new Set(JSON.parse(localStorage.getItem(PRINTED_KEY)) || []); }
     catch { return new Set(); }
   });
   const [showHistory, setShowHistory] = useState(false);
@@ -69,7 +72,7 @@ function Requests({ scope }) {
 
   // Persiste o conjunto de impressas para que o ✅ sobreviva ao reload da página.
   useEffect(() => {
-    try { localStorage.setItem("stockkitchen.requests.printed.v1", JSON.stringify([...printedIds])); }
+    try { localStorage.setItem(PRINTED_KEY, JSON.stringify([...printedIds])); }
     catch {}
   }, [printedIds]);
 
@@ -147,12 +150,20 @@ function Requests({ scope }) {
     if (!printingReq) return;
     const idToMark = printingReq.id;
     const t = setTimeout(() => {
-      window.print();
+      // Marca ANTES de imprimir: window.print() bloqueia até o diálogo fechar e
+      // nada garante que o que vem depois rode (ver o guard de impressão em
+      // useIsMobile). Grava direto no localStorage porque o effect de
+      // persistência só roda no próximo commit do React.
       setPrintedIds((prev) => {
         const next = new Set(prev);
         next.add(idToMark);
         return next;
       });
+      try {
+        const cur = JSON.parse(localStorage.getItem(PRINTED_KEY)) || [];
+        if (!cur.includes(idToMark)) localStorage.setItem(PRINTED_KEY, JSON.stringify([...cur, idToMark]));
+      } catch {}
+      window.print();
       setPrintingReq(null);
     }, 60);
     return () => clearTimeout(t);
