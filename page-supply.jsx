@@ -1,4 +1,4 @@
-// Suprimentos · módulo 'supply' (tenants membros de uma rede de distribuição)
+// Cadeia de suprimentos · módulo 'supply' (tenants membros de uma rede de distribuição)
 // Solicitar da central, pedir/enviar entre tenants, confirmar recebimentos
 // (com opção "direto na cozinha" → CMV) e extrato de Gastos.
 // Componentes compartilhados com a Central (page-distribution.jsx) vivem aqui.
@@ -29,6 +29,16 @@ const _SUP_REQUEST_STATUS = {
   rejected:  { label: "Recusada",  color: "var(--crit)", soft: "var(--crit-soft)", line: "var(--crit-line)" },
   cancelled: { label: "Cancelada", color: "var(--fg-3)", soft: "var(--bg-3)",      line: "var(--line)" },
 };
+
+// Motivos da divergência de recebimento (espelham o check do banco)
+const _SUP_DIV_REASONS = [
+  { id: "faltou",   label: "Não veio" },
+  { id: "avaria",   label: "Chegou avariado" },
+  { id: "sobra",    label: "Veio a mais" },
+  { id: "contagem", label: "Erro de contagem" },
+  { id: "outro",    label: "Outro" },
+];
+const _supReasonLabel = (id) => _SUP_DIV_REASONS.find((r) => r.id === id)?.label || "—";
 
 function SupplyStatusBadge({ status, kind = "transfer" }) {
   const map = kind === "request" ? _SUP_REQUEST_STATUS : _SUP_TRANSFER_STATUS;
@@ -186,38 +196,151 @@ function SupplyTransferForm({ tid, centralId, toOptions, stockItems, prefillRequ
 // ---------------------------------------------------------------------
 // Confirmar recebimento (destinatário)
 // ---------------------------------------------------------------------
-function SupplyReceiveModal({ transfer, myItems, onClose, onSaved }) {
-  const ops = (window.MOCK?.OPERATIONS || []).filter((o) => o.id !== "all");
-  // Sugestão de mapeamento por nome+unidade (espelha o trigger do banco)
-  const suggestFor = (it) => (myItems || []).find((m) =>
-    m.name.trim().toLowerCase() === (it.name || "").trim().toLowerCase() && m.unit === it.unit) || null;
+// Escolha da operação de um item (modalzinho em cima do recebimento)
+function SupplyKitchenOpModal({ itemName, ops, value, onPick, onClose }) {
+  return (
+    <Modal
+      title="Direto na cozinha"
+      subtitle={`Para qual operação vai "${itemName}"? O valor entra no CMV do dia dela.`}
+      width={380}
+      onClose={onClose}
+      footer={<button type="button" className="btn" data-size="sm" onClick={onClose}>Cancelar</button>}
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {ops.length === 0 && (
+          <div style={{ fontSize: 12.5, color: "var(--warn)" }}>
+            Nenhuma operação cadastrada — crie uma em Configurações → Operações.
+          </div>
+        )}
+        {ops.map((o) => {
+          const on = value === o.id;
+          return (
+            <button key={o.id} type="button" onClick={() => onPick(o.id)} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
+              borderRadius: 4, cursor: "pointer", textAlign: "left",
+              background: on ? "var(--ok-soft)" : "var(--bg-2)",
+              border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
+              color: "var(--fg-0)", fontSize: 12.5,
+            }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: o.color || "var(--fg-3)", flexShrink: 0 }} />
+              <span style={{ flex: 1 }}>{o.name}</span>
+              {on && <I.Check size={13} style={{ color: "var(--ok)" }} />}
+            </button>
+          );
+        })}
+      </div>
+    </Modal>
+  );
+}
 
-  const [targets, setTargets] = useState(() =>
-    (transfer.items || []).map((it) => ({ itemLineId: it.id, fromItemId: it.fromItemId, target: "auto" })));
-  const [direct, setDirect] = useState(!!transfer.directToKitchen);
-  const [operationId, setOperationId] = useState(ops.length === 1 ? ops[0].id : "");
+// ---------------------------------------------------------------------
+// Confirmar recebimento (destinatário)
+// ---------------------------------------------------------------------
+function SupplyReceiveModal({ transfer, myItems, onClose, onSaved }) {
+  // O destino é sempre o que a central enviou: o banco resolve pelo vínculo do
+  // item na rede, cai no equivalente por nome+unidade ou cria o item. O
+  // destinatário não escolhe — aqui só mostramos onde vai entrar.
+  const [ops, setOps] = useState([]);
+  const [links, setLinks] = useState(null);   // { fromItemId: toItemId } — null = carregando
+  const [rows, setRows] = useState({});       // { transferItemId: { direct, operationId, recv, reason } }
+  const [pickFor, setPickFor] = useState(null); // item cuja operação está sendo escolhida
+  const [checking, setChecking] = useState(false); // modo conferência (relatar divergência)
+  const [divNotes, setDivNotes] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const canSave = !direct || !!operationId;
+  const itemById = {};
+  (myItems || []).forEach((m) => { itemById[m.id] = m; });
+
+  // Item de destino: vínculo da rede primeiro, equivalente por nome+unidade depois.
+  const destFor = (it) => {
+    const linked = links && it.fromItemId ? itemById[links[it.fromItemId]] : null;
+    if (linked) return linked;
+    return (myItems || []).find((m) =>
+      m.name.trim().toLowerCase() === (it.name || "").trim().toLowerCase() && m.unit === it.unit) || null;
+  };
+
+  // Pré-marca cada linha com a última escolha feita para aquele insumo.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [opRes, lkRes] = await Promise.all([
+        dbListOperations(transfer.toTenantId),
+        dbSupplyItemLinks(transfer.centralId, transfer.toTenantId),
+      ]);
+      if (cancelled) return;
+      const opList = opRes?.data || [];
+      setOps(opList);
+      const map = lkRes?.data || {};
+      setLinks(map);
+      const next = {};
+      (transfer.items || []).forEach((it) => {
+        const dest = (it.fromItemId && itemById[map[it.fromItemId]])
+          || (myItems || []).find((m) =>
+              m.name.trim().toLowerCase() === (it.name || "").trim().toLowerCase() && m.unit === it.unit);
+        const opId = dest?.directKitchenOperationId || "";
+        const valid = opList.some((o) => o.id === opId);
+        next[it.id] = {
+          direct: !!dest?.autoDirectKitchen && valid,
+          operationId: valid ? opId : "",
+          recv: String(it.qty).replace(".", ","), // conferência começa no enviado
+          reason: "",
+        };
+      });
+      setRows(next);
+    })();
+    return () => { cancelled = true; };
+  }, [transfer.id]);
+
+  const opName = (id) => ops.find((o) => o.id === id)?.name || "";
+  const directRows = Object.values(rows).filter((r) => r.direct);
+
+  // Divergência = conferido − enviado. Só existe no modo conferência.
+  const deltaOf = (it) => {
+    if (!checking) return 0;
+    const r = rows[it.id];
+    if (!r) return 0;
+    return _supParseNum(r.recv) - it.qty;
+  };
+  const diverged = (transfer.items || []).filter((it) => deltaOf(it) !== 0);
+  const divValue = diverged.reduce((s, it) => s + deltaOf(it) * it.unitCost, 0);
+  const recvValue = (transfer.items || [])
+    .reduce((s, it) => s + (checking ? _supParseNum(rows[it.id]?.recv) : it.qty) * it.unitCost, 0);
+
+  const canSave = links !== null
+    && directRows.every((r) => !!r.operationId)
+    && diverged.every((it) => !!rows[it.id]?.reason);
+
+  // Marcar "direto na cozinha" abre a escolha da operação; desmarcar é direto.
+  const toggleDirect = (it) => {
+    const cur = rows[it.id] || { direct: false, operationId: "" };
+    if (cur.direct) {
+      setRows((r) => ({ ...r, [it.id]: { ...cur, direct: false } }));
+    } else {
+      setPickFor(it);
+    }
+  };
 
   const save = async () => {
     if (saving || !canSave) return;
     setSaving(true);
     try {
-      const sess = await dbGetSession();
-      const overrides = targets
-        .filter((t) => t.target !== "auto" && t.fromItemId)
-        .map((t) => ({ fromItemId: t.fromItemId, toItemId: t.target }));
       const { error } = await dbSupplyReceiveTransfer(transfer, {
-        directToKitchen: direct,
-        operationId: direct ? operationId : null,
-        overrides,
-        userId: sess?.user?.id,
+        items: (transfer.items || []).map((it) => ({
+          itemId: it.id,
+          direct: !!rows[it.id]?.direct,
+          operationId: rows[it.id]?.operationId || null,
+          // fora do modo conferência, null = "chegou tudo o que foi enviado"
+          receivedQty: checking ? _supParseNum(rows[it.id]?.recv) : null,
+          reason: deltaOf(it) !== 0 ? (rows[it.id]?.reason || null) : null,
+        })),
+        notes: diverged.length > 0 ? divNotes : null,
       });
       if (error) throw error;
-      window.showToast?.(direct
-        ? "Recebimento confirmado — itens lançados direto no CMV da operação"
-        : "Recebimento confirmado — itens no estoque", { tone: "ok" });
+      window.showToast?.(diverged.length > 0
+        ? `Recebimento confirmado com ${diverged.length} divergência(s) · ${_supFmtBRL(Math.abs(divValue))}`
+        : directRows.length > 0
+          ? `Recebimento confirmado — ${directRows.length} item(ns) direto no CMV da cozinha`
+          : "Recebimento confirmado — itens no estoque", { tone: "ok" });
       onSaved();
     } catch (e) {
       window.showToast?.(`Erro ao receber: ${e.message || e}`, { tone: "crit", ttl: 6000 });
@@ -229,13 +352,18 @@ function SupplyReceiveModal({ transfer, myItems, onClose, onSaved }) {
     <Modal
       title={`Confirmar recebimento · ${transfer.code}`}
       subtitle={`De ${transfer.fromName || "—"} · valor ${_supFmtBRL(transfer.totalValue)} (vira "Compras · Rede de suprimentos" no seu financeiro).`}
-      width={640}
+      width={checking ? 800 : 680}
       onClose={saving ? undefined : onClose}
       footer={(
         <>
+          <button type="button" className="btn" data-size="sm" disabled={saving}
+            style={{ marginRight: "auto" }}
+            onClick={() => { setChecking((c) => !c); if (checking) setDivNotes(""); }}>
+            {checking ? "Recebi tudo certo" : "Relatar divergência"}
+          </button>
           <button type="button" className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
           <button type="button" className="btn" data-variant="primary" data-size="sm" onClick={save} disabled={saving || !canSave}>
-            {saving ? "Carregando…" : "Confirmar recebimento"}
+            {saving ? "Carregando…" : diverged.length > 0 ? "Confirmar com divergência" : "Confirmar recebimento"}
           </button>
         </>
       )}
@@ -243,54 +371,133 @@ function SupplyReceiveModal({ transfer, myItems, onClose, onSaved }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div>
           <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
-            Itens e destino no seu estoque
+            {checking ? "Confira o que chegou" : "Itens e destino no seu estoque"}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {(transfer.items || []).map((it, i) => {
-              const sug = suggestFor(it);
+            {(transfer.items || []).map((it) => {
+              const dest = destFor(it);
+              const row = rows[it.id] || { direct: false, operationId: "", recv: "", reason: "" };
+              const delta = deltaOf(it);
+              const tone = delta === 0 ? null : delta < 0 ? "crit" : "warn";
               return (
-                <div key={it.id} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "center" }}>
-                  <div>
-                    <div style={{ fontSize: 12.5, color: "var(--fg-0)" }}>{it.name}</div>
-                    <div style={{ fontSize: 11, color: "var(--fg-3)", fontFamily: "var(--mono)" }}>
-                      {it.qty.toLocaleString("pt-BR")} {it.unit} · {_supFmtBRL(it.unitCost)}/{it.unit}
+                <div key={it.id} style={{
+                  padding: "8px 10px", borderRadius: 4,
+                  background: tone ? `var(--${tone}-soft)` : row.direct ? "var(--ok-soft)" : "var(--bg-2)",
+                  border: `1px solid ${tone ? `var(--${tone}-line)` : row.direct ? "var(--ok-line)" : "var(--line)"}`,
+                }}>
+                  <div style={{
+                    display: "grid", alignItems: "center", gap: 10,
+                    gridTemplateColumns: checking ? "1fr 130px 150px 170px" : "1fr 150px 190px",
+                  }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, color: "var(--fg-0)" }}>{it.name}</div>
+                      <div style={{ fontSize: 11, color: "var(--fg-3)", fontFamily: "var(--mono)" }}>
+                        {checking ? "enviado " : ""}{it.qty.toLocaleString("pt-BR")} {it.unit} · {_supFmtBRL(it.unitCost)}/{it.unit}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: dest ? "var(--fg-2)" : "var(--fg-3)", minWidth: 0 }}>
+                      → {dest ? dest.name : "novo item no seu estoque"}
+                    </div>
+                    {checking && (
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <input className="input mono" value={row.recv} inputMode="decimal"
+                            onChange={(e) => setRows((r) => ({ ...r, [it.id]: { ...row, recv: e.target.value } }))}
+                            style={{ width: 84, textAlign: "right", height: 28 }} />
+                          <span style={{ fontSize: 11, color: "var(--fg-3)" }}>{it.unit}</span>
+                        </div>
+                        {delta !== 0 && (
+                          <div style={{ fontSize: 10.5, fontFamily: "var(--mono)", color: `var(--${tone})`, marginTop: 3 }}>
+                            {delta > 0 ? "+" : "−"}{Math.abs(delta).toLocaleString("pt-BR")} · {_supFmtBRL(Math.abs(delta * it.unitCost))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div>
+                      <label style={{ display: "flex", alignItems: "center", gap: 7, cursor: "pointer" }}>
+                        <input type="checkbox" checked={row.direct} onChange={() => toggleDirect(it)} />
+                        <span style={{ fontSize: 11.5, color: "var(--fg-1)" }}>Direto na cozinha</span>
+                      </label>
+                      {row.direct && (
+                        <button type="button" onClick={() => setPickFor(it)} style={{
+                          marginTop: 4, marginLeft: 24, background: "none", border: "none", padding: 0,
+                          cursor: "pointer", fontSize: 11,
+                          color: row.operationId ? "var(--ok)" : "var(--crit)",
+                          textDecoration: "underline", textUnderlineOffset: 2,
+                        }}>
+                          {row.operationId ? opName(row.operationId) : "escolher operação"}
+                        </button>
+                      )}
                     </div>
                   </div>
-                  <select className="select" value={targets[i]?.target || "auto"}
-                    onChange={(e) => setTargets((cur) => cur.map((x, k) => k === i ? { ...x, target: e.target.value } : x))}>
-                    <option value="auto">
-                      {sug ? `→ ${sug.name} (automático)` : "→ criar item novo (automático)"}
-                    </option>
-                    {(myItems || []).map((m) => (
-                      <option key={m.id} value={m.id}>→ {m.name} · {m.unit}</option>
-                    ))}
-                  </select>
+                  {delta !== 0 && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                      <span style={{ fontSize: 11, color: "var(--fg-2)" }}>Motivo</span>
+                      <select className="select" style={{ width: 240, height: 28 }} value={row.reason}
+                        onChange={(e) => setRows((r) => ({ ...r, [it.id]: { ...row, reason: e.target.value } }))}>
+                        <option value="">Selecione…</option>
+                        {_SUP_DIV_REASONS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                      </select>
+                      {!row.reason && <span style={{ fontSize: 11, color: "var(--crit)" }}>obrigatório</span>}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
-        </div>
 
-        <div style={{ padding: "12px 14px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-            <input type="checkbox" checked={direct} onChange={(e) => setDirect(e.target.checked)} />
-            <div>
-              <div style={{ fontSize: 12.5, color: "var(--fg-0)" }}>Entregar direto na cozinha</div>
-              <div style={{ fontSize: 11, color: "var(--fg-3)" }}>
-                Dá entrada e saída imediata do estoque — o valor conta no CMV do dia da operação escolhida.
+          {checking && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+              marginTop: 10, padding: "10px 12px", borderRadius: 4,
+              background: diverged.length > 0 ? "var(--warn-soft)" : "var(--bg-2)",
+              border: `1px solid ${diverged.length > 0 ? "var(--warn-line)" : "var(--line)"}`,
+            }}>
+              <SummaryStat label="Itens divergentes" value={String(diverged.length)}
+                tone={diverged.length > 0 ? "warn" : "ok"} />
+              <SummaryStat label="Divergência" value={_supFmtBRL(divValue)}
+                tone={divValue < 0 ? "crit" : divValue > 0 ? "warn" : "ok"} />
+              <SummaryStat label="Valor a lançar" value={_supFmtBRL(recvValue)} />
+              <span style={{ flex: 1 }} />
+              <div style={{ fontSize: 11, color: "var(--fg-3)", maxWidth: 300, lineHeight: 1.5 }}>
+                Entra no estoque e é cobrado só o que você conferiu. A diferença fica
+                registrada na aba <strong style={{ color: "var(--fg-2)" }}>Divergências</strong>.
               </div>
             </div>
-          </label>
-          {direct && (
+          )}
+
+          {checking && diverged.length > 0 && (
             <div style={{ marginTop: 10 }}>
-              <select className="select" value={operationId} onChange={(e) => setOperationId(e.target.value)}>
-                <option value="">— escolha a operação —</option>
-                {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
-              </select>
+              <FormRow label="Observação da divergência" hint="Opcional — o que aconteceu (caixa violada, veio trocado, motorista informou…).">
+                <textarea className="input" rows={2} value={divNotes}
+                  onChange={(e) => setDivNotes(e.target.value)} style={{ resize: "vertical" }} />
+              </FormRow>
             </div>
           )}
+
+          <div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 8, lineHeight: 1.5 }}>
+            O destino segue o item enviado pela central — se ele já entrou aqui antes,
+            cai no mesmo insumo; se for a primeira vez, o insumo é criado.
+            <br />
+            <strong style={{ color: "var(--fg-2)" }}>Direto na cozinha</strong>: dá entrada e saída imediata
+            do estoque, e o valor conta no CMV do dia da operação escolhida. A marcação fica salva
+            e já vem preenchida no próximo recebimento do mesmo insumo.
+          </div>
         </div>
       </div>
+
+      {pickFor && (
+        <SupplyKitchenOpModal
+          itemName={pickFor.name}
+          ops={ops}
+          value={rows[pickFor.id]?.operationId || ""}
+          onPick={(opId) => {
+            setRows((r) => ({ ...r, [pickFor.id]: { ...r[pickFor.id], direct: true, operationId: opId } }));
+            setPickFor(null);
+          }}
+          onClose={() => setPickFor(null)}
+        />
+      )}
     </Modal>
   );
 }
@@ -319,20 +526,51 @@ function SupplyTransferDetail({ transfer, onClose }) {
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead><tr><th style={_supTh}>Item</th><th style={{ ..._supTh, textAlign: "right" }}>Qtd</th><th style={{ ..._supTh, textAlign: "right" }}>Custo un.</th><th style={{ ..._supTh, textAlign: "right" }}>Total</th></tr></thead>
         <tbody>
-          {transfer.items.map((it) => (
-            <tr key={it.id}>
-              <td style={_supTd}>{it.name}</td>
-              <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{it.qty.toLocaleString("pt-BR")} {it.unit}</td>
-              <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{transfer.status === "draft" ? "—" : _supFmtBRL(it.unitCost)}</td>
-              <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{transfer.status === "draft" ? "—" : _supFmtBRL(it.qty * it.unitCost)}</td>
-            </tr>
-          ))}
+          {transfer.items.map((it) => {
+            // Conferência do recebimento: null = recebeu o que foi enviado
+            const recv = it.receivedQty != null ? it.receivedQty : it.qty;
+            const delta = recv - it.qty;
+            return (
+              <tr key={it.id}>
+                <td style={_supTd}>
+                  {it.name}
+                  {it.directToKitchen && (
+                    <div style={{ fontSize: 10.5, color: "var(--ok)" }}>direto na cozinha</div>
+                  )}
+                  {delta !== 0 && (
+                    <div style={{ fontSize: 10.5, color: delta < 0 ? "var(--crit)" : "var(--warn)" }}>
+                      {_supReasonLabel(it.divergenceReason)} · enviado {it.qty.toLocaleString("pt-BR")} {it.unit}
+                    </div>
+                  )}
+                </td>
+                <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)", color: delta !== 0 ? (delta < 0 ? "var(--crit)" : "var(--warn)") : undefined }}>
+                  {recv.toLocaleString("pt-BR")} {it.unit}
+                </td>
+                <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{transfer.status === "draft" ? "—" : _supFmtBRL(it.unitCost)}</td>
+                <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{transfer.status === "draft" ? "—" : _supFmtBRL(recv * it.unitCost)}</td>
+              </tr>
+            );
+          })}
           <tr>
             <td style={{ ..._supTd, fontWeight: 600, color: "var(--fg-0)" }} colSpan={3}>Total</td>
             <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600, color: "var(--fg-0)" }}>
-              {_supFmtBRL(transfer.totalValue != null ? transfer.totalValue : transfer.estValue)}
+              {_supFmtBRL(transfer.receivedValue != null ? transfer.receivedValue
+                : transfer.totalValue != null ? transfer.totalValue : transfer.estValue)}
             </td>
           </tr>
+          {transfer.divergenceValue !== 0 && (
+            <tr>
+              <td style={{ ..._supTd, color: "var(--fg-2)" }} colSpan={3}>
+                Divergência (enviado {_supFmtBRL(transfer.totalValue)})
+                {transfer.divergenceNotes && (
+                  <div style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{transfer.divergenceNotes}</div>
+                )}
+              </td>
+              <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600, color: transfer.divergenceValue < 0 ? "var(--crit)" : "var(--warn)" }}>
+                {_supFmtBRL(transfer.divergenceValue)}
+              </td>
+            </tr>
+          )}
         </tbody>
       </table>
     </Modal>
@@ -407,8 +645,22 @@ function SupplyTransferList({ tid, transfers, myItems, onChanged, emptyHint }) {
                 </td>
                 <td style={_supTd}>{iAmFrom ? `→ ${t.toName || "—"}` : `${t.fromName || "—"} →`}</td>
                 <td style={_supTd}>{t.items.map((it) => it.name).join(", ") || "—"}</td>
-                <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{_supFmtBRL(t.totalValue != null ? t.totalValue : t.estValue)}</td>
-                <td style={_supTd}><SupplyStatusBadge status={t.status} /></td>
+                <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>
+                  {_supFmtBRL(t.receivedValue != null ? t.receivedValue : t.totalValue != null ? t.totalValue : t.estValue)}
+                  {t.divergenceValue !== 0 && (
+                    <div style={{ fontSize: 10.5, color: t.divergenceValue < 0 ? "var(--crit)" : "var(--warn)" }}>
+                      enviado {_supFmtBRL(t.totalValue)}
+                    </div>
+                  )}
+                </td>
+                <td style={_supTd}>
+                  <SupplyStatusBadge status={t.status} />
+                  {t.divergenceValue !== 0 && (
+                    <div style={{ fontSize: 10.5, color: "var(--warn)", marginTop: 3 }}>
+                      divergência {_supFmtBRL(t.divergenceValue)}
+                    </div>
+                  )}
+                </td>
                 <td style={{ ..._supTd, textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
                   {t.status === "draft" && iAmFrom && (
                     <>
@@ -729,20 +981,261 @@ function SupplyLedgerTable({ entries, nameByTenant, showTenant = false }) {
 }
 
 // ---------------------------------------------------------------------
+// Divergências de recebimento (compartilhada: Central e Cadeia de suprimentos)
+// ---------------------------------------------------------------------
+const _supMonthKey = (iso) => (iso ? String(iso).slice(0, 7) : "");
+const _supMonthLabel = (key) => {
+  const [y, m] = key.split("-");
+  const d = new Date(Number(y), Number(m) - 1, 1);
+  return d.toLocaleDateString("pt-BR", { month: "short", year: "numeric" }).replace(".", "");
+};
+
+function SupplyDivergenceView({ tid, isCentral = false, scopeCentralId = null }) {
+  const [data, setData] = useState(null); // { lines, receipts } — null = carregando
+  const [month, setMonth] = useState(() => _supMonthKey(new Date().toISOString()));
+  const [party, setParty] = useState("all");   // contraparte (unidade / rota)
+  const [reason, setReason] = useState("all");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await dbSupplyDivergences(tid);
+      if (!cancelled) setData(res?.data || { lines: [], receipts: [] });
+    })();
+    return () => { cancelled = true; };
+  }, [tid]);
+
+  if (data === null) return <PageLoading label="Carregando divergências…" variant="table" />;
+
+  // Na Cadeia de suprimentos o tenant pode estar em 2+ redes — restringe à ativa.
+  const inScope = (r) => !scopeCentralId || r.centralId === scopeCentralId;
+  const allLines = data.lines.filter(inScope);
+  const allReceipts = data.receipts.filter(inScope);
+
+  // A contraparte é sempre "o outro lado" da rota, do ponto de vista deste tenant.
+  const otherOf = (r) => (r.toTenantId === tid
+    ? { id: r.fromTenantId, name: r.fromName || "—" }
+    : { id: r.toTenantId, name: r.toName || "—" });
+
+  const months = Array.from(new Set(allReceipts.map((r) => _supMonthKey(r.receivedAt)).filter(Boolean)));
+  const nowKey = _supMonthKey(new Date().toISOString());
+  if (!months.includes(nowKey)) months.push(nowKey);
+  months.sort().reverse();
+
+  const parties = [];
+  const seen = {};
+  allReceipts.forEach((r) => {
+    const o = otherOf(r);
+    if (o.id && !seen[o.id]) { seen[o.id] = true; parties.push(o); }
+  });
+
+  const inPeriod = (r) => month === "all" || _supMonthKey(r.receivedAt) === month;
+  const inParty = (r) => party === "all" || otherOf(r).id === party;
+
+  const receipts = allReceipts.filter((r) => inPeriod(r) && inParty(r));
+  const lines = allLines
+    .filter((r) => inPeriod(r) && inParty(r) && (reason === "all" || r.reason === reason))
+    .sort((a, b) => Math.abs(b.deltaValue) - Math.abs(a.deltaValue));
+
+  const sentValue = receipts.reduce((s, r) => s + r.sentValue, 0);
+  const recvValue = receipts.reduce((s, r) => s + r.receivedValue, 0);
+  const missing = lines.filter((l) => l.deltaQty < 0).reduce((s, l) => s + l.deltaValue, 0); // ≤ 0
+  const surplus = lines.filter((l) => l.deltaQty > 0).reduce((s, l) => s + l.deltaValue, 0); // ≥ 0
+  const netValue = missing + surplus;
+  const pct = sentValue > 0 ? (Math.abs(netValue) / sentValue) * 100 : 0;
+  const pctTone = pct >= 3 ? "crit" : pct >= 1 ? "warn" : "ok";
+  const affected = new Set(lines.map((l) => l.transferId)).size;
+
+  // Ranking por insumo — onde a perda se concentra
+  const byItem = {};
+  lines.forEach((l) => {
+    const k = l.name.trim().toLowerCase();
+    if (!byItem[k]) byItem[k] = { name: l.name, unit: l.unit, qty: 0, value: 0, n: 0 };
+    byItem[k].qty += l.deltaQty;
+    byItem[k].value += l.deltaValue;
+    byItem[k].n += 1;
+  });
+  const topItems = Object.values(byItem)
+    .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)).slice(0, 6);
+
+  // Ranking por contraparte — qual rota/unidade mais diverge
+  const byParty = {};
+  lines.forEach((l) => {
+    const o = otherOf(l);
+    if (!byParty[o.id]) byParty[o.id] = { name: o.name, value: 0, n: 0 };
+    byParty[o.id].value += l.deltaValue;
+    byParty[o.id].n += 1;
+  });
+  const topParties = Object.values(byParty)
+    .sort((a, b) => Math.abs(b.value) - Math.abs(a.value)).slice(0, 6);
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <FormRow label="Período">
+          <select className="select" style={{ width: 150 }} value={month} onChange={(e) => setMonth(e.target.value)}>
+            <option value="all">Todos os períodos</option>
+            {months.map((m) => <option key={m} value={m}>{_supMonthLabel(m)}</option>)}
+          </select>
+        </FormRow>
+        <FormRow label={isCentral ? "Unidade" : "Contraparte"}>
+          <select className="select" style={{ width: 190 }} value={party} onChange={(e) => setParty(e.target.value)}>
+            <option value="all">{isCentral ? "Todas as unidades" : "Todas"}</option>
+            {parties.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </FormRow>
+        <FormRow label="Motivo">
+          <select className="select" style={{ width: 170 }} value={reason} onChange={(e) => setReason(e.target.value)}>
+            <option value="all">Todos os motivos</option>
+            {_SUP_DIV_REASONS.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+          </select>
+        </FormRow>
+      </div>
+
+      <div style={{
+        display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14,
+        paddingBottom: 16, borderBottom: "1px solid var(--line)", marginBottom: 18,
+      }}>
+        <SummaryStat label="% de divergência" value={`${pct.toFixed(2).replace(".", ",")}%`} tone={pctTone} />
+        <SummaryStat label="Impacto no período" value={_supFmtBRL(netValue)}
+          tone={netValue < 0 ? "crit" : netValue > 0 ? "warn" : "ok"} />
+        <SummaryStat label="Faltas" value={_supFmtBRL(missing)} tone={missing < 0 ? "crit" : "ok"} />
+        <SummaryStat label="Sobras" value={_supFmtBRL(surplus)} tone={surplus > 0 ? "warn" : "ok"} />
+        <SummaryStat label="Itens divergentes" value={String(lines.length)} tone={lines.length > 0 ? "warn" : "ok"} />
+        <SummaryStat label="Recebimentos afetados" value={`${affected} de ${receipts.length}`} />
+        <SummaryStat label="Valor enviado" value={_supFmtBRL(sentValue)} />
+        <SummaryStat label="Valor recebido" value={_supFmtBRL(recvValue)} />
+      </div>
+
+      {receipts.length === 0 ? (
+        <div style={{ padding: "40px 20px", textAlign: "center", border: "1px dashed var(--line)", borderRadius: 6, fontSize: 12.5, color: "var(--fg-3)" }}>
+          Nenhum recebimento {month === "all" ? "na rede" : `em ${_supMonthLabel(month)}`}.
+        </div>
+      ) : lines.length === 0 ? (
+        <div style={{ padding: "40px 20px", textAlign: "center", border: "1px dashed var(--line)", borderRadius: 6 }}>
+          <div style={{ fontSize: 13, color: "var(--ok)", marginBottom: 6 }}>Nenhuma divergência no período.</div>
+          <div style={{ fontSize: 12, color: "var(--fg-3)" }}>
+            As divergências aparecem aqui quando quem recebe usa <strong>Relatar divergência</strong> na
+            confirmação do recebimento e informa uma quantidade diferente da enviada.
+          </div>
+        </div>
+      ) : (
+        <>
+          {(topItems.length > 1 || topParties.length > 1) && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 18, marginBottom: 22 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)", marginBottom: 8 }}>Insumos que mais divergem</div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={_supTh}>Insumo</th>
+                    <th style={{ ..._supTh, textAlign: "right" }}>Ocorr.</th>
+                    <th style={{ ..._supTh, textAlign: "right" }}>Qtd</th>
+                    <th style={{ ..._supTh, textAlign: "right" }}>Valor</th>
+                  </tr></thead>
+                  <tbody>
+                    {topItems.map((i) => (
+                      <tr key={i.name}>
+                        <td style={_supTd}>{i.name}</td>
+                        <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{i.n}</td>
+                        <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>
+                          {i.qty > 0 ? "+" : ""}{i.qty.toLocaleString("pt-BR")} {i.unit}
+                        </td>
+                        <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)", color: i.value < 0 ? "var(--crit)" : "var(--warn)" }}>
+                          {_supFmtBRL(i.value)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)", marginBottom: 8 }}>
+                  {isCentral ? "Unidades com mais divergência" : "Contrapartes com mais divergência"}
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead><tr>
+                    <th style={_supTh}>{isCentral ? "Unidade" : "Contraparte"}</th>
+                    <th style={{ ..._supTh, textAlign: "right" }}>Ocorr.</th>
+                    <th style={{ ..._supTh, textAlign: "right" }}>Valor</th>
+                  </tr></thead>
+                  <tbody>
+                    {topParties.map((p) => (
+                      <tr key={p.name}>
+                        <td style={_supTd}>{p.name}</td>
+                        <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{p.n}</td>
+                        <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)", color: p.value < 0 ? "var(--crit)" : "var(--warn)" }}>
+                          {_supFmtBRL(p.value)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)", marginBottom: 8 }}>
+            Ocorrências ({lines.length})
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={_supTh}>Data</th>
+                <th style={_supTh}>Código</th>
+                <th style={_supTh}>Rota</th>
+                <th style={_supTh}>Insumo</th>
+                <th style={{ ..._supTh, textAlign: "right" }}>Enviado</th>
+                <th style={{ ..._supTh, textAlign: "right" }}>Recebido</th>
+                <th style={{ ..._supTh, textAlign: "right" }}>Δ</th>
+                <th style={{ ..._supTh, textAlign: "right" }}>Valor</th>
+                <th style={_supTh}>Motivo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((l) => (
+                <tr key={l.id}>
+                  <td style={{ ..._supTd, fontFamily: "var(--mono)" }}>{_supFmtDate(l.receivedAt)}</td>
+                  <td style={{ ..._supTd, fontFamily: "var(--mono)" }}>{l.code}</td>
+                  <td style={{ ..._supTd, color: "var(--fg-2)" }}>{l.fromName || "—"} → {l.toName || "—"}</td>
+                  <td style={{ ..._supTd, color: "var(--fg-0)" }}>
+                    {l.name}
+                    {l.notes && <div style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{l.notes}</div>}
+                  </td>
+                  <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{l.sentQty.toLocaleString("pt-BR")} {l.unit}</td>
+                  <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)" }}>{l.receivedQty.toLocaleString("pt-BR")} {l.unit}</td>
+                  <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)", color: l.deltaQty < 0 ? "var(--crit)" : "var(--warn)" }}>
+                    {l.deltaQty > 0 ? "+" : "−"}{Math.abs(l.deltaQty).toLocaleString("pt-BR")}
+                  </td>
+                  <td style={{ ..._supTd, textAlign: "right", fontFamily: "var(--mono)", color: l.deltaValue < 0 ? "var(--crit)" : "var(--warn)" }}>
+                    {_supFmtBRL(l.deltaValue)}
+                  </td>
+                  <td style={{ ..._supTd, color: "var(--fg-2)" }}>{_supReasonLabel(l.reason)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
 // Página raiz · Suprimentos (tenant membro)
 // ---------------------------------------------------------------------
 const _SUP_VIEWS = [
-  { id: "central",  label: "Solicitar da central" },
-  { id: "peers",    label: "Entre tenants" },
-  { id: "receipts", label: "Recebimentos" },
-  { id: "ledger",   label: "Gastos" },
+  { id: "receipts",    label: "Recebimentos" },
+  { id: "central",     label: "Solicitar da central" },
+  { id: "peers",       label: "Entre tenants" },
+  { id: "divergences", label: "Divergências" },
+  { id: "ledger",      label: "Gastos" },
 ];
 
 function Suprimentos({ scope }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
   const [tid, setTid] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState("central");
+  const [view, setView] = useState("receipts");
   const [overview, setOverview] = useState(null);
   const [stockItems, setStockItems] = useState([]);
   const [transfers, setTransfers] = useState([]);
@@ -791,7 +1284,7 @@ function Suprimentos({ scope }) {
     return (
       <div style={{ padding: "24px 28px" }}>
         <div style={{ fontSize: 12.5, color: "var(--warn)", padding: "10px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 4 }}>
-          O módulo Suprimentos só fica disponível com Supabase online.
+          O módulo Cadeia de suprimentos só fica disponível com Supabase online.
         </div>
       </div>
     );
@@ -832,7 +1325,7 @@ function Suprimentos({ scope }) {
       <div style={{ padding: "20px 28px 0" }}>
         <div className="h-eyebrow" style={{ marginBottom: 6 }}>Rede de suprimentos</div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <h1 className="h-title" style={{ margin: 0 }}>Suprimentos</h1>
+          <h1 className="h-title" style={{ margin: 0 }}>Cadeia de suprimentos</h1>
           {networks.length > 1 && (
             <select className="select" style={{ width: "auto" }} value={networkIdx}
               onChange={(e) => setNetworkIdx(Number(e.target.value))}>
@@ -891,7 +1384,7 @@ function Suprimentos({ scope }) {
                   Sua conta é uma Central de Distribuição — a gestão da <strong>sua</strong> rede (convites, transferências, gastos) fica no módulo <strong>Central</strong>.
                 </div>
                 <div style={{ fontSize: 12.5, color: "var(--fg-3)", marginBottom: 14 }}>
-                  O Suprimentos é usado quando a sua central participa da rede de <em>outra</em> central. Para isso, passe o código abaixo para ela convidar você:
+                  A Cadeia de suprimentos é usada quando a sua central participa da rede de <em>outra</em> central. Para isso, passe o código abaixo para ela convidar você:
                 </div>
               </>
             ) : (
@@ -984,6 +1477,10 @@ function Suprimentos({ scope }) {
               />
             )}
 
+            {view === "divergences" && (
+              <SupplyDivergenceView tid={tid} scopeCentralId={net.centralId} />
+            )}
+
             {view === "ledger" && (
               <div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 18 }}>
@@ -1023,4 +1520,5 @@ function Suprimentos({ scope }) {
 Object.assign(window, {
   Suprimentos, SupplyStatusBadge, SupplyTransferForm, SupplyReceiveModal, SupplyTransferDetail,
   SupplyTransferList, SupplyRequestForm, SupplyRequestList, SupplyLedgerTable,
+  SupplyDivergenceView, _supReasonLabel,
 });

@@ -60,6 +60,12 @@ function Requests({ scope }) {
   const revertingRef = useRef(new Set());
   const [revertingIds, setRevertingIds] = useState(() => new Set());
   const [confirmRevert, setConfirmRevert] = useState(null);
+  // Solicitações de insumo vindas da Produção. Não são kitchen_requests: a
+  // baixa delas não pertence a nenhuma marca (viraria CMV em dobro, já que a
+  // marca depois requisita o transformado). Ficam num estado à parte e só
+  // dividem o quadro — pendente → separada → entregue, mesmo ritual.
+  const [prodOrders, setProdOrders] = useState([]);
+  const [editingProd, setEditingProd] = useState(null);  // ajuste da separação
 
   // Persiste o conjunto de impressas para que o ✅ sobreviva ao reload da página.
   useEffect(() => {
@@ -80,14 +86,25 @@ function Requests({ scope }) {
         setTenantId(tid || null);
         if (ctx?.tenant?.name) setTenantName(ctx.tenant.name);
         if (!tid) return;
-        const [reqRes, stockRes, memRes] = await Promise.all([
+        const [reqRes, stockRes, memRes, prodRes] = await Promise.all([
           dbListKitchenRequests(tid, { limit: 100 }),
           dbListStockItems(tid),
           dbListMembers(tid).catch(() => ({ data: null })),
+          dbListProductionOrders(tid).catch(() => ({ data: null })),
         ]);
         if (cancelled) return;
         if (memRes?.data) {
           setMemberNames(Object.fromEntries(memRes.data.map((m) => [m.userId, m.name])));
+        }
+        if (prodRes?.data) setProdOrders(prodRes.data);
+        // Falha na leitura das ordens é silenciosa por natureza (a lista só fica
+        // vazia) — e "solicitei e não chegou" é exatamente o sintoma. Grita.
+        else if (prodRes?.error) {
+          console.error("[requests] produção não carregou:", prodRes.error);
+          window.showToast?.(
+            `Solicitações da produção não carregaram: ${prodRes.error.message || prodRes.error}`,
+            { tone: "crit", ttl: 8000 },
+          );
         }
         if (reqRes.data && reqRes.source === "db") {
           setItems(reqRes.data);
@@ -111,6 +128,16 @@ function Requests({ scope }) {
     return dbSubscribeTable("kitchen_requests", tenantId, async () => {
       const { data, source: src } = await dbListKitchenRequests(tenantId, { limit: 100 });
       if (data && src === "db") setItems(data);
+    });
+  }, [dbStatus.isOnline, tenantId]);
+
+  // Realtime das solicitações da Produção — quem cria é a outra tela, então o
+  // quadro precisa ver a ordem aparecer sem reload.
+  useEffect(() => {
+    if (!dbStatus.isOnline || !tenantId) return;
+    return dbSubscribeTable("production_orders", tenantId, async () => {
+      const { data } = await dbListProductionOrders(tenantId);
+      if (data) setProdOrders(data);
     });
   }, [dbStatus.isOnline, tenantId]);
 
@@ -153,6 +180,44 @@ function Requests({ scope }) {
     { id: "separated", label: "Separada",   tone: "info", desc: "aguarda retirada/entrega" },
     { id: "delivered", label: "Entregue",   tone: "ok",   desc: "consumo registrado" },
   ];
+
+  // Ordens de produção normalizadas para o quadro. 'draft' sem separated_at é
+  // pendente; com carimbo, separada; 'issued' pra frente já saiu do estoque, o
+  // que corresponde a entregue. Elas não têm operação, então ignoram o `scope`
+  // (a produção é da casa toda, não de uma marca).
+  const prodCards = useMemo(() => {
+    const todayStr = new Date().toDateString();
+    // Draft não tem custo no banco: unit_cost/line_cost só são gravados no
+    // snapshot da entrega. Até lá, estima pelo custo atual do insumo.
+    const costById = {};
+    (stockItems || []).forEach((s) => { costById[s.id] = s.cost || 0; });
+    return (prodOrders || [])
+      .map((o) => {
+        const status = o.status === "draft"
+          ? (o.separatedAt ? "separated" : "pending")
+          : (o.status === "issued" || o.status === "completed") ? "delivered" : null;
+        if (!status) return null;   // cancelled fica fora do quadro
+        // Entregues só do dia corrente, igual às requisições de cozinha.
+        if (status === "delivered" && new Date(o.issuedAt || o.createdAt).toDateString() !== todayStr) return null;
+        const totalNum = o.totalInputCost != null
+          ? o.totalInputCost
+          : (o.inputs || []).reduce((s, l) => s + l.qty * (costById[l.itemId] || 0), 0);
+        return {
+          id: o.id, code: o.code, isProduction: true, status,
+          items: (o.inputs || []).map((l) => [l.name, `${l.qty.toLocaleString("pt-BR")} ${l.unit}`, l.itemId]),
+          itemsCount: (o.inputs || []).length,
+          totalNum,
+          total: "R$ " + (totalNum || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+          notes: o.notes,
+          requestedAt: o.createdAt,
+          separatedAt: o.separatedAt,
+          deliveredAt: o.issuedAt,
+          order: o,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => new Date(a.requestedAt) - new Date(b.requestedAt));
+  }, [prodOrders, stockItems]);
 
   const advance = async (id) => {
     // Guard síncrono (ref) contra duplo clique — o state ainda não re-renderizou
@@ -225,6 +290,64 @@ function Requests({ scope }) {
     } finally {
       advancingRef.current.delete(id);
       setAdvancingIds(new Set(advancingRef.current));
+    }
+  };
+
+  // Avança uma solicitação da Produção. Separar é só carimbo; entregar chama o
+  // issue da ordem, e é o trigger do banco que baixa os insumos (com
+  // reference_type='production_order', fora do CMV das marcas) e congela o
+  // custo que vai ser rateado na devolução.
+  const advanceProd = async (card) => {
+    const id = card.id;
+    if (advancingRef.current.has(id)) return;
+    advancingRef.current.add(id);
+    setAdvancingIds(new Set(advancingRef.current));
+    try {
+      const sess = await dbGetSession();
+      const uid = sess?.user?.id;
+      if (card.status === "pending") {
+        const { error } = await dbSeparateProductionOrder(id, uid);
+        if (error) throw error;
+        window.showToast(`Produção ${card.code} separada`, { tone: "ok" });
+      } else if (card.status === "separated") {
+        const { error } = await dbIssueProductionOrder(id, uid);
+        if (error) throw error;
+        window.showToast(
+          `Produção ${card.code} entregue · ${card.itemsCount} insumo(s) baixado(s) — aguardando devolução`,
+          { tone: "ok", ttl: 5000 },
+        );
+        // A baixa mudou os saldos: re-busca para os pickers não mentirem.
+        const { data } = await dbListStockItems(tenantId);
+        if (data) setStockItems(data);
+      }
+      const { data: fresh } = await dbListProductionOrders(tenantId);
+      if (fresh) setProdOrders(fresh);
+    } catch (e) {
+      window.showToast(`Erro: ${e.message || e}`, { tone: "crit", ttl: 5000 });
+    } finally {
+      advancingRef.current.delete(id);
+      setAdvancingIds(new Set(advancingRef.current));
+    }
+  };
+
+  // Volta "separada" → "pendente" numa solicitação da Produção. Nada a estornar:
+  // a baixa dela só acontece na entrega.
+  const revertProd = async (card) => {
+    const id = card.id;
+    if (revertingRef.current.has(id)) return;
+    revertingRef.current.add(id);
+    setRevertingIds(new Set(revertingRef.current));
+    try {
+      const { error } = await dbUnseparateProductionOrder(id);
+      if (error) throw error;
+      const { data: fresh } = await dbListProductionOrders(tenantId);
+      if (fresh) setProdOrders(fresh);
+      window.showToast(`Produção ${card.code} voltou para pendente`, { tone: "ok" });
+    } catch (e) {
+      window.showToast(`Erro ao voltar: ${e.message || e}`, { tone: "crit", ttl: 4500 });
+    } finally {
+      revertingRef.current.delete(id);
+      setRevertingIds(new Set(revertingRef.current));
     }
   };
 
@@ -419,18 +542,32 @@ function Requests({ scope }) {
                 }
                 return true;
               });
+              const colProd = prodCards.filter((c) => c.status === col.id);
               return (
                 <div key={col.id} style={{ display: "flex", flexDirection: "column", background: "var(--bg-1)", border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden", minHeight: 200 }}>
                   <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line-soft)", display: "flex", flexDirection: "column", gap: 4 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span className="badge" data-tone={col.tone}>{col.label}</span>
                       <span style={{ flex: 1 }} />
-                      <span className="mono" style={{ fontSize: 11, color: "var(--fg-3)" }}>{colItems.length}</span>
+                      <span className="mono" style={{ fontSize: 11, color: "var(--fg-3)" }}>{colItems.length + colProd.length}</span>
                     </div>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>{col.desc}</div>
                   </div>
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8, padding: 10, overflow: "auto" }} className="stagger">
-                    {colItems.length === 0 && <div style={{ fontSize: 11, color: "var(--fg-3)", textAlign: "center", padding: 20 }}>—</div>}
+                    {colItems.length === 0 && colProd.length === 0 && <div style={{ fontSize: 11, color: "var(--fg-3)", textAlign: "center", padding: 20 }}>—</div>}
+                    {colProd.map((c) => (
+                      <ProductionRequestCard
+                        key={c.id}
+                        c={c}
+                        onAdvance={col.id !== "delivered" ? () => advanceProd(c) : null}
+                        advancing={advancingIds.has(c.id)}
+                        onRevert={col.id === "separated" ? () => revertProd(c) : null}
+                        reverting={revertingIds.has(c.id)}
+                        onPrint={col.id === "pending" ? () => setPrintingReq(c) : null}
+                        printed={printedIds.has(c.id)}
+                        onEdit={col.id === "pending" ? () => setEditingProd(c) : null}
+                      />
+                    ))}
                     {colItems.map((r) => (
                       <RequestCard
                         key={r.id}
@@ -470,6 +607,45 @@ function Requests({ scope }) {
               </tr>
             </thead>
             <tbody>
+              {/* Solicitações da Produção primeiro — são a fila da casa, não de
+                  uma marca, e por isso ignoram o filtro de operação. */}
+              {prodCards.map((c) => {
+                const tone = c.status === "pending" ? "warn" : c.status === "delivered" ? "ok" : "info";
+                const lbl = { pending: "Pendente", separated: "Separada", delivered: "Entregue" }[c.status];
+                return (
+                  <tr key={c.id}>
+                    <td>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ width: 6, height: 6, borderRadius: 50, background: "var(--accent-bright)" }} />
+                        🏭 Produção
+                      </span>
+                    </td>
+                    <td className="dim mono" style={{ fontSize: 11 }}>{c.code}</td>
+                    <td className="num">{c.itemsCount}</td>
+                    <td className="num">{c.total}</td>
+                    <td className="dim" />
+                    <td className="dim mono" style={{ fontSize: 11 }} title={fmtReqStampTitle(c.requestedAt)}>{fmtReqStamp(c.requestedAt)}</td>
+                    <td className="dim mono" style={{ fontSize: 11 }} title={fmtReqStampTitle(c.separatedAt)}>{fmtReqStamp(c.separatedAt)}</td>
+                    <td className="dim mono" style={{ fontSize: 11 }} title={fmtReqStampTitle(c.deliveredAt)}>{fmtReqStamp(c.deliveredAt)}</td>
+                    <td><span className="badge" data-tone={tone}>{lbl}</span></td>
+                    <td>
+                      <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                        {c.status === "pending" && (
+                          <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setEditingProd(c)}>
+                            <I.Edit size={11} />Ajustar
+                          </button>
+                        )}
+                        {c.status !== "delivered" && (
+                          <button className="btn" data-variant="ghost" data-size="sm" disabled={advancingIds.has(c.id)}
+                                  onClick={() => advanceProd(c)}>
+                            {c.status === "pending" ? "Separar" : "Entregar"} <I.ChevronR size={11} />
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
               {filtered.map((r) => {
                 const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
                 const op = MOCK.opById(r.op);
@@ -546,6 +722,19 @@ function Requests({ scope }) {
           onCancel={() => setEditingReq(null)}
           onSubmit={(draft) => handleEditSave(editingReq.id, draft)}
           onDelete={() => handleEditDelete(editingReq.id)}
+        />
+      )}
+
+      {editingProd && (
+        <ProductionRequestEditModal
+          card={prodCards.find((c) => c.id === editingProd.id) || editingProd}
+          stockItems={stockItems}
+          onClose={() => setEditingProd(null)}
+          onSaved={async () => {
+            setEditingProd(null);
+            const { data } = await dbListProductionOrders(tenantId);
+            if (data) setProdOrders(data);
+          }}
         />
       )}
 
@@ -769,6 +958,234 @@ function RequestsHistoryModal({ requests = [], onClose }) {
   );
 }
 
+// Ajuste da solicitação na separação: o estoque não cobriu o pedido, então quem
+// separa corrige para o que realmente saiu. Só quantidade e composição — o resto
+// da ordem é da Produção. A janela é enquanto a ordem está pendente; depois de
+// entregue o insumo já baixou e movimento de estoque é imutável.
+function ProductionRequestEditModal({ card, stockItems, onClose, onSaved }) {
+  const StockItemPicker = window.StockItemPicker;
+  const rawItems = (stockItems || []).filter((i) => i.itemKind !== "transformed");
+  const byId = {};
+  (stockItems || []).forEach((i) => { byId[i.id] = i; });
+
+  const [lines, setLines] = useState(() =>
+    (card.order.inputs || []).map((l) => ({
+      itemId: l.itemId,
+      qty: String(l.qty).replace(".", ","),
+      original: l.qty,
+    }))
+  );
+  const [saving, setSaving] = useState(false);
+
+  const parse = (s) => {
+    if (s == null) return 0;
+    const n = parseFloat(String(s).trim().replace(/\./g, "").replace(",", "."));
+    return Number.isFinite(n) ? n : 0;
+  };
+  const setLine = (i, patch) => setLines((cur) => cur.map((l, k) => (k === i ? { ...l, ...patch } : l)));
+  const dropLine = (i) => setLines((cur) => cur.filter((_, k) => k !== i));
+
+  const valid = lines
+    .map((l) => ({ ...l, item: byId[l.itemId], qtyN: parse(l.qty) }))
+    .filter((l) => l.item && l.qtyN > 0);
+  const total = valid.reduce((s, l) => s + l.qtyN * (l.item.cost || 0), 0);
+  const overStock = valid.filter((l) => l.qtyN > (l.item.qty || 0));
+
+  // Prévia do reajuste do esperado — mesma regra do banco (insumo mais limitante).
+  const ratio = (() => {
+    let r = null;
+    for (const prev of card.order.inputs || []) {
+      if (!(prev.qty > 0)) continue;
+      const now = valid.find((l) => l.item.id === prev.itemId);
+      const x = (now ? now.qtyN : 0) / prev.qty;
+      r = r == null ? x : Math.min(r, x);
+    }
+    return r;
+  })();
+  const willRescale = ratio != null && ratio > 0 && Math.abs(ratio - 1) > 0.0001;
+
+  const save = async () => {
+    if (saving || valid.length === 0) return;
+    setSaving(true);
+    try {
+      const { error } = await dbReplaceProductionOrderInputs(
+        card.id,
+        valid.map((l) => ({ itemId: l.item.id, name: l.item.name, qty: l.qtyN, unit: l.item.unit })),
+      );
+      if (error) throw error;
+      window.showToast(`Solicitação ${card.code} ajustada`, { tone: "ok" });
+      onSaved();
+    } catch (e) {
+      window.showToast(`Erro ao ajustar: ${e.message || e}`, { tone: "crit", ttl: 6000 });
+      setSaving(false);
+    }
+  };
+
+  const lineStyle = { display: "grid", gridTemplateColumns: "1fr 110px 90px 28px", gap: 8, alignItems: "center" };
+
+  return (
+    <Modal
+      title={`Ajustar separação · ${card.code}`}
+      subtitle="Corrija para o que realmente saiu do estoque. A Produção passa a ver essas quantidades, e é sobre elas que o custo é congelado na entrega."
+      width={680}
+      onClose={saving ? undefined : onClose}
+      footer={(
+        <>
+          <button type="button" className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
+          <button type="button" className="btn" data-variant="primary" data-size="sm"
+                  onClick={save} disabled={saving || valid.length === 0}>
+            {saving ? "Carregando…" : "Salvar ajuste"}
+          </button>
+        </>
+      )}
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {lines.map((l, i) => {
+            const item = byId[l.itemId];
+            const qtyN = parse(l.qty);
+            const cut = l.original != null && qtyN > 0 && qtyN < l.original;
+            return (
+              <div key={i} style={lineStyle}>
+                <StockItemPicker
+                  items={rawItems} value={l.itemId}
+                  placeholder="Selecione um insumo…"
+                  disabledIds={lines.map((x) => x.itemId).filter(Boolean)}
+                  onChange={(id) => setLine(i, { itemId: id })} />
+                <input className="input mono" inputMode="decimal" value={l.qty}
+                  placeholder={`Qtd${item ? ` (${item.unit})` : ""}`}
+                  onChange={(e) => setLine(i, { qty: e.target.value })}
+                  style={{ textAlign: "right", borderColor: cut ? "var(--warn-line)" : undefined }} />
+                <span style={{ fontSize: 10.5, fontFamily: "var(--mono)", textAlign: "right", color: "var(--fg-3)" }}
+                      title={item ? `Saldo em estoque: ${(item.qty || 0).toLocaleString("pt-BR")} ${item.unit}` : undefined}>
+                  {item ? `saldo ${(item.qty || 0).toLocaleString("pt-BR")}` : "—"}
+                </span>
+                <button type="button" className="btn" data-variant="ghost" data-size="sm" title="Remover insumo"
+                        onClick={() => dropLine(i)}><I.X size={11} /></button>
+              </div>
+            );
+          })}
+        </div>
+        <button type="button" className="btn" data-size="sm"
+                onClick={() => setLines((cur) => [...cur, { itemId: "", qty: "", original: null }])}>
+          <I.Plus size={12} /> Adicionar insumo
+        </button>
+
+        {overStock.length > 0 && (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "9px 12px", borderRadius: 4,
+                        background: "var(--warn-soft)", border: "1px solid var(--warn-line)" }}>
+            <I.AlertTriangle size={14} style={{ color: "var(--warn)", flexShrink: 0, marginTop: 1 }} />
+            <div style={{ fontSize: 11.5, color: "var(--fg-1)", lineHeight: 1.5 }}>
+              Ainda acima do saldo: {overStock.map((l) => `${l.item.name} (tem ${(l.item.qty || 0).toLocaleString("pt-BR")} ${l.item.unit})`).join(", ")}.
+              {" "}Na entrega o estoque fica negativo.
+            </div>
+          </div>
+        )}
+
+        {willRescale && (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "9px 12px", borderRadius: 4,
+                        background: "var(--bg-2)", border: "1px solid var(--line)" }}>
+            <I.Check size={14} style={{ color: "var(--fg-3)", flexShrink: 0, marginTop: 1 }} />
+            <div style={{ fontSize: 11.5, color: "var(--fg-2)", lineHeight: 1.5 }}>
+              O rendimento esperado será reajustado para{" "}
+              <strong style={{ color: "var(--fg-0)" }}>{(ratio * 100).toFixed(0)}%</strong> do planejado —
+              proporcional ao insumo mais limitante. Sem isso a variância acusaria quebra de rendimento
+              onde na verdade faltou insumo.
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, paddingTop: 4, borderTop: "1px solid var(--line-soft)" }}>
+          <span style={{ color: "var(--fg-2)" }}>Custo estimado dos insumos</span>
+          <span style={{ fontFamily: "var(--mono)", color: "var(--fg-0)", fontWeight: 600 }}>
+            R$ {total.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Card da solicitação de insumos da Produção. Mesma linguagem visual do card de
+// requisição, sem operação/rateio (a produção não é de uma marca) e sem edição
+// — quem monta a lista é a tela de Produção, aqui só se separa e entrega.
+function ProductionRequestCard({ c, onAdvance, advancing, onRevert, reverting, onPrint, printed, onEdit }) {
+  return (
+    <div style={{ background: "var(--bg-2)", border: "1px solid var(--accent-line, var(--line))", borderLeft: "2px solid var(--accent-bright)", borderRadius: 4, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-0)" }}>🏭 Produção</span>
+        <span className="mono" style={{ fontSize: 11, color: "var(--fg-3)" }}>{c.code}</span>
+        <span style={{ flex: 1 }} />
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        {c.items.slice(0, 3).map((it, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
+            <span style={{ color: "var(--fg-1)" }}>{it[0]}</span>
+            <span className="mono" style={{ color: "var(--fg-2)" }}>{it[1]}</span>
+          </div>
+        ))}
+        {c.items.length > 3 && <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>+{c.items.length - 3} itens</div>}
+      </div>
+      {c.notes && (
+        <div style={{
+          padding: "6px 8px", borderRadius: 3,
+          background: "var(--bg-1)", border: "1px solid var(--line-soft)",
+          fontSize: 11, color: "var(--fg-1)", fontStyle: "italic",
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+        }}>
+          “{c.notes}”
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 8, borderTop: "1px solid var(--line-soft)" }}>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
+          {fmtReqStamp(c.requestedAt)}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 11.5, color: "var(--fg-0)", fontWeight: 500 }}>{c.total}</span>
+      </div>
+      {(onAdvance || onRevert || onPrint || onEdit) && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {onRevert && (
+            <button className="btn" data-variant="ghost" data-size="sm" onClick={onRevert} disabled={reverting}
+                    title="Voltar esta solicitação para Pendente"
+                    style={{ justifyContent: "center", display: "inline-flex", alignItems: "center", gap: 4 }}>
+              {reverting ? "Voltando…" : "↩ Voltar"}
+            </button>
+          )}
+          {onPrint && (
+            <button className="btn" data-size="sm" onClick={onPrint}
+                    title={printed ? "Reimprimir (já impresso)" : "Imprimir (papel térmico)"}
+                    style={{ justifyContent: "center", padding: "5px 9px", display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <I.Print size={12} />
+              {printed && <span aria-label="já impresso">✅</span>}
+            </button>
+          )}
+          {onEdit && (
+            <button className="btn" data-size="sm" onClick={onEdit}
+                    title="Faltou insumo? Ajuste para o que realmente saiu"
+                    style={{ justifyContent: "center", display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <I.Edit size={11} />Ajustar
+            </button>
+          )}
+          {onAdvance && (
+            <button className="btn" data-variant="primary" data-size="sm" onClick={onAdvance} disabled={advancing}
+                    style={{ flex: 1, justifyContent: "center" }}>
+              {advancing ? "Carregando…"
+                : c.status === "pending" ? "Separar"
+                : "Confirmar entrega"}
+            </button>
+          )}
+        </div>
+      )}
+      {c.status === "separated" && (
+        <div style={{ fontSize: 10, color: "var(--fg-3)", lineHeight: 1.4 }}>
+          A entrega baixa os insumos e manda o lote para a fila de devolução da Produção.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RequestCard({ r, userName, onAdvance, canAdvance, advancing, onRevert, reverting, onEdit, onPrint, printed }) {
   const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
   const op = MOCK.opById(r.op);
@@ -882,19 +1299,29 @@ function PrintTicket({ request, userName, tenantName }) {
     <div className="print-area">
       <div className="rule-double" />
       <div className="center bold">{headerName}</div>
-      <div className="center">Requisição interna</div>
+      <div className="center">{request.isProduction ? "Separação para produção" : "Requisição interna"}</div>
       <div className="rule-double" />
 
       <div className="row">
-        <span>{request.at}</span>
+        <span>{request.isProduction ? fmtReqStamp(request.requestedAt) : request.at}</span>
+        {request.isProduction && <span className="bold">{request.code}</span>}
       </div>
-      <div className="row">
-        <span>Operação:</span>
-        <span className="bold">{isShared ? "COMPARTILHADO" : op.short}</span>
-      </div>
-      <div>{isShared ? "Uso compartilhado · custo rateado" : op.name}</div>
-      <div>Solicitante: {request.by}</div>
-      {userName && userName !== request.by && <div>Usuário: {userName}</div>}
+      {request.isProduction ? (
+        <div className="row">
+          <span>Destino:</span>
+          <span className="bold">PRODUÇÃO</span>
+        </div>
+      ) : (
+        <>
+          <div className="row">
+            <span>Operação:</span>
+            <span className="bold">{isShared ? "COMPARTILHADO" : op.short}</span>
+          </div>
+          <div>{isShared ? "Uso compartilhado · custo rateado" : op.name}</div>
+          <div>Solicitante: {request.by}</div>
+          {userName && userName !== request.by && <div>Usuário: {userName}</div>}
+        </>
+      )}
       {request.notes && (
         <div style={{ marginTop: "2mm", whiteSpace: "pre-wrap" }}>
           <span className="bold">Obs.:</span> {request.notes}
@@ -1058,7 +1485,7 @@ function buildSubmitLine(ln, stockItems = MOCK.STOCK_ITEMS) {
 // O popover é renderizado via portal no document.body com position: fixed pra
 // escapar do overflow:auto do modal (senão fica recortado pela borda inferior).
 // Filtro por nome ou categoria, acento/case-insensitive.
-function StockItemPicker({ items, value, onChange, onPicked, openSignal, disabledIds = [], unmatchedHint }) {
+function StockItemPicker({ items, value, onChange, onPicked, openSignal, disabledIds = [], unmatchedHint, placeholder = "Selecione um insumo…", emptyLabel = "Nenhum insumo encontrado" }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [pos, setPos] = useState({ top: 0, left: 0, width: 0, openUp: false });
@@ -1164,7 +1591,7 @@ function StockItemPicker({ items, value, onChange, onPicked, openSignal, disable
             ? selected.name
             : unmatchedHint
               ? `⚠ "${unmatchedHint}" · selecione novamente`
-              : "Selecione um insumo…"}
+              : placeholder}
         </span>
         <I.Chevron size={11} style={{
           color: "var(--fg-3)", flexShrink: 0,
@@ -1198,7 +1625,7 @@ function StockItemPicker({ items, value, onChange, onPicked, openSignal, disable
           <div style={{ maxHeight: 260, overflow: "auto" }}>
             {filtered.length === 0 ? (
               <div style={{ padding: 14, fontSize: 12, color: "var(--fg-3)", textAlign: "center" }}>
-                Nenhum insumo encontrado
+                {emptyLabel}
               </div>
             ) : filtered.map((it, idx) => {
               const isDisabled = disabledIds.includes(it.id) && it.id !== value;

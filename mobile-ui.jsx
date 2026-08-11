@@ -391,10 +391,102 @@ const mBigStep = {
   fontSize: 26, display: "grid", placeItems: "center",
 };
 
+// ---------------------------------------------------------------------------
+// MStockPicker · seletor de insumo/transformado com busca (celular)
+// ---------------------------------------------------------------------------
+// Equivalente mobile do StockItemPicker (page-requests.jsx): mesma função, no
+// idioma do celular — em vez de popover ancorado, abre BottomSheet em tela
+// cheia com campo de busca e lista de alvos grandes.
+//
+// O <select> nativo abre o picker do sistema, que não tem busca: com catálogo
+// grande vira rolagem interminável. Filtra por nome OU categoria, ignorando
+// acento e caixa (mesma normalização do desktop).
+function MStockPicker({ items, value, onChange, placeholder = "Selecione um insumo…", disabledIds = [], emptyLabel = "Nenhum item encontrado" }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+
+  const selected = (items || []).find((it) => it.id === value) || null;
+  const norm = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  const nq = norm(q.trim());
+  const filtered = nq
+    ? (items || []).filter((it) => norm(it.name).includes(nq) || norm(it.cat).includes(nq))
+    : (items || []);
+
+  const pick = (it) => {
+    if (disabledIds.includes(it.id) && it.id !== value) return;
+    onChange(it.id);
+    setOpen(false);
+    setQ("");
+  };
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)} style={{
+        ...mInput, height: 44, display: "flex", alignItems: "center", gap: 8,
+        textAlign: "left", cursor: "pointer",
+      }}>
+        <span style={{
+          flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          color: selected ? "var(--fg-0)" : "var(--fg-3)",
+        }}>
+          {selected ? selected.name : placeholder}
+        </span>
+        <I.Chevron size={13} style={{ color: "var(--fg-3)", flexShrink: 0 }} />
+      </button>
+
+      {open && (
+        <BottomSheet
+          title="Buscar item"
+          subtitle={`${filtered.length} ${filtered.length === 1 ? "item" : "itens"}`}
+          onClose={() => { setOpen(false); setQ(""); }}
+        >
+          <div style={{ padding: "0 0 8px" }}>
+            <MSearch value={q} onChange={setQ} placeholder="Digite nome ou categoria…" />
+          </div>
+          {filtered.length === 0 ? (
+            <div style={{ padding: "28px 12px", textAlign: "center", color: "var(--fg-3)", fontSize: 13 }}>
+              {emptyLabel}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingBottom: 8 }}>
+              {filtered.map((it) => {
+                const isDisabled = disabledIds.includes(it.id) && it.id !== value;
+                const isSelected = it.id === value;
+                return (
+                  <button key={it.id} type="button" onClick={() => pick(it)} disabled={isDisabled}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+                      minHeight: 52, padding: "8px 12px", borderRadius: 10,
+                      background: isSelected ? "var(--accent-soft)" : "var(--bg-2)",
+                      border: `1px solid ${isSelected ? "var(--accent-line)" : "var(--line)"}`,
+                      color: isDisabled ? "var(--fg-3)" : "var(--fg-0)",
+                      opacity: isDisabled ? 0.5 : 1,
+                    }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {it.name}
+                      </div>
+                      <div style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", marginTop: 2 }}>
+                        {it.cat} · {it.unit}
+                        {isDisabled ? " · já adicionado" : ""}
+                      </div>
+                    </div>
+                    {isSelected && <I.Check size={15} style={{ color: "var(--accent-bright)", flexShrink: 0 }} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </BottomSheet>
+      )}
+    </>
+  );
+}
+
 Object.assign(window, {
   useIsMobile, MOBILE_QUERY,
   MobilePage, MobileScroll, MobileBottomBar, MSectionLabel,
   SegTabs, StatStrip, MobileCard, MBadge,
-  BottomSheet, FullSheet, Stepper, MField, MPrimaryButton, MSearch,
+  BottomSheet, FullSheet, Stepper, MField, MPrimaryButton, MSearch, MStockPicker,
   mInput, mStep, mBigStep,
 });

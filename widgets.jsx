@@ -246,6 +246,34 @@ function isNonCmvMovement(mv) {
   return NON_CMV_REFERENCE_TYPES.includes(mv?.referenceType);
 }
 
+// Destino/origem de uma movimentação, para os históricos de estoque.
+// Movimento de produção e de transferência da rede NÃO têm operation_id — a
+// coluna "Operação" ficava "—" e o insumo parecia ter sumido sem destino.
+// Isto complementa a operação, não substitui: quando os dois existem, a UI
+// mostra os dois.
+const MOVEMENT_ORIGIN_META = {
+  production_order:        { label: "Produção",       tone: "info",    hint: "Insumo enviado para produção/porcionamento" },
+  supply_transfer:         { label: "Rede",           tone: "info",    hint: "Transferência da rede de suprimentos" },
+  supply_transfer_kitchen: { label: "Rede · cozinha", tone: "warn",    hint: "Recebido da rede direto na cozinha (consumo imediato)" },
+  closing_count:           { label: "Inventário",     tone: "neutral", hint: "Ajuste de contagem física" },
+  kitchen_request:         { label: "Requisição",     tone: "neutral", hint: "Baixa por requisição da cozinha" },
+};
+function movementOrigin(mv) {
+  return MOVEMENT_ORIGIN_META[mv?.referenceType] || null;
+}
+
+// Pílula compacta do destino — usada ao lado do nome da operação nos históricos.
+function MovementOriginBadge({ mv, style }) {
+  const o = movementOrigin(mv);
+  if (!o) return null;
+  return (
+    <span className="badge" data-tone={o.tone} data-flat title={o.hint}
+          style={{ whiteSpace: "nowrap", ...style }}>
+      {o.label}
+    </span>
+  );
+}
+
 // Aplica uma movimentação no item:
 //   deltaQty > 0  → entrada (substitui o custo do insumo pelo da última compra)
 //   deltaQty < 0  → saída
@@ -599,5 +627,6 @@ Object.assign(window, {
   Modal, ConfirmDialog, FormRow, SummaryStat, notImplemented, PendingFeature, PageLoading,
   parseQtyText, findStockItemByName, computeStockStatus, applyStockMovement,
   isNonCmvMovement, NON_CMV_REFERENCE_TYPES,
+  movementOrigin, MOVEMENT_ORIGIN_META, MovementOriginBadge,
   pendingEntryItems, PendingEntryModal, PendingEntryAlert,
 });

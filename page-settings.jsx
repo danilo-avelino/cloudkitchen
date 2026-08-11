@@ -658,7 +658,7 @@ const USER_MODULES = [
   { id: "dashboard", label: "Dashboard"        },
   { id: "stock",     label: "Estoque"          },
   { id: "production", label: "Produção"        },
-  { id: "supply",     label: "Suprimentos"     },
+  { id: "supply",     label: "Cadeia de suprimentos" },
   { id: "distribution", label: "Central de Distribuição" },
   { id: "recipes",   label: "Fichas técnicas"  },
   { id: "revenue",   label: "Faturamento"      },

@@ -7,7 +7,7 @@ const _stRoles = ["Super Admin", "Gestor de marca", "Operador cozinha", "Estoqui
 const _stRoleToDb = { "Super Admin": "owner", "Gestor de marca": "manager", "Operador cozinha": "kitchen", "Estoquista": "stock", "Contador": "accountant", "Visualização": "viewer" };
 const _ST_MODULES = [
   { id: "dashboard", label: "Dashboard" }, { id: "stock", label: "Estoque" }, { id: "production", label: "Produção" },
-  { id: "supply", label: "Suprimentos" }, { id: "distribution", label: "Central" }, { id: "recipes", label: "Fichas técnicas" },
+  { id: "supply", label: "Cadeia de suprimentos" }, { id: "distribution", label: "Central" }, { id: "recipes", label: "Fichas técnicas" },
   { id: "revenue", label: "Faturamento" }, { id: "crm", label: "CRM" }, { id: "requests", label: "Requisições" },
   { id: "purchases", label: "Compras" }, { id: "cmv", label: "CMV & margem" }, { id: "finance", label: "Financeiro" },
   { id: "dre", label: "DRE & Fechamento" }, { id: "settings", label: "Configurações" },

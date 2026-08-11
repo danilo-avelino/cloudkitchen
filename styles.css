@@ -47,25 +47,31 @@
 }
 
 [data-theme="light"] {
-  --bg-0: #f5f6f7;
-  --bg-1: #ffffff;
-  --bg-2: #fafbfc;
-  --bg-3: #f0f2f4;
-  --bg-hover: #f3f5f7;
-  --line: #e3e6ea;
-  --line-soft: #ecedf0;
-  --line-strong: #d4d8dd;
+  /* Fundos suavizados: sem branco puro, leve tom cinza-azulado (coeso com o accent
+     da baleia) pra reduzir o brilho/ofuscamento sem perder a hierarquia (cards mais
+     claros que o fundo) nem o contraste do texto. */
+  --bg-0: #98a4b3;   /* fundo do conteúdo da página */
+  --bg-1: #a8b3c1;   /* cards, sidebar, topbar */
+  --bg-2: #9fabba;   /* inputs / superfícies sutis */
+  --bg-3: #8b98a9;   /* hover / barras */
+  --bg-hover: #9aa6b5;
+  --line: #7c8b9d;
+  --line-soft: #96a3b3;
+  --line-strong: #6a7889;
 
-  --fg-0: #0a0c0f;
-  --fg-1: #2a2f35;
-  --fg-2: #5a6068;
-  --fg-3: #8a9098;
-  --fg-4: #b0b6bc;
+  /* Fundo mais fechado → texto secundário/muted também escurece pra manter leitura. */
+  --fg-0: #0c1116;
+  --fg-1: #202832;
+  --fg-2: #3b4550;
+  --fg-3: #505b68;
+  --fg-4: #66727f;
 
-  --accent: #1a4d3a;
-  --accent-bright: #1a6d4a;
-  --accent-soft: rgba(26, 109, 74, 0.10);
-  --accent-line: rgba(26, 109, 74, 0.28);
+  /* Modo claro usa o azul da logo (a baleia ≈ #2E97B8); accent-bright é aprofundado
+     para o texto branco dos botões manter contraste AA. */
+  --accent: #145268;
+  --accent-bright: #1b7c9e;
+  --accent-soft: rgba(46, 151, 184, 0.12);
+  --accent-line: rgba(46, 151, 184, 0.30);
   --accent-fg: #ffffff;
 
   --ok: #1a6d4a;

@@ -1,4 +1,4 @@
-// page-mobile-supply.jsx — Suprimentos no celular (≤480px), lado MEMBRO da rede.
+// page-mobile-supply.jsx — Cadeia de suprimentos no celular (≤480px), lado MEMBRO da rede.
 // Read-focused: código de suprimento, convites (aceitar/recusar), transferências e
 // pedidos com status. Criar pedido / receber transferência (mexe em estoque) ficam
 // no desktop. Reaproveita dbSupply* do desktop (page-supply.jsx). Só online.
@@ -48,7 +48,7 @@ function MobileSupply() {
 
   if (loading) return <PageLoading label="Carregando suprimentos…" variant="table" />;
   if (!dbStatus.isOnline || !tid) {
-    return <MobilePage><div style={{ padding: 24 }}><div style={{ fontSize: 12.5, color: "var(--warn)", padding: "12px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 8 }}>Suprimentos só fica disponível com Supabase online.</div></div></MobilePage>;
+    return <MobilePage><div style={{ padding: 24 }}><div style={{ fontSize: 12.5, color: "var(--warn)", padding: "12px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 8 }}>Cadeia de suprimentos só fica disponível com Supabase online.</div></div></MobilePage>;
   }
 
   const asMember = overview?.asMember || [];
@@ -98,18 +98,23 @@ function MobileSupply() {
           <SegTabs value={view} onChange={setView} options={[
             { id: "transfers", label: "Transferências", count: toReceive || null, tone: "warn" },
             { id: "requests", label: "Pedidos", count: netRequests.length || null },
+            { id: "divergences", label: "Divergências" },
           ]} />
           <MobileScroll style={{ padding: "12px 14px" }}>
-            {view === "transfers" ? (
+            {view === "transfers" && (
               netTransfers.length === 0 ? <_SpEmpty>Sem transferências.</_SpEmpty> :
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {netTransfers.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map((t) => <SupTransferCard key={t.id} t={t} incoming={t.toTenantId === tid} />)}
                 </div>
-            ) : (
+            )}
+            {view === "requests" && (
               netRequests.length === 0 ? <_SpEmpty>Nenhum pedido.</_SpEmpty> :
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {netRequests.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).map((r) => <SupRequestCard key={r.id} r={r} />)}
                 </div>
+            )}
+            {view === "divergences" && (
+              <MobileSupplyDivergences tid={tid} scopeCentralId={net.centralId} />
             )}
           </MobileScroll>
         </>
@@ -154,4 +159,106 @@ function SupRequestCard({ r }) {
 
 function _SpEmpty({ children }) { return <div style={{ textAlign: "center", padding: "32px 12px", color: "var(--fg-3)", fontSize: 13 }}>{children}</div>; }
 
+// ---------------------------------------------------------------------------
+// Divergências de recebimento (compartilhada com a Central no celular).
+// Read-only: relatar divergência é no desktop, na confirmação do recebimento.
+// ---------------------------------------------------------------------------
+function MobileSupplyDivergences({ tid, scopeCentralId = null }) {
+  const [data, setData] = useState(null);
+  const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await dbSupplyDivergences(tid);
+      if (!cancelled) setData(res?.data || { lines: [], receipts: [] });
+    })();
+    return () => { cancelled = true; };
+  }, [tid]);
+
+  if (data === null) return <_SpEmpty>Carregando divergências…</_SpEmpty>;
+
+  const inScope = (r) => !scopeCentralId || r.centralId === scopeCentralId;
+  const monthOf = (iso) => (iso ? String(iso).slice(0, 7) : "");
+  const monthLabel = (key) => {
+    const [y, m] = key.split("-");
+    return new Date(Number(y), Number(m) - 1, 1)
+      .toLocaleDateString("pt-BR", { month: "short", year: "numeric" }).replace(".", "");
+  };
+
+  const allReceipts = data.receipts.filter(inScope);
+  const months = Array.from(new Set(allReceipts.map((r) => monthOf(r.receivedAt)).filter(Boolean)));
+  const nowKey = monthOf(new Date().toISOString());
+  if (!months.includes(nowKey)) months.push(nowKey);
+  months.sort().reverse();
+
+  const inPeriod = (r) => month === "all" || monthOf(r.receivedAt) === month;
+  const receipts = allReceipts.filter(inPeriod);
+  const lines = data.lines.filter((l) => inScope(l) && inPeriod(l))
+    .sort((a, b) => Math.abs(b.deltaValue) - Math.abs(a.deltaValue));
+
+  const sentValue = receipts.reduce((s, r) => s + r.sentValue, 0);
+  const missing = lines.filter((l) => l.deltaQty < 0).reduce((s, l) => s + l.deltaValue, 0);
+  const surplus = lines.filter((l) => l.deltaQty > 0).reduce((s, l) => s + l.deltaValue, 0);
+  const netValue = missing + surplus;
+  const pct = sentValue > 0 ? (Math.abs(netValue) / sentValue) * 100 : 0;
+
+  return (
+    <div>
+      <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ ...mInput, height: 40, marginBottom: 12 }}>
+        <option value="all">Todos os períodos</option>
+        {months.map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
+      </select>
+
+      <div style={{ margin: "0 -14px" }}>
+        <StatStrip stats={[
+          { label: "% divergência", value: `${pct.toFixed(2).replace(".", ",")}%`, tone: pct >= 3 ? "crit" : pct >= 1 ? "warn" : "ok" },
+          { label: "Impacto", value: _spBRL(netValue), tone: netValue < 0 ? "crit" : netValue > 0 ? "warn" : "ok" },
+          { label: "Faltas", value: _spBRL(missing), tone: missing < 0 ? "crit" : "ok" },
+          { label: "Sobras", value: _spBRL(surplus), tone: surplus > 0 ? "warn" : "ok" },
+          { label: "Itens", value: String(lines.length), sub: `${receipts.length} recebimentos` },
+          { label: "Enviado", value: _spBRL(sentValue) },
+        ]} />
+      </div>
+
+      {lines.length === 0 ? (
+        <_SpEmpty>
+          {receipts.length === 0
+            ? `Nenhum recebimento ${month === "all" ? "na rede" : `em ${monthLabel(month)}`}.`
+            : "Nenhuma divergência no período."}
+        </_SpEmpty>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+          {lines.map((l) => (
+            <div key={l.id} style={{
+              padding: "12px", borderRadius: 10, background: "var(--bg-2)",
+              border: `1px solid ${l.deltaQty < 0 ? "var(--crit-line)" : "var(--warn-line)"}`,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: "var(--fg-0)", fontWeight: 500 }}>{l.name}</span>
+                <MBadge tone={l.deltaQty < 0 ? "crit" : "warn"}>{l.deltaQty < 0 ? "Falta" : "Sobra"}</MBadge>
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 4 }}>
+                {l.fromName || "—"} → {l.toName || "—"} · {l.code} · {_spDate(l.receivedAt)}
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 12, fontFamily: "var(--mono)" }}>
+                <span style={{ color: "var(--fg-2)" }}>
+                  {l.sentQty.toLocaleString("pt-BR")} → {l.receivedQty.toLocaleString("pt-BR")} {l.unit}
+                </span>
+                <span style={{ color: l.deltaValue < 0 ? "var(--crit)" : "var(--warn)", fontWeight: 600 }}>{_spBRL(l.deltaValue)}</span>
+              </div>
+              {(l.reason || l.notes) && (
+                <div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 5 }}>
+                  {_supReasonLabel(l.reason)}{l.notes ? ` · ${l.notes}` : ""}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 window.MobileSupply = MobileSupply;
+window.MobileSupplyDivergences = MobileSupplyDivergences;

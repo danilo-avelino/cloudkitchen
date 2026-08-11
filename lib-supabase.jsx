@@ -494,6 +494,13 @@ function mapStockItemFromDb(row) {
     itemKind:    row.item_kind || "raw",
     portionQty:  row.portion_qty != null ? Number(row.portion_qty) : null,
     portionUnit: row.portion_unit || null,
+    // Item do catálogo de abastecimento de uma central: mín/máx/auto são geridos
+    // por ela (o banco bloqueia a edição local — ver tg_stock_items_central_guard).
+    managedByCentralId: row.managed_by_central_id || null,
+    // Última escolha de "direto na cozinha" no recebimento da rede — pré-marca
+    // os próximos recebimentos deste insumo.
+    autoDirectKitchen: row.auto_direct_kitchen === true,
+    directKitchenOperationId: row.direct_kitchen_operation_id || null,
     alloc,
     notes:     row.notes,
   };
@@ -522,7 +529,9 @@ async function dbListStockItems(tenantId) {
       .select(`
         id, code, name, unit, unit_cost, current_qty, reorder_point,
         max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
-        item_kind, portion_qty, portion_unit,
+        item_kind, portion_qty, portion_unit, managed_by_central_id,
+        auto_direct_kitchen, direct_kitchen_operation_id,
+    auto_direct_kitchen, direct_kitchen_operation_id,
         category_id, supplier_id,
         category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
         supplier:suppliers(id, name),
@@ -591,7 +600,8 @@ async function dbUpdateStockItem(id, patch) {
   const { data, error } = await _client.from("stock_items").update(update).eq("id", id).select(`
     id, code, name, unit, unit_cost, current_qty, reorder_point,
     max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
-    item_kind, portion_qty, portion_unit,
+    item_kind, portion_qty, portion_unit, managed_by_central_id,
+    auto_direct_kitchen, direct_kitchen_operation_id,
     category_id, supplier_id,
     category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
     supplier:suppliers(id, name),
@@ -3254,7 +3264,7 @@ async function dbCrmWhatsappStatus(tenantId) {
 // =====================================================================
 const _PROD_ORDER_FIELDS = `
   id, code, status, total_input_cost, input_weight, output_weight, yield_pct, waste_qty,
-  notes, created_by, issued_at, issued_by, completed_at, completed_by, created_at,
+  notes, created_by, separated_at, separated_by, issued_at, issued_by, completed_at, completed_by, created_at,
   inputs:production_order_inputs(id, stock_item_id, display_name, qty, unit, unit_cost, line_cost, sort_order),
   outputs:production_order_outputs(id, stock_item_id, display_name, expected_qty, returned_qty, weight_qty, cost_share, unit_cost, sort_order)
 `;
@@ -3285,6 +3295,8 @@ function mapProductionOrderFromDb(row) {
     wasteQty:     row.waste_qty     != null ? Number(row.waste_qty)     : null,
     notes:  row.notes,
     createdAt:   row.created_at,
+    // 'draft' + separatedAt = separada (aguardando entrega no módulo Requisições)
+    separatedAt: row.separated_at || null,
     issuedAt:    row.issued_at,
     completedAt: row.completed_at,
     inputs, outputs,
@@ -3292,6 +3304,61 @@ function mapProductionOrderFromDb(row) {
     estCost: row.total_input_cost != null
       ? Number(row.total_input_cost)
       : inputs.reduce((s, it) => s + it.lineCost, 0),
+  };
+}
+
+// Peso de uma linha em kg. Espelha app.production_weight_kg + o fallback do
+// trigger: unidade não-mássica pega o peso de 1 unidade no cadastro do item
+// (portionQty/portionUnit). Devolve null quando não dá para saber o peso.
+function _prodLineWeightKg(qty, unit, item) {
+  const q = Number(qty) || 0;
+  const u = String(unit || "").toLowerCase();
+  if (u === "kg") return q;
+  if (u === "g")  return q / 1000;
+  const pq = item && item.portionQty != null ? Number(item.portionQty) : null;
+  if (!(pq > 0)) return null;
+  return String(item.portionUnit || "kg").toLowerCase() === "g" ? (q * pq) / 1000 : q * pq;
+}
+
+// Peso/aproveitamento/desperdício recalculados com o peso ATUAL do estoque, em
+// vez do snapshot que o trigger congelou no draft → issued.
+//
+// Custo continua congelado (é preço, muda com o tempo e tem que refletir o dia
+// da produção), mas peso é atributo físico do item: cadastrar depois o peso de
+// um insumo em "un" tem que iluminar as produções que já aconteceram, não só as
+// próximas. Sem isso, ordem emitida antes do cadastro fica "—" para sempre.
+//
+// Quando o peso atual não resolve (item sem portionQty), cai no valor gravado —
+// nunca fica pior do que o banco entregou.
+function prodOrderWithLiveWeights(order, stockItems) {
+  if (!order) return order;
+  const byId = new Map((stockItems || []).map((i) => [i.id, i]));
+
+  let inputWeight = 0;
+  for (const l of order.inputs || []) {
+    const w = _prodLineWeightKg(l.qty, l.unit, byId.get(l.itemId));
+    if (w == null) { inputWeight = null; break; }
+    inputWeight += w;
+  }
+  if (inputWeight == null || inputWeight <= 0) inputWeight = order.inputWeight;
+
+  // Saída é sempre em porções: o peso vem da porção atual do transformado.
+  let outputWeight = 0;
+  for (const l of order.outputs || []) {
+    if (!(l.returnedQty > 0)) continue;
+    const w = _prodLineWeightKg(l.returnedQty, "un", byId.get(l.itemId));
+    if (w == null) { outputWeight = null; break; }
+    outputWeight += w;
+  }
+  if (outputWeight == null || outputWeight <= 0) outputWeight = order.outputWeight;
+
+  // Rendimento só existe na ordem devolvida — antes disso não há o que comparar.
+  const canYield = order.status === "completed" && inputWeight > 0 && outputWeight != null;
+  return {
+    ...order,
+    inputWeight, outputWeight,
+    yieldPct: canYield ? Math.round((outputWeight / inputWeight) * 10000) / 100 : null,
+    wasteQty: canYield ? Math.max(inputWeight - outputWeight, 0) : null,
   };
 }
 
@@ -3306,17 +3373,45 @@ async function dbListProductionOrders(tenantId, { limit = 200 } = {}) {
   return { data: (data || []).map(mapProductionOrderFromDb), source: "db", error: null };
 }
 
+// Maior sequencial PRD-#### já usado pelo tenant, direto do banco.
+// A lista carregada na tela envelhece (outra aba, outro usuário, ou simplesmente
+// mais de uma solicitação antes do reload), e o código calculado a partir dela
+// colide com production_orders_tenant_id_code_key.
+async function _maxProductionCodeSeq(tenantId) {
+  const { data, error } = await _client.from("production_orders")
+    .select("code").eq("tenant_id", tenantId).like("code", "PRD-%")
+    .order("created_at", { ascending: false }).limit(1000);
+  if (error) return 0;
+  let max = 0;
+  for (const r of data || []) {
+    const m = /^PRD-(\d+)$/.exec(r.code || "");
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return max;
+}
+
 // Cria ordem em rascunho. inputs: [{itemId, name, qty, unit}]; outputs: [{itemId, name, expectedQty}]
 async function dbInsertProductionOrder(tenantId, draft) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
   const { data: { session } = {} } = await _client.auth.getSession();
-  const { data: row, error } = await _client.from("production_orders").insert({
+
+  // Insere o cabeçalho tentando de novo quando o código já existe. Duas pessoas
+  // solicitando ao mesmo tempo derivam o mesmo número — o unique é a fonte da
+  // verdade, então a colisão é resolvida aqui em vez de estourar na tela.
+  const insertHeader = async (code) => _client.from("production_orders").insert({
     tenant_id:  tenantId,
-    code:       draft.code || null,
+    code:       code || null,
     status:     "draft",
     notes:      draft.notes || null,
     created_by: session?.user?.id || null,
   }).select("id, code").single();
+
+  const isCodeClash = (e) => e?.code === "23505" && /tenant_id_code_key/.test(e?.message || "");
+  let { data: row, error } = await insertHeader(draft.code);
+  for (let attempt = 0; isCodeClash(error) && attempt < 5; attempt++) {
+    const next = (await _maxProductionCodeSeq(tenantId)) + 1 + attempt;
+    ({ data: row, error } = await insertHeader(`PRD-${String(next).padStart(4, "0")}`));
+  }
   if (error) return { data: null, error };
 
   const inputRows = (draft.inputs || []).map((it, i) => ({
@@ -3345,35 +3440,112 @@ async function dbInsertProductionOrder(tenantId, draft) {
   return { data: row, error: null };
 }
 
-// Substitui as linhas de uma ordem em rascunho (edição do draft).
-async function dbReplaceProductionOrderLines(orderId, inputs, outputs, header = {}) {
+// Reescreve os insumos de uma ordem em rascunho — é o que o separador faz quando
+// o estoque não cobre o pedido. O trigger tg_check_production_input só aceita
+// alteração com a ordem em 'draft', então a janela é exatamente até a entrega.
+//
+// O rendimento esperado acompanha: se saiu 2/3 do insumo, esperar 2/3 das
+// porções. A razão usada é a do insumo MAIS LIMITANTE entre os que vieram da
+// solicitação original — é ele que trava o lote na prática. Insumo adicionado na
+// separação (substituição) não entra na conta: não há original com que comparar.
+async function dbReplaceProductionOrderInputs(orderId, inputs) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
-  if (Object.prototype.hasOwnProperty.call(header, "notes")) {
-    const { error: hErr } = await _client.from("production_orders")
-      .update({ notes: header.notes ?? null }).eq("id", orderId);
-    if (hErr) return { error: hErr };
+
+  const { data: order, error: oErr } = await _client.from("production_orders")
+    .select("id, status").eq("id", orderId).maybeSingle();
+  if (oErr) return { error: oErr };
+  if (!order) return { error: new Error("Ordem não encontrada (recarregue a página)") };
+  if (order.status !== "draft") {
+    return { error: new Error(`A ordem já está "${order.status}" — insumos só podem ser alterados antes da entrega`) };
   }
-  const delIn = await _client.from("production_order_inputs").delete().eq("order_id", orderId);
-  if (delIn.error) return { error: delIn.error };
-  const delOut = await _client.from("production_order_outputs").delete().eq("order_id", orderId);
-  if (delOut.error) return { error: delOut.error };
-  const inputRows = (inputs || []).map((it, i) => ({
-    order_id: orderId, stock_item_id: it.itemId, display_name: it.name,
-    qty: Number(it.qty) || 0, unit: it.unit || "un", sort_order: i,
-  }));
-  if (inputRows.length > 0) {
-    const { error } = await _client.from("production_order_inputs").insert(inputRows);
-    if (error) return { error };
+
+  const rows = (inputs || [])
+    .filter((it) => it.itemId && Number(it.qty) > 0)
+    .map((it, i) => ({
+      order_id:      orderId,
+      stock_item_id: it.itemId,
+      display_name:  it.name,
+      qty:           Number(it.qty),
+      unit:          it.unit || "un",
+      sort_order:    i,
+    }));
+  if (rows.length === 0) return { error: new Error("A ordem precisa de pelo menos um insumo") };
+
+  // Razão do insumo mais limitante, medida contra as quantidades atuais.
+  const { data: before, error: bErr } = await _client.from("production_order_inputs")
+    .select("stock_item_id, qty").eq("order_id", orderId);
+  if (bErr) return { error: bErr };
+  let ratio = null;
+  for (const prev of before || []) {
+    const now = rows.find((r) => r.stock_item_id === prev.stock_item_id);
+    const prevQty = Number(prev.qty) || 0;
+    if (prevQty <= 0) continue;
+    const r = (now ? now.qty : 0) / prevQty;
+    ratio = ratio == null ? r : Math.min(ratio, r);
   }
-  const outputRows = (outputs || []).map((it, i) => ({
-    order_id: orderId, stock_item_id: it.itemId, display_name: it.name,
-    expected_qty: it.expectedQty != null && Number(it.expectedQty) > 0 ? Number(it.expectedQty) : null,
-    sort_order: i,
-  }));
-  if (outputRows.length > 0) {
-    const { error } = await _client.from("production_order_outputs").insert(outputRows);
-    if (error) return { error };
+
+  const del = await _client.from("production_order_inputs").delete().eq("order_id", orderId);
+  if (del.error) return { error: del.error };
+  const ins = await _client.from("production_order_inputs").insert(rows);
+  if (ins.error) return { error: ins.error };
+
+  // Reajusta o esperado só quando a razão mudou de verdade.
+  if (ratio != null && ratio > 0 && Math.abs(ratio - 1) > 0.0001) {
+    const { data: outs } = await _client.from("production_order_outputs")
+      .select("id, expected_qty").eq("order_id", orderId);
+    for (const o of outs || []) {
+      if (o.expected_qty == null) continue;
+      await _client.from("production_order_outputs")
+        .update({ expected_qty: Number((Number(o.expected_qty) * ratio).toFixed(4)) })
+        .eq("id", o.id);
+    }
   }
+  return { error: null, ratio };
+}
+
+// Um UPDATE que não casa nenhuma linha é ambíguo: pode ser corrida de status ou
+// RLS barrando a escrita. Quem separa está no módulo Requisições, mas escreve em
+// production_orders (RLS: can_access_module 'production'), então a segunda
+// hipótese é real. Relê a ordem para dizer qual das duas foi.
+async function _explainProductionNoop(orderId, expected) {
+  const { data } = await _client.from("production_orders")
+    .select("id, status, separated_at").eq("id", orderId).maybeSingle();
+  if (!data) return new Error("Ordem não encontrada (recarregue a página)");
+  if (data.status !== expected.status) {
+    return new Error(`A ordem já está "${data.status}" — recarregue a página`);
+  }
+  if (expected.separated === true && !data.separated_at) {
+    return new Error("A ordem não está separada (recarregue a página)");
+  }
+  if (expected.separated === false && data.separated_at) {
+    return new Error("A ordem já foi separada (recarregue a página)");
+  }
+  // Estado bate com o esperado e mesmo assim nada mudou: falta permissão.
+  return new Error("Sem permissão para alterar esta ordem — o acesso ao módulo Produção é necessário para separar/entregar");
+}
+
+// Marca/desmarca a ordem como separada. Não mexe em status nem em estoque — é
+// só o carimbo intermediário da fila de Requisições (pendente → separada →
+// entregue). A baixa continua acontecendo na entrega (draft → issued).
+async function dbSeparateProductionOrder(orderId, userId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("production_orders")
+    .update({ separated_at: new Date().toISOString(), separated_by: userId || null })
+    .eq("id", orderId).eq("status", "draft").is("separated_at", null)
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: await _explainProductionNoop(orderId, { status: "draft", separated: false }) };
+  return { error: null };
+}
+
+async function dbUnseparateProductionOrder(orderId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { data, error } = await _client.from("production_orders")
+    .update({ separated_at: null, separated_by: null })
+    .eq("id", orderId).eq("status", "draft").not("separated_at", "is", null)
+    .select("id").maybeSingle();
+  if (error) return { error };
+  if (!data) return { error: await _explainProductionNoop(orderId, { status: "draft", separated: true }) };
   return { error: null };
 }
 
@@ -3385,29 +3557,34 @@ async function dbIssueProductionOrder(orderId, userId) {
     .eq("id", orderId).eq("status", "draft")
     .select("id").maybeSingle();
   if (error) return { error };
-  if (!data) return { error: new Error("Ordem não está mais em rascunho (recarregue a página)") };
+  if (!data) return { error: await _explainProductionNoop(orderId, { status: "draft" }) };
   return { error: null };
 }
 
-// issued → completed (devolução). A ordem de saída não pré-define transformados:
-// as saídas são criadas AQUI, com as porções devolvidas, e o trigger calcula
-// rateio por peso, movimentos de entrada e aproveitamento.
-// outputs: [{itemId, name, returnedQty}]
+// issued → completed (devolução). As saídas são reescritas AQUI com as porções
+// devolvidas, e o trigger calcula rateio por peso, movimentos de entrada e
+// aproveitamento. O que a receita mandava produzir volta em expectedQty e é
+// regravado — inclusive nas linhas que não voltaram (returned 0), senão a ordem
+// concluída perderia o denominador da variância.
+// outputs: [{itemId, name, returnedQty, expectedQty?}]
 async function dbCompleteProductionOrder(orderId, outputs, userId) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
   // Substitui as saídas (cobre re-tentativa e rascunhos antigos com saídas pré-definidas)
   const del = await _client.from("production_order_outputs").delete().eq("order_id", orderId);
   if (del.error) return { error: del.error };
   const rows = (outputs || [])
-    .filter((o) => Number(o.returnedQty) > 0)
+    .filter((o) => Number(o.returnedQty) > 0 || Number(o.expectedQty) > 0)
     .map((o, i) => ({
       order_id:      orderId,
       stock_item_id: o.itemId,
       display_name:  o.name,
-      returned_qty:  Number(o.returnedQty),
+      expected_qty:  Number(o.expectedQty) > 0 ? Number(o.expectedQty) : null,
+      returned_qty:  Number(o.returnedQty) || 0,
       sort_order:    i,
     }));
-  if (rows.length === 0) return { error: new Error("Informe as porções devolvidas de pelo menos um transformado") };
+  if (!rows.some((r) => r.returned_qty > 0)) {
+    return { error: new Error("Informe as porções devolvidas de pelo menos um transformado") };
+  }
   const ins = await _client.from("production_order_outputs").insert(rows);
   if (ins.error) return { error: ins.error };
 
@@ -3418,6 +3595,18 @@ async function dbCompleteProductionOrder(orderId, outputs, userId) {
   if (error) return { error };
   if (!data) return { error: new Error("Ordem não está mais aguardando retorno (recarregue a página)") };
   return { error: null };
+}
+
+// Quantas solicitações da produção estão na fila de separação (draft ainda sem
+// carimbo de separada). Alimenta o alerta de Requisições no menu junto com as
+// requisições de cozinha pendentes. Só conta — não traz linha nenhuma.
+async function dbCountProductionRequestsPending(tenantId) {
+  if (!isDbOnline() || !_client) return { count: 0, error: null };
+  const { count, error } = await _client.from("production_orders")
+    .select("id", { count: "exact", head: true })
+    .eq("tenant_id", tenantId).eq("status", "draft").is("separated_at", null);
+  if (error) return { count: 0, error };
+  return { count: count || 0, error: null };
 }
 
 // Ordens aguardando retorno da produção (etapa crítica de desvio) — alimenta
@@ -3453,6 +3642,15 @@ async function dbCancelProductionOrder(orderId) {
 
 async function dbDeleteProductionOrder(orderId) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  // Remove os filhos ANTES da ordem. Se deixássemos o ON DELETE CASCADE cuidar disso,
+  // o trigger BEFORE DELETE de production_order_inputs/outputs buscaria a ordem-pai —
+  // que nesse ponto do cascade já foi removida — e levantaria "ordem não encontrada".
+  // Excluindo os filhos com a ordem (rascunho/cancelada) ainda presente, o trigger
+  // encontra a ordem e permite; depois a ordem sai sem disparar cascade.
+  const dIn = await _client.from("production_order_inputs").delete().eq("order_id", orderId);
+  if (dIn.error) return { error: dIn.error };
+  const dOut = await _client.from("production_order_outputs").delete().eq("order_id", orderId);
+  if (dOut.error) return { error: dOut.error };
   const { data, error } = await _client.from("production_orders")
     .delete().eq("id", orderId).select("id");
   if (error) return { error };
@@ -3616,9 +3814,11 @@ async function dbSupplyCatalog(viewerId, supplierId) {
 const _SUPPLY_TRANSFER_FIELDS = `
   id, central_tenant_id, from_tenant_id, to_tenant_id, from_name, to_name, code, status,
   request_id, direct_to_kitchen, receive_operation_id, total_value, notes,
+  received_value, divergence_value, divergence_notes,
   created_at, sent_at, received_at,
   items:supply_transfer_items(id, from_item_id, to_item_id, display_name, item_kind, category_name,
-    qty, unit, unit_cost, portion_qty, portion_unit, sort_order)
+    qty, unit, unit_cost, portion_qty, portion_unit, sort_order,
+    direct_to_kitchen, receive_operation_id, received_qty, divergence_reason)
 `;
 
 function mapSupplyTransferFromDb(row) {
@@ -3630,6 +3830,11 @@ function mapSupplyTransferFromDb(row) {
       qty: Number(it.qty) || 0, unit: it.unit, unitCost: Number(it.unit_cost) || 0,
       portionQty: it.portion_qty != null ? Number(it.portion_qty) : null,
       portionUnit: it.portion_unit,
+      directToKitchen: it.direct_to_kitchen === true,
+      receiveOperationId: it.receive_operation_id || null,
+      // null = não conferido no recebimento (assume o enviado)
+      receivedQty: it.received_qty != null ? Number(it.received_qty) : null,
+      divergenceReason: it.divergence_reason || null,
     }));
   return {
     id: row.id,
@@ -3641,9 +3846,15 @@ function mapSupplyTransferFromDb(row) {
     code: row.code || row.id?.slice(0, 8),
     status: row.status,
     requestId: row.request_id,
-    directToKitchen: !!row.direct_to_kitchen,
+    // Flag da transferência (linhas antigas) OU qualquer item marcado — usado só
+    // pra exibição; o efeito no recebimento é decidido item a item.
+    directToKitchen: !!row.direct_to_kitchen || items.some((it) => it.directToKitchen),
     receiveOperationId: row.receive_operation_id,
     totalValue: row.total_value != null ? Number(row.total_value) : null,
+    // Valor conferido no recebimento — é o que foi cobrado (ledger/financeiro).
+    receivedValue: row.received_value != null ? Number(row.received_value) : null,
+    divergenceValue: Number(row.divergence_value) || 0,
+    divergenceNotes: row.divergence_notes || null,
     notes: row.notes,
     createdAt: row.created_at, sentAt: row.sent_at, receivedAt: row.received_at,
     items,
@@ -3705,33 +3916,96 @@ async function dbSupplySendTransfer(id, userId) {
   return { error: null };
 }
 
-// sent → received. overrides: [{fromItemId, toItemId}] — mapeamentos escolhidos
-// pelo destinatário (viram supply_item_links antes da confirmação).
-async function dbSupplyReceiveTransfer(transfer, { directToKitchen, operationId, overrides, userId }) {
+// sent → received. O destino de cada item é resolvido pelo trigger do banco
+// (vínculo memorizado → equivalente por nome+unidade → cria o item); o
+// destinatário não escolhe. items: [{ itemId, direct, operationId, receivedQty, reason }].
+// O "direto na cozinha" é linha a linha e fica memorizado no item do estoque;
+// `receivedQty` é a conferência (null = recebeu o que foi enviado) e o que
+// diferir vira divergência — a entrada no estoque e a cobrança seguem o que chegou.
+async function dbSupplyReceiveTransfer(transfer, { items, notes } = {}) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
-  for (const ov of overrides || []) {
-    if (!ov.fromItemId || !ov.toItemId) continue;
-    const { error } = await _client.from("supply_item_links").upsert({
-      central_tenant_id: transfer.centralId,
-      from_item_id:      ov.fromItemId,
-      to_tenant_id:      transfer.toTenantId,
-      to_item_id:        ov.toItemId,
-    }, { onConflict: "central_tenant_id,from_item_id,to_tenant_id" });
-    if (error) return { error };
-  }
-  const { data, error } = await _client.from("supply_transfers")
-    .update({
-      status: "received",
-      direct_to_kitchen: !!directToKitchen,
-      receive_operation_id: directToKitchen ? (operationId || null) : null,
-      received_at: new Date().toISOString(),
-      received_by: userId || null,
-    })
-    .eq("id", transfer.id).eq("status", "sent")
-    .select("id").maybeSingle();
-  if (error) return { error };
-  if (!data) return { error: new Error("Transferência não está mais como enviada (recarregue)") };
-  return { error: null };
+  const payload = (items || []).map((it) => ({
+    itemId: it.itemId,
+    direct: !!it.direct,
+    operationId: it.operationId || null,
+    receivedQty: it.receivedQty != null ? String(it.receivedQty) : null,
+    reason: it.reason || null,
+  }));
+  const { error } = await _client.rpc("supply_receive_transfer", {
+    p_transfer: transfer.id, p_items: payload, p_notes: notes || null,
+  });
+  return { error };
+}
+
+// Divergências de recebimento da rede: linhas conferidas com diferença +
+// os recebimentos do período (denominador do % de divergência). Alimenta a
+// aba Divergências da Central e da Cadeia de suprimentos.
+async function dbSupplyDivergences(tenantId, { limit = 3000 } = {}) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const scope = `from_tenant_id.eq.${tenantId},to_tenant_id.eq.${tenantId},central_tenant_id.eq.${tenantId}`;
+  // PostgREST corta em 1000 linhas mesmo com .limit() maior — pagina via .range().
+  const page = async (table, select, only) => {
+    const PAGE = 1000;
+    const rows = [];
+    for (let offset = 0; offset < limit; offset += PAGE) {
+      let q = _client.from(table).select(select).or(scope);
+      if (only) q = q.eq(only[0], only[1]);
+      const { data, error } = await q
+        .order("received_at", { ascending: false })
+        .range(offset, Math.min(offset + PAGE, limit) - 1);
+      if (error) return { rows: null, error };
+      rows.push(...(data || []));
+      if (!data || data.length < Math.min(PAGE, limit - offset)) break;
+    }
+    return { rows, error: null };
+  };
+
+  const [lineRes, recRes] = await Promise.all([
+    page("supply_divergence_lines", "*"),
+    page("supply_transfers",
+      "id, code, central_tenant_id, from_tenant_id, to_tenant_id, from_name, to_name, received_at, total_value, received_value, divergence_value",
+      ["status", "received"]),
+  ]);
+  if (lineRes.error) return { data: null, error: lineRes.error };
+  if (recRes.error)  return { data: null, error: recRes.error };
+
+  return {
+    data: {
+      lines: (lineRes.rows || []).map((r) => ({
+        id: r.item_id, transferId: r.transfer_id, code: r.code,
+        centralId: r.central_tenant_id, fromTenantId: r.from_tenant_id, toTenantId: r.to_tenant_id,
+        fromName: r.from_name, toName: r.to_name, receivedAt: r.received_at,
+        name: r.display_name, unit: r.unit,
+        sentQty: Number(r.sent_qty) || 0, receivedQty: Number(r.received_qty) || 0,
+        deltaQty: Number(r.delta_qty) || 0, unitCost: Number(r.unit_cost) || 0,
+        deltaValue: Number(r.delta_value) || 0,
+        reason: r.divergence_reason || null, notes: r.divergence_notes || null,
+      })),
+      receipts: (recRes.rows || []).map((r) => ({
+        id: r.id, code: r.code,
+        centralId: r.central_tenant_id, fromTenantId: r.from_tenant_id, toTenantId: r.to_tenant_id,
+        fromName: r.from_name, toName: r.to_name, receivedAt: r.received_at,
+        sentValue: Number(r.total_value) || 0,
+        receivedValue: r.received_value != null ? Number(r.received_value) : Number(r.total_value) || 0,
+        divergenceValue: Number(r.divergence_value) || 0,
+      })),
+    },
+    error: null,
+  };
+}
+
+// Vínculos "item da central → item daqui" desta rede. Usado no recebimento p/
+// mostrar o destino real (o catálogo da central pode apontar p/ outro insumo).
+async function dbSupplyItemLinks(centralId, toTenantId) {
+  if (!isDbOnline() || !_client) return { data: {}, error: new Error("DB offline") };
+  const { data, error } = await _client.from("supply_item_links")
+    .select("from_item_id, to_item_id")
+    .eq("central_tenant_id", centralId)
+    .eq("to_tenant_id", toTenantId);
+  if (error) return { data: {}, error };
+  const map = {};
+  (data || []).forEach((r) => { map[r.from_item_id] = r.to_item_id; });
+  return { data: map, error: null };
 }
 
 async function dbSupplyCancelTransfer(id) {
@@ -3865,6 +4139,132 @@ async function dbSupplyLedgerAdjust(centralId, tenantId, delta, notes) {
   return { error };
 }
 
+// ---------------------------------------------------------------------
+// Catálogo de abastecimento (cadeia de suprimentos)
+// A central define quais itens cada unidade recebe; o item nasce no estoque
+// da unidade e passa a ser gerido pela central (mín/máx/auto). Tudo cruza
+// tenants — por isso só RPC SECURITY DEFINER, nunca query direta.
+// ---------------------------------------------------------------------
+const _supNum = (v) => (v == null ? null : Number(v));
+
+// Painel de unidades: saúde do estoque, cobertura, gasto e pendências.
+async function dbSupplyUnitsSummary(centralId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.rpc("supply_units_summary", { p_central: centralId });
+  if (error) return { data: null, error };
+  return {
+    data: (data || []).map((r) => ({
+      tenantId: r.unit_tenant_id,
+      name: r.name,
+      items: r.items_count || 0,
+      out: r.out_count || 0,
+      below: r.below_count || 0,
+      ok: r.ok_count || 0,
+      stockValue: Number(r.stock_value) || 0,
+      coverageDays: _supNum(r.coverage_days),
+      soonestDays: _supNum(r.soonest_days),
+      inTransit: r.in_transit || 0,
+      pendingRequests: r.pending_requests || 0,
+      lastTransferAt: r.last_transfer_at,
+      spend30d: Number(r.spend30d) || 0,
+      balance: Number(r.balance) || 0,
+    })),
+    error: null,
+  };
+}
+
+// Catálogo + estoque de uma unidade (visão da central).
+async function dbSupplyUnitAssortment(centralId, unitId) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.rpc("supply_unit_assortment", { p_central: centralId, p_unit: unitId });
+  if (error) return { data: null, error };
+  return {
+    data: (data || []).map((r) => ({
+      unitItemId: r.unit_item_id,
+      centralItemId: r.central_item_id,
+      name: r.name,
+      unit: r.unit,
+      itemKind: r.item_kind,
+      category: r.category_name,
+      isActive: r.is_active !== false,
+      qty: Number(r.current_qty) || 0,
+      reorder: Number(r.reorder_point) || 0,
+      max: _supNum(r.max_qty),
+      autoMinMode: r.auto_min_mode || "off",
+      cost: Number(r.unit_cost) || 0,
+      usage30d: Number(r.usage30d) || 0,
+      inTransit: Number(r.in_transit_qty) || 0,
+      centralQty: Number(r.central_qty) || 0,
+      centralCost: Number(r.central_cost) || 0,
+      lastReceivedAt: r.last_received_at,
+    })),
+    error: null,
+  };
+}
+
+// items: [{ centralItemId, min, max, autoMode }]
+async function dbSupplyAssortmentAdd(centralId, unitId, items) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const payload = (items || []).map((it) => ({
+    centralItemId: it.centralItemId,
+    min: Number(it.min) || 0,
+    max: it.max != null && it.max !== "" ? Number(it.max) : null,
+    autoMode: it.autoMode || "off",
+  }));
+  const { data, error } = await _client.rpc("supply_assortment_add", {
+    p_central: centralId, p_unit: unitId, p_items: payload,
+  });
+  if (error) return { data: null, error };
+  return { data: Number(data) || 0, error: null };
+}
+
+async function dbSupplyAssortmentSet(centralId, unitId, unitItemId, { min, max, autoMode }) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.rpc("supply_assortment_set", {
+    p_central: centralId, p_unit: unitId, p_unit_item: unitItemId,
+    p_min: Number(min) || 0,
+    p_max: max != null && max !== "" ? Number(max) : null,
+    p_auto_mode: autoMode || "off",
+  });
+  return { error };
+}
+
+async function dbSupplyAssortmentRemove(centralId, unitId, unitItemId) {
+  if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
+  const { error } = await _client.rpc("supply_assortment_remove", {
+    p_central: centralId, p_unit: unitId, p_unit_item: unitItemId,
+  });
+  return { error };
+}
+
+// Reposição sugerida (abaixo do mínimo → completa até o máximo, descontando
+// o que já está em trânsito). unitId opcional filtra uma unidade.
+async function dbSupplyReplenishment(centralId, unitId = null) {
+  if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const { data, error } = await _client.rpc("supply_replenishment", { p_central: centralId, p_unit: unitId });
+  if (error) return { data: null, error };
+  return {
+    data: (data || []).map((r) => ({
+      tenantId: r.unit_tenant_id,
+      tenantName: r.unit_name,
+      unitItemId: r.unit_item_id,
+      centralItemId: r.central_item_id,
+      name: r.name,
+      unit: r.unit,
+      qty: Number(r.current_qty) || 0,
+      reorder: Number(r.reorder_point) || 0,
+      max: _supNum(r.max_qty),
+      inTransit: Number(r.in_transit_qty) || 0,
+      suggested: Number(r.suggested_qty) || 0,
+      centralQty: Number(r.central_qty) || 0,
+      centralCost: Number(r.central_cost) || 0,
+      usage30d: Number(r.usage30d) || 0,
+      coverageDays: _supNum(r.coverage_days),
+    })),
+    error: null,
+  };
+}
+
 // =====================================================================
 // Exposição global
 // =====================================================================
@@ -3918,17 +4318,21 @@ Object.assign(window, {
   dbCrmListContacts, dbCrmInsertContact, dbCrmUpdateContact, dbCrmDeleteContact,
   dbCrmGetOrCreateDefaultPipeline, dbCrmListDeals, dbCrmInsertDeal, dbCrmUpdateDeal, dbCrmDeleteDeal,
   dbCrmWhatsappStatus,
-  dbListProductionOrders, dbInsertProductionOrder, dbReplaceProductionOrderLines,
+  dbListProductionOrders, dbInsertProductionOrder,
   dbIssueProductionOrder, dbCompleteProductionOrder, dbCancelProductionOrder, dbDeleteProductionOrder,
-  dbListProductionPending,
+  dbSeparateProductionOrder, dbUnseparateProductionOrder, dbReplaceProductionOrderInputs,
+  dbListProductionPending, dbCountProductionRequestsPending,
   dbListProductionRecipes, dbSaveProductionRecipe, dbDeleteProductionRecipe,
-  mapProductionOrderFromDb, mapProductionRecipeFromDb,
+  mapProductionOrderFromDb, mapProductionRecipeFromDb, prodOrderWithLiveWeights,
   dbSupplyMembershipStatus,
   dbSupplyOverview, dbSupplyLookupByCode, dbSupplyInvite, dbSupplyRespondInvite, dbSupplyRemoveMember,
   dbSupplyCatalog, dbSupplyListTransfers, dbSupplyCreateTransfer, dbSupplySendTransfer,
-  dbSupplyReceiveTransfer, dbSupplyCancelTransfer, dbSupplyDeleteTransfer,
+  dbSupplyReceiveTransfer, dbSupplyCancelTransfer, dbSupplyDeleteTransfer, dbSupplyItemLinks,
+  dbSupplyDivergences,
   dbSupplyListRequests, dbSupplyCreateRequest, dbSupplyUpdateRequestStatus,
   dbSupplyListLedger, dbSupplyLedgerAdjust,
+  dbSupplyUnitsSummary, dbSupplyUnitAssortment, dbSupplyAssortmentAdd,
+  dbSupplyAssortmentSet, dbSupplyAssortmentRemove, dbSupplyReplenishment,
   mapSupplyTransferFromDb, mapSupplyRequestFromDb,
   dbSubscribeTable,
   getSession, useSession,

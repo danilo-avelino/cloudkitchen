@@ -303,8 +303,8 @@ function Stock({ scope }) {
   const assistantPendingCount = useMemo(() => items.filter((it) =>
     !it.cat || it.cat === "Sem categoria" || it.cat === "Outro" ||
     !it.supplier ||
-    !it.reorder || it.reorder <= 0 ||
-    !it.max || it.max <= 0 ||
+    (!it.managedByCentralId && (!it.reorder || it.reorder <= 0)) ||
+    (!it.managedByCentralId && (!it.max || it.max <= 0)) ||
     !it.cost || Number(it.cost) <= 0
   ).length, [items]);
 
@@ -513,6 +513,10 @@ function Stock({ scope }) {
         exp: draft.exp, catId,
         supplierId: supId || null,
         composeCmv: draft.composeCmv,
+        // Peso por unidade: só vai quando o modal mandou (o assistente não manda,
+        // e sem o guard o patch zeraria a porção do item).
+        ...(draft.portionQty  !== undefined ? { portionQty:  draft.portionQty  } : {}),
+        ...(draft.portionUnit !== undefined ? { portionUnit: draft.portionUnit } : {}),
       });
       if (error) {
         console.error("[handleEditItem] erro:", error);
@@ -757,7 +761,13 @@ function Stock({ scope }) {
                 const isSelected = selected?.id === it.id;
                 return (
                   <tr key={it.id} onClick={() => setSelected(it)} style={{ cursor: "pointer", background: isSelected ? "var(--bg-hover)" : null }}>
-                    <td className="row-strong">{it.name}</td>
+                    <td className="row-strong">
+                      {it.name}
+                      {it.managedByCentralId && (
+                        <I.Truck size={11} style={{ color: "var(--info)", marginLeft: 6, verticalAlign: "-1px" }}
+                                 title="Item da cadeia de suprimentos · mín/máx geridos pela central" />
+                      )}
+                    </td>
                     <td className="dim">{it.cat}</td>
                     <td className="dim" style={{ fontSize: 11.5 }}>
                       {it.supplier || <span style={{ color: "var(--fg-4)" }}>—</span>}
@@ -872,12 +882,24 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
   const [min,  setMin]  = useState(initial?.reorder != null ? String(initial.reorder) : "");
   const [max,  setMax]  = useState(initial?.max     != null ? String(initial.max)     : "");
   const [exp,  setExp]  = useState(initial?.exp && initial.exp !== "—" ? initial.exp : "");
+  // Item do catálogo de abastecimento de uma central: mín/máx são dela (o banco
+  // recusa a alteração local — aqui só travamos os campos).
+  const centralManaged = !!initial?.managedByCentralId;
   const [supplierId, setSupplierId] = useState(initial?.supplierId ?? "");
   const [composeCmv, setComposeCmv] = useState(initial?.composeCmv !== false);
+  // Peso de UMA unidade, digitado em gramas (mesmo padrão do modal de
+  // transformados) e gravado em kg. Só faz sentido quando a unidade não é de
+  // massa: sem ele, a Produção não consegue medir desperdício de item em "un".
+  const [weightG, setWeightG] = useState(
+    initial?.portionQty != null
+      ? String(initial.portionUnit === "g" ? initial.portionQty : initial.portionQty * 1000)
+      : ""
+  );
   const [saving, setSaving] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  const weightGN = Number.isFinite(parseFloat(String(weightG).replace(",", "."))) ? parseFloat(String(weightG).replace(",", ".")) : 0;
   // Min/max opcionais · vazios viram 0
   const minN  = Number.isFinite(parseFloat(String(min).replace(",", "."))) ? parseFloat(String(min).replace(",", ".")) : 0;
   const maxN  = Number.isFinite(parseFloat(String(max).replace(",", "."))) ? parseFloat(String(max).replace(",", ".")) : 0;
@@ -913,6 +935,9 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
         exp:  exp.trim(),
         supplierId: supplierId || null,
         composeCmv,
+        // Grava sempre em kg. Item em kg não precisa: a própria quantidade já é peso.
+        portionQty:  unit === "un" && weightGN > 0 ? weightGN / 1000 : (unit === "un" ? null : initial?.portionQty ?? null),
+        portionUnit: unit === "un" && weightGN > 0 ? "kg" : (unit === "un" ? null : initial?.portionUnit ?? null),
       });
     } finally {
       setSaving(false);
@@ -964,7 +989,7 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
           </button>
         </>
       )}
-      width={560}
+      width={680}
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <FormRow label="Nome do insumo">
@@ -972,7 +997,7 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
                  style={errs.name ? { borderColor: "var(--crit)" } : null} />
         </FormRow>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.8fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.4fr) minmax(0,0.8fr) minmax(0,1fr)", gap: 12 }}>
           <FormRow label="Categoria">
             {creatingCat ? (
               <div style={{ display: "flex", gap: 6 }}>
@@ -1053,13 +1078,28 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
           </FormRow>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: isEdit ? "1fr 1fr" : "1fr 1fr 1fr", gap: 12 }}>
-          <FormRow label={`Estoque mínimo (${unit})`} hint="Aciona compra quando atingir.">
+        {/* Item em "un" não tem peso implícito, e sem peso a Produção não fecha a
+            conta de desperdício (enviado − devolvido). Em kg a quantidade já é
+            o peso, então o campo nem aparece. */}
+        {unit === "un" && (
+          <FormRow label="Peso por unidade (g)"
+                   hint="Quanto pesa 1 unidade. Usado pela Produção para calcular desperdício e aproveitamento.">
+            <input className="input mono" inputMode="decimal" value={weightG}
+                   onChange={(e) => setWeightG(e.target.value)} placeholder="ex.: 3000 para 3 kg" />
+          </FormRow>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: isEdit ? "minmax(0,1fr) minmax(0,1fr)" : "minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)", gap: 12 }}>
+          <FormRow label={`Estoque mínimo (${unit})`}
+                   hint={centralManaged ? "Gerido pela central da rede." : "Aciona compra quando atingir."}>
             <input className="input mono" inputMode="decimal" value={min} onChange={(e) => setMin(e.target.value)} placeholder="0"
+                   disabled={centralManaged}
                    style={errs.min ? { borderColor: "var(--crit)" } : null} />
           </FormRow>
-          <FormRow label={`Estoque máximo (${unit})`} hint="Quantidade alvo após compra.">
+          <FormRow label={`Estoque máximo (${unit})`}
+                   hint={centralManaged ? "Gerido pela central da rede." : "Quantidade alvo após compra."}>
             <input className="input mono" inputMode="decimal" value={max} onChange={(e) => setMax(e.target.value)} placeholder="0"
+                   disabled={centralManaged}
                    style={errs.max ? { borderColor: "var(--crit)" } : null} />
           </FormRow>
           {!isEdit && (
@@ -1069,7 +1109,7 @@ function NewStockItemModal({ items, initial, categories, suppliers = [], onClose
           )}
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 12 }}>
           <FormRow label="Validade (opcional)" hint="Formato livre · ex.: 12/05 ou 06/2027">
             <input className="input mono" value={exp} onChange={(e) => setExp(e.target.value)} placeholder="—" />
           </FormRow>
@@ -1580,7 +1620,13 @@ function StockHistoryModal({ onClose }) {
                 <td className="num" style={{ color: m.delta > 0 ? "var(--ok)" : (m.kind === "loss" || m.kind === "expiration") ? "var(--crit)" : "var(--fg-1)" }}>
                   {m.delta > 0 ? "+" : ""}{m.delta} {m.unit}
                 </td>
-                <td className="dim mono" style={{ fontSize: 10.5 }}>{m.op}</td>
+                <td className="dim mono" style={{ fontSize: 10.5 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    {m.operationName || (m.op && m.op !== "—" ? m.op : null)}
+                    <MovementOriginBadge mv={m} />
+                    {!m.operationName && (!m.op || m.op === "—") && !movementOrigin(m) && "—"}
+                  </div>
+                </td>
                 <td className="dim">{m.ref}</td>
               </tr>
             ))}
@@ -1639,6 +1685,9 @@ function AllocationPanel({ item, onClose }) {
   // Modo de auto min/max: 'off' | 'weekly' | 'monthly'
   const [autoMinMode, setAutoMinMode] = useState(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
   const [savingAutoMin, setSavingAutoMin] = useState(false);
+  // Item do catálogo de abastecimento de uma central: mín/máx/auto são dela
+  // (o banco recusa a alteração local — aqui só desabilitamos e explicamos).
+  const managedByCentral = !!item.managedByCentralId;
 
   useEffect(() => {
     setAutoMinMode(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
@@ -1753,6 +1802,16 @@ function AllocationPanel({ item, onClose }) {
         <div style={{ fontSize: 12, color: "var(--fg-2)" }}>
           {item.cat} · mín {item.reorder} {item.unit} · máx {item.max ?? "—"} {item.unit}
         </div>
+        {managedByCentral && (
+          <div style={{
+            marginTop: 8, display: "flex", alignItems: "center", gap: 6,
+            fontSize: 11, color: "var(--info)", background: "var(--info-soft)",
+            border: "1px solid var(--info-line)", borderRadius: 4, padding: "6px 9px",
+          }}>
+            <I.Truck size={12} />
+            Item da cadeia de suprimentos — mín/máx geridos pela central.
+          </div>
+        )}
       </div>
 
       <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--line-soft)" }}>
@@ -1836,9 +1895,14 @@ function AllocationPanel({ item, onClose }) {
             const splits = (m.referenceType === "kitchen_request" && m.referenceId)
               ? sharedSplits30[m.referenceId]
               : null;
-            const key   = splits ? "__shared__" : (m.operationId || "__none__");
-            const label = splits ? "Compartilhado" : (m.operationName || (m.op && m.op !== "—" ? m.op : "Sem operação"));
-            const color = splits ? "var(--fg-2)" : (m.operationColor || "var(--fg-3)");
+            // Saída de produção/rede não tem operation_id: sem isto tudo caía em
+            // "Sem operação" e o insumo parecia ter sumido. Agrupa pelo destino.
+            const origin = movementOrigin(m);
+            const key   = splits ? "__shared__" : (m.operationId || (origin ? `__ref_${m.referenceType}` : "__none__"));
+            const label = splits ? "Compartilhado"
+                        : (m.operationName || (m.op && m.op !== "—" ? m.op : (origin ? origin.label : "Sem operação")));
+            const color = splits ? "var(--fg-2)"
+                        : (m.operationColor || (origin ? "var(--info)" : "var(--fg-3)"));
             if (!byOp.has(key)) byOp.set(key, { key, label, color, qty: 0 });
             byOp.get(key).qty += qty;
             if (splits) {
@@ -1921,7 +1985,8 @@ function AllocationPanel({ item, onClose }) {
                   const on = autoMinMode === opt.mode;
                   return (
                     <button key={opt.mode} type="button"
-                            disabled={savingAutoMin}
+                            disabled={savingAutoMin || managedByCentral}
+                            title={managedByCentral ? "Definido pela central da rede de suprimentos" : undefined}
                             onClick={() => changeAutoMinMode(opt.mode)}
                             style={{
                               display: "flex", flexDirection: "column", gap: 2,
@@ -1929,7 +1994,8 @@ function AllocationPanel({ item, onClose }) {
                               background: on ? "var(--ok-soft)" : "var(--bg-2)",
                               border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
                               color: on ? "var(--fg-0)" : "var(--fg-2)",
-                              cursor: savingAutoMin ? "wait" : "pointer",
+                              opacity: managedByCentral ? 0.55 : 1,
+                              cursor: managedByCentral ? "not-allowed" : savingAutoMin ? "wait" : "pointer",
                               transition: "all 120ms ease",
                             }}>
                       <span style={{ fontSize: 11.5, fontWeight: on ? 600 : 400 }}>{opt.label}</span>
@@ -2062,9 +2128,11 @@ function ItemHistoryModal({ item, onClose }) {
                        : (k === "loss" || k === "expiration") ? "crit"
                        : k === "adjust" ? "warn"
                        : "neutral";
+  // A pílula de origem já diz o TIPO (Produção, Requisição…), então aqui fica só
+  // a referência concreta — nº da ordem, observação. Sem isso as duas colunas
+  // repetiriam a mesma palavra.
   const fmtRefRow = (m) => {
     if (m.ref && m.ref !== "—") return m.ref;
-    if (m.referenceType === "kitchen_request") return "Requisição";
     if (m.kind === "in") return "Entrada";
     return "—";
   };
@@ -2167,7 +2235,13 @@ function ItemHistoryModal({ item, onClose }) {
                   <td className="num" style={{ color: isIn ? "var(--ok)" : "var(--fg-0)", whiteSpace: "nowrap" }}>
                     {isIn ? "+" : "−"}{Math.abs(Number(m.delta) || 0).toLocaleString("pt-BR", { maximumFractionDigits: 3 })} {item.unit}
                   </td>
-                  <td style={{ color: "var(--fg-2)", fontSize: 11.5 }}>{m.operationName || m.operationShort || (isIn ? "—" : "—")}</td>
+                  <td style={{ color: "var(--fg-2)", fontSize: 11.5 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      {m.operationName || m.operationShort}
+                      <MovementOriginBadge mv={m} />
+                      {!m.operationName && !m.operationShort && !movementOrigin(m) && "—"}
+                    </div>
+                  </td>
                   <td style={{ color: "var(--fg-2)", fontSize: 11.5, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fmtRefRow(m)}</td>
                 </tr>
               );
@@ -3084,8 +3158,8 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
     return items.filter((it) =>
       !it.cat || it.cat === "Sem categoria" || it.cat === "Outro" ||
       !it.supplier ||
-      !it.reorder || it.reorder <= 0 ||
-      !it.max || it.max <= 0 ||
+      (!it.managedByCentralId && (!it.reorder || it.reorder <= 0)) ||
+      (!it.managedByCentralId && (!it.max || it.max <= 0)) ||
       !it.cost || Number(it.cost) <= 0
     );
   }, [items]);
@@ -3403,12 +3477,14 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-            <FormRow label={`Mínimo (${draft.unit}) ${missing.reorder ? "·  faltando" : minMaxAlert?.minBelow ? "·  abaixo do consumo" : ""}`}>
+            <FormRow label={`Mínimo (${draft.unit}) ${current.managedByCentralId ? "·  da central" : missing.reorder ? "·  faltando" : minMaxAlert?.minBelow ? "·  abaixo do consumo" : ""}`}>
               <input className="input mono" inputMode="decimal" value={draft.reorder || ""} onChange={(e) => setDraft({ ...draft, reorder: e.target.value })} placeholder="0"
+                     disabled={!!current.managedByCentralId}
                      style={minMaxAlert?.minBelow ? { borderColor: "var(--ok)" } : null} />
             </FormRow>
-            <FormRow label={`Máximo (${draft.unit}) ${missing.max ? "·  faltando" : minMaxAlert?.maxBelow ? "·  abaixo do consumo" : ""}`}>
+            <FormRow label={`Máximo (${draft.unit}) ${current.managedByCentralId ? "·  da central" : missing.max ? "·  faltando" : minMaxAlert?.maxBelow ? "·  abaixo do consumo" : ""}`}>
               <input className="input mono" inputMode="decimal" value={draft.max || ""} onChange={(e) => setDraft({ ...draft, max: e.target.value })} placeholder="0"
+                     disabled={!!current.managedByCentralId}
                      style={minMaxAlert?.maxBelow ? { borderColor: "var(--ok)" } : null} />
             </FormRow>
             <FormRow label={`Custo unit. (R$) ${missing.cost ? "·  faltando" : ""}`}>

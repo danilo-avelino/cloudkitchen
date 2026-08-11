@@ -13,7 +13,7 @@ const MNAV = [
   { id: "dashboard",    label: "Dashboard",       icon: "Dashboard" },
   { id: "stock",        label: "Estoque",          icon: "Stock" },
   { id: "production",   label: "Produção",         icon: "Play" },
-  { id: "supply",       label: "Suprimentos",      icon: "Truck" },
+  { id: "supply",       label: "Cadeia de suprimentos", short: "Cadeia", icon: "Truck" },
   { id: "distribution", label: "Central",          icon: "Truck" },
   { id: "recipes",      label: "Fichas técnicas",  icon: "Recipe" },
   { id: "revenue",      label: "Faturamento",      icon: "Revenue" },
@@ -30,10 +30,10 @@ const MNAV = [
 const MNAV_BY_ID = Object.fromEntries(MNAV.map((n) => [n.id, n]));
 
 // Ordem de prioridade pra escolher os 4 atalhos da bottom nav.
-const MNAV_PRIORITY = ["dashboard", "stock", "requests", "purchases", "production", "revenue", "cmv", "finance", "dre", "recipes", "delivery", "supply", "distribution", "cardapio", "crm", "settings"];
+const MNAV_PRIORITY = ["dashboard", "requests", "stock", "purchases", "production", "revenue", "cmv", "finance", "dre", "recipes", "delivery", "supply", "distribution", "cardapio", "crm", "settings"];
 
 const M_TITLE = {
-  dashboard: "Dashboard", stock: "Estoque", production: "Produção", supply: "Suprimentos",
+  dashboard: "Dashboard", stock: "Estoque", production: "Produção", supply: "Cadeia de suprimentos",
   distribution: "Central", recipes: "Fichas técnicas", revenue: "Faturamento",
   delivery: "Logística", cardapio: "Cardápio", crm: "CRM", requests: "Requisições",
   purchases: "Compras", cmv: "CMV & margem", finance: "Financeiro", dre: "DRE",

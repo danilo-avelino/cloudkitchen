@@ -259,6 +259,10 @@ function MobileStock({ scope = "all" }) {
         name: draft.name, unit: draft.unit, cost: draft.cost,
         reorder: draft.min, max: draft.max, exp: draft.exp,
         catId, supplierId: draft.supplierId || null, composeCmv: draft.composeCmv,
+        // Peso por unidade: só vai quando o modal mandou (patch sem a chave não
+        // pode zerar a porção do item).
+        ...(draft.portionQty  !== undefined ? { portionQty:  draft.portionQty  } : {}),
+        ...(draft.portionUnit !== undefined ? { portionUnit: draft.portionUnit } : {}),
       };
       if (id) {
         if (draft.qty !== undefined) payload.qty = draft.qty;
@@ -555,9 +559,14 @@ function useItemConsumption(itemId) {
       for (const m of outs30) {
         const qty = Math.abs(Number(m.delta) || 0);
         const sp = (m.referenceType === "kitchen_request" && m.referenceId) ? splits30[m.referenceId] : null;
-        const key   = sp ? "__shared__" : (m.operationId || "__none__");
-        const label = sp ? "Compartilhado" : (m.operationName || (m.op && m.op !== "—" ? m.op : "Sem operação"));
-        const color = sp ? "var(--fg-2)" : (m.operationColor || "var(--fg-3)");
+        // Saída de produção/rede não tem operation_id: sem isto tudo caía em
+        // "Sem operação" e o insumo parecia ter sumido. Agrupa pelo destino.
+        const origin = window.movementOrigin?.(m) || null;
+        const key   = sp ? "__shared__" : (m.operationId || (origin ? `__ref_${m.referenceType}` : "__none__"));
+        const label = sp ? "Compartilhado"
+                    : (m.operationName || (m.op && m.op !== "—" ? m.op : (origin ? origin.label : "Sem operação")));
+        const color = sp ? "var(--fg-2)"
+                    : (m.operationColor || (origin ? "var(--info)" : "var(--fg-3)"));
         if (!byOp.has(key)) byOp.set(key, { key, label, color, qty: 0 });
         byOp.get(key).qty += qty;
         if (sp) for (const s of sp) {
@@ -621,6 +630,16 @@ function StockItemDetailSheet({ it, onClose, onEdit, onEntry }) {
       <Row k="Valor em estoque" v={_brl(Math.max(0, it.qty) * it.cost)} />
       <Row k="Mínimo / Máximo" v={`${it.reorder} / ${it.max ?? "—"} ${it.unit}`} />
       {it.exp && it.exp !== "—" && <Row k="Validade" v={it.exp} />}
+      {it.managedByCentralId && (
+        <div style={{
+          marginTop: 10, display: "flex", alignItems: "center", gap: 7, fontSize: 11.5,
+          color: "var(--info)", background: "var(--info-soft)", border: "1px solid var(--info-line)",
+          borderRadius: 8, padding: "8px 10px",
+        }}>
+          <I.Truck size={13} />
+          Item da cadeia de suprimentos — mín/máx geridos pela central.
+        </div>
+      )}
 
       {/* Consumo · janela adaptativa 30d/7d + média semanal (dados reais) */}
       <div style={{ marginTop: 16 }}>
@@ -687,6 +706,8 @@ function StockItemDetailSheet({ it, onClose, onEdit, onEntry }) {
 // ===== Form de criar/editar insumo (full sheet) =====
 function StockItemFormSheet({ initial, allCats, suppliers, onClose, onSave, onDelete }) {
   const isEdit = !!initial;
+  // Item do catálogo de abastecimento de uma central: mín/máx são dela.
+  const centralManaged = !!initial?.managedByCentralId;
   const [name, setName] = useState(initial?.name ?? "");
   const [cat, setCat] = useState(initial?.cat ?? (allCats[0] || ""));
   const [unit, setUnit] = useState(initial?.unit ?? "kg");
@@ -697,10 +718,18 @@ function StockItemFormSheet({ initial, allCats, suppliers, onClose, onSave, onDe
   const [exp, setExp] = useState(initial?.exp && initial.exp !== "—" ? initial.exp : "");
   const [supplierId, setSupplierId] = useState(initial?.supplierId ?? "");
   const [composeCmv, setComposeCmv] = useState(initial?.composeCmv !== false);
+  // Peso de 1 unidade em gramas (grava em kg). Só para itens em "un" — é o que
+  // permite a Produção calcular desperdício.
+  const [weightG, setWeightG] = useState(
+    initial?.portionQty != null
+      ? String(initial.portionUnit === "g" ? initial.portionQty : initial.portionQty * 1000)
+      : ""
+  );
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  const weightGN = _pbrM(weightG);
   const minN = _pbrM(min), maxN = _pbrM(max);
   const errName = !name.trim();
   const errMax = maxN > 0 && minN > 0 && maxN < minN;
@@ -714,6 +743,8 @@ function StockItemFormSheet({ initial, allCats, suppliers, onClose, onSave, onDe
         name: name.trim(), cat: cat.trim(), unit: unit.trim(),
         cost: _pbrM(cost), qty: _pbrM(qty), min: minN, max: maxN,
         exp: exp.trim(), supplierId: supplierId || null, composeCmv,
+        portionQty:  unit === "un" && weightGN > 0 ? weightGN / 1000 : (unit === "un" ? null : initial?.portionQty ?? null),
+        portionUnit: unit === "un" && weightGN > 0 ? "kg" : (unit === "un" ? null : initial?.portionUnit ?? null),
       });
     } finally { setSaving(false); }
   };
@@ -773,15 +804,25 @@ function StockItemFormSheet({ initial, allCats, suppliers, onClose, onSave, onDe
         )}
       </div>
 
+      {unit === "un" && (
+        <MField label="Peso por unidade (g)" hint="Quanto pesa 1 unidade. A Produção usa para calcular desperdício.">
+          <input value={weightG} inputMode="decimal" onChange={(e) => setWeightG(e.target.value)}
+                 placeholder="ex.: 3000 para 3 kg" style={mInput} />
+        </MField>
+      )}
+
       <div style={{ display: "flex", gap: 10 }}>
         <div style={{ flex: 1 }}>
-          <MField label={`Mínimo (${unit})`} hint="Aciona compra.">
-            <input value={min} inputMode="decimal" onChange={(e) => setMin(e.target.value)} placeholder="0" style={mInput} />
+          <MField label={`Mínimo (${unit})`} hint={centralManaged ? "Gerido pela central." : "Aciona compra."}>
+            <input value={min} inputMode="decimal" onChange={(e) => setMin(e.target.value)} placeholder="0"
+                   disabled={centralManaged} style={mInput} />
           </MField>
         </div>
         <div style={{ flex: 1 }}>
-          <MField label={`Máximo (${unit})`} error={errMax ? "≥ mínimo" : null} hint={errMax ? null : "Alvo após compra."}>
+          <MField label={`Máximo (${unit})`} error={errMax ? "≥ mínimo" : null}
+                  hint={errMax ? null : centralManaged ? "Gerido pela central." : "Alvo após compra."}>
             <input value={max} inputMode="decimal" onChange={(e) => setMax(e.target.value)} placeholder="0"
+                   disabled={centralManaged}
                    style={{ ...mInput, borderColor: errMax ? "var(--crit)" : "var(--line)" }} />
           </MField>
         </div>

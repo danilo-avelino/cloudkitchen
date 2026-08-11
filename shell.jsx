@@ -4,7 +4,7 @@
 // Catálogo único de módulos do app — espelha src/App.jsx e page-settings.jsx
 // "saas" é exclusivo do superadmin (gestão multi-tenant da plataforma).
 // "transformed" deixou de ser módulo próprio em 2026-07-12 — virou abas do módulo Produção.
-const APP_MODULES = ["dashboard","stock","production","supply","distribution","recipes","revenue","delivery","cardapio","crm","requests","purchases","cmv","finance","dre","settings"];
+const APP_MODULES = ["dashboard","requests","stock","production","supply","distribution","recipes","revenue","delivery","cardapio","crm","purchases","cmv","finance","dre","settings"];
 const SUPERADMIN_MODULES = ["saas"];
 
 // Preset padrão por role do banco quando o membro não tem `modules` customizado
@@ -98,7 +98,10 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
         const crit = alertable.filter((i) => (i.qty || 0) > 0 && (i.qty || 0) < (i.reorder || 0)).length;
         setStockOut(out);
         setStockCrit(out + crit);
-        setPendingReq(requests.filter((r) => r.status === "pending").length);
+        // Somado logo abaixo com as solicitações da produção — as duas filas
+        // moram na mesma tela, então o alerta do menu é um só.
+        const kitchenPending = requests.filter((r) => r.status === "pending").length;
+        setPendingReq(kitchenPending);
 
         // Conta itens obrigatórios ainda pendentes neste mês com urgência soon/overdue.
         // Itens criados em meses futuros ainda não valem (não retroagem pro mês atual).
@@ -120,14 +123,17 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
         // Central só p/ tenant kind='distribution_center'; Suprimentos p/ quem tem
         // convite (pendente ou aceito — o aceite mora lá) E p/ centrais de
         // distribuição (pedido do usuário em 2026-07-12).
-        const [ctx, memRes, prodRes] = await Promise.all([
+        const [ctx, memRes, prodRes, prodReqRes] = await Promise.all([
           typeof dbGetCurrentContext === "function" ? dbGetCurrentContext() : Promise.resolve(null),
           typeof dbSupplyMembershipStatus === "function" ? dbSupplyMembershipStatus(user.tenantId) : Promise.resolve({ data: { member: false } }),
           typeof dbListProductionPending === "function" ? dbListProductionPending(user.tenantId) : Promise.resolve({ data: [] }),
+          typeof dbCountProductionRequestsPending === "function" ? dbCountProductionRequestsPending(user.tenantId) : Promise.resolve({ count: 0 }),
         ]);
         if (cancelled) return;
         const pend = prodRes?.data || [];
         setProdPending(pend.length);
+        // Solicitação de insumo aguardando separação também é fila de Requisições.
+        setPendingReq(kitchenPending + (prodReqRes?.count || 0));
         const oldestMs = pend.length
           ? Math.max(...pend.map((p) => Date.now() - new Date(p.issuedAt || Date.now()).getTime()))
           : 0;
@@ -150,16 +156,16 @@ function Sidebar({ scope, setScope, page, setPage, opMenuOpen, setOpMenuOpen, us
   const isPureSuper = isSuperadmin && !user?.tenantId;
   const allNav = [
     { id: "dashboard",  label: "Dashboard",      icon: I.Dashboard },
+    { id: "requests",   label: "Requisições",     icon: I.Request,     pulse: pendingReq || null },
     { id: "stock",      label: "Estoque",         icon: I.Stock,       badge: stockCrit || null, badgeTone: stockOut > 0 ? "crit" : "warn" },
     { id: "production", label: "Produção",        icon: I.Play,        badge: prodPending || null, badgeTone: prodPendingTone },
-    { id: "supply",       label: "Suprimentos",   icon: I.Truck },
+    { id: "supply",       label: "Cadeia de suprimentos", icon: I.Truck },
     { id: "distribution", label: "Central",       icon: I.Truck },
     { id: "recipes",    label: "Fichas técnicas", icon: I.Recipe },
     { id: "revenue",    label: "Faturamento",     icon: I.Revenue },
     { id: "delivery",   label: "Logística",       icon: I.Clock },
     { id: "cardapio",   label: "Análise de Cardápio", icon: I.Recipe },
     { id: "crm",        label: "CRM",             icon: I.WhatsApp },
-    { id: "requests",   label: "Requisições",     icon: I.Request,     pulse: pendingReq || null },
     { id: "purchases",  label: "Compras",         icon: I.ShoppingList },
     { id: "cmv",        label: "CMV & margem",    icon: I.CMV },
     { id: "finance",    label: "Financeiro",      icon: I.Finance, badge: (financeOverdue || financeSoon) || null, badgeTone: financeOverdue > 0 ? "crit" : "warn" },
@@ -311,7 +317,7 @@ function Topbar({ page, scope, theme, setTheme, user, onLogout, onSwitchTenant, 
     dashboard: "Dashboard",
     stock: "Estoque",
     production: "Produção & Porcionamento",
-    supply: "Suprimentos",
+    supply: "Cadeia de suprimentos",
     distribution: "Central de Distribuição",
     recipes: "Fichas técnicas",
     revenue: "Faturamento",

@@ -16,7 +16,7 @@ const PAGE_SLUGS = {
   dashboard: "dashboard",
   stock:     "estoque",
   production:  "producao",
-  supply:      "suprimentos",
+  supply:      "cadeia-de-suprimentos",
   distribution: "central",
   recipes:   "fichas-tecnicas",
   revenue:   "faturamento",

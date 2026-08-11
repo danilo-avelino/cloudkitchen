@@ -118,6 +118,10 @@ function TransformedItemModal({ tid, categories, initial, onClose, onSaved }) {
 // Modal de receita de produção (template de lote)
 // ---------------------------------------------------------------------
 function ProductionRecipeModal({ tid, stockItems, initial, onClose, onSaved }) {
+  // Combobox com busca — mesmo componente do modal de Requisições. Lido do
+  // window aqui dentro (lazy) porque page-requests.jsx carrega DEPOIS deste
+  // arquivo: referência solta no topo do módulo daria ReferenceError.
+  const StockItemPicker = window.StockItemPicker;
   const rawItems = (stockItems || []).filter((i) => i.itemKind !== "transformed");
   const transformedItems = (stockItems || []).filter((i) => i.itemKind === "transformed");
   const byId = {};
@@ -194,10 +198,11 @@ function ProductionRecipeModal({ tid, stockItems, initial, onClose, onSaved }) {
               const item = byId[l.itemId];
               return (
                 <div key={i} style={lineStyle}>
-                  <select className="select" value={l.itemId} onChange={(e) => setInputs((cur) => cur.map((x, k) => k === i ? { ...x, itemId: e.target.value } : x))}>
-                    <option value="">— insumo —</option>
-                    {rawItems.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
-                  </select>
+                  <StockItemPicker
+                    items={rawItems} value={l.itemId}
+                    placeholder="Selecione um insumo…"
+                    disabledIds={inputs.map((x) => x.itemId).filter(Boolean)}
+                    onChange={(id) => setInputs((cur) => cur.map((x, k) => k === i ? { ...x, itemId: id } : x))} />
                   <input className="input" placeholder={`Qtd${item ? ` (${item.unit})` : ""}`} value={l.qty} inputMode="decimal"
                     onChange={(e) => setInputs((cur) => cur.map((x, k) => k === i ? { ...x, qty: e.target.value } : x))} />
                   <button type="button" className="btn" data-variant="ghost" data-size="sm" title="Remover"
@@ -219,10 +224,12 @@ function ProductionRecipeModal({ tid, stockItems, initial, onClose, onSaved }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {outputs.map((l, i) => (
               <div key={i} style={lineStyle}>
-                <select className="select" value={l.itemId} onChange={(e) => setOutputs((cur) => cur.map((x, k) => k === i ? { ...x, itemId: e.target.value } : x))}>
-                  <option value="">— transformado —</option>
-                  {transformedItems.map((it) => <option key={it.id} value={it.id}>{it.name} · porção {_trPortionLabel(it)}</option>)}
-                </select>
+                <StockItemPicker
+                  items={transformedItems} value={l.itemId}
+                  placeholder="Selecione um transformado…"
+                  emptyLabel="Nenhum transformado encontrado"
+                  disabledIds={outputs.map((x) => x.itemId).filter(Boolean)}
+                  onChange={(id) => setOutputs((cur) => cur.map((x, k) => k === i ? { ...x, itemId: id } : x))} />
                 <input className="input" placeholder="Porções" value={l.expectedQty} inputMode="decimal"
                   onChange={(e) => setOutputs((cur) => cur.map((x, k) => k === i ? { ...x, expectedQty: e.target.value } : x))} />
                 <button type="button" className="btn" data-variant="ghost" data-size="sm" title="Remover"
@@ -255,16 +262,22 @@ const _TR_PERIODS = [
   { id: "all", label: "Tudo" },
 ];
 
-function _trAnalytics(orders, periodDays) {
+function _trAnalytics(orders, periodDays, itemId = null) {
   const cutoff = periodDays === "all" ? null : Date.now() - Number(periodDays) * 86400000;
-  const completed = (orders || []).filter((o) =>
+  const completedAll = (orders || []).filter((o) =>
     o.status === "completed" && (!cutoff || (o.completedAt && new Date(o.completedAt).getTime() >= cutoff)));
+  // Filtro por transformado: considera só as ordens que devolveram o item escolhido.
+  const completed = itemId
+    ? completedAll.filter((o) => (o.outputs || []).some((out) => out.itemId === itemId && out.returnedQty > 0))
+    : completedAll;
 
   const byItem = {};
   let totalCost = 0, totalWaste = 0, wasteCostEst = 0;
   const yields = [];
   for (const o of completed) {
-    totalCost += o.totalInputCost || 0;
+    // Custo total: no modo "todos" é o custo de entrada da ordem; filtrado por um
+    // transformado, vira o custo atribuído às porções dele (somado abaixo).
+    if (!itemId) totalCost += o.totalInputCost || 0;
     if (o.yieldPct != null) yields.push(o.yieldPct);
     if (o.wasteQty != null) {
       totalWaste += o.wasteQty;
@@ -273,6 +286,7 @@ function _trAnalytics(orders, periodDays) {
     }
     for (const out of o.outputs || []) {
       if (out.returnedQty == null || out.returnedQty <= 0) continue;
+      if (itemId && out.itemId !== itemId) continue; // só o transformado selecionado
       const k = out.itemId;
       if (!byItem[k]) byItem[k] = { itemId: k, name: out.name, ordersCount: 0, portions: 0, cost: 0, lastUnitCost: null, lastAt: null };
       byItem[k].ordersCount += 1;
@@ -285,6 +299,7 @@ function _trAnalytics(orders, periodDays) {
       }
     }
   }
+  if (itemId) totalCost = Object.values(byItem).reduce((s, r) => s + r.cost, 0);
   const items = Object.values(byItem).map((r) => ({
     ...r,
     avgUnitCost: r.portions > 0 ? r.cost / r.portions : null,
@@ -307,12 +322,85 @@ function TrPeriodChips({ period, setPeriod }) {
   );
 }
 
-function TransformedAnalytics({ orders }) {
+function TransformedAnalytics({ orders, stockItems }) {
   const [period, setPeriod] = useState("30");
-  const a = _trAnalytics(orders, period);
+  const [itemId, setItemId] = useState(""); // "" = todos os transformados
+  // Lista de transformados que já tiveram produção concluída (independente do período,
+  // pra o seletor não sumir ao trocar de janela).
+  const allTransformados = useMemo(() => {
+    const m = new Map();
+    for (const o of orders || []) {
+      if (o.status !== "completed") continue;
+      for (const out of o.outputs || []) {
+        if (out.returnedQty > 0 && out.itemId && !m.has(out.itemId)) m.set(out.itemId, out.name);
+      }
+    }
+    return [...m.entries()].map(([id, name]) => ({ itemId: id, name })).sort((x, y) => x.name.localeCompare(y.name));
+  }, [orders]);
+  // Se o item selecionado sair da lista (troca de dados), volta pra "todos".
+  const activeItemId = allTransformados.some((t) => t.itemId === itemId) ? itemId : "";
+  const a = _trAnalytics(orders, period, activeItemId || null);
+  const selectedName = allTransformados.find((t) => t.itemId === activeItemId)?.name || null;
+
+  // Insumo em unidade não-mássica e sem peso cadastrado não entra no peso do
+  // lote — e uma única linha assim zera aproveitamento e desperdício da ordem
+  // inteira. Aponta quais são, já que o KPI só mostra "—" e não explica.
+  const missingWeight = useMemo(() => {
+    const byId = new Map((stockItems || []).map((i) => [i.id, i]));
+    const m = new Map();
+    for (const o of orders || []) {
+      if (o.status !== "completed" && o.status !== "issued") continue;
+      for (const l of o.inputs || []) {
+        const u = String(l.unit || "").toLowerCase();
+        if (u === "kg" || u === "g") continue;          // já é peso
+        const it = byId.get(l.itemId);
+        if (it && it.portionQty > 0) continue;          // peso unitário cadastrado
+        if (l.itemId) m.set(l.itemId, it?.name || l.name);
+      }
+    }
+    return [...m.values()];
+  }, [orders, stockItems]);
 
   return (
     <div className="stagger" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Filtro por transformado — escopa KPIs e a tabela. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+          Transformado
+        </span>
+        <select className="select" value={activeItemId} onChange={(e) => setItemId(e.target.value)}
+          style={{ minWidth: 240, maxWidth: "100%" }}>
+          <option value="">Todos os transformados</option>
+          {allTransformados.map((t) => (
+            <option key={t.itemId} value={t.itemId}>{t.name}</option>
+          ))}
+        </select>
+        {activeItemId && (
+          <button className="btn" data-size="sm" onClick={() => setItemId("")}>Limpar filtro</button>
+        )}
+        {selectedName && (
+          <span style={{ fontSize: 12, color: "var(--fg-2)" }}>
+            análise apenas de <strong style={{ color: "var(--fg-0)" }}>{selectedName}</strong>
+          </span>
+        )}
+      </div>
+
+      {missingWeight.length > 0 && (
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 14px", borderRadius: 4,
+                      background: "var(--warn-soft)", border: "1px solid var(--warn-line)" }}>
+          <I.AlertTriangle size={14} style={{ color: "var(--warn)", flexShrink: 0, marginTop: 2 }} />
+          <div style={{ fontSize: 12, color: "var(--fg-1)", lineHeight: 1.55 }}>
+            <strong>Desperdício não pode ser calculado</strong> enquanto houver insumo sem peso.
+            Estes estão cadastrados em unidade e não têm peso por unidade:{" "}
+            <strong style={{ color: "var(--fg-0)" }}>{missingWeight.join(", ")}</strong>.
+            <div style={{ marginTop: 4, color: "var(--fg-2)" }}>
+              Preencha <strong>Peso por unidade</strong> no cadastro de cada um, em <strong>Estoque</strong>.
+              O desperdício é peso enviado − peso devolvido, então uma linha sem peso zera a conta do lote inteiro.
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 12 }}>
         <div className="kpi">
           <span className="label">Produções concluídas</span>
@@ -469,6 +557,8 @@ function TransformedCatalog({ tid, stockItems, categories, orders, onChanged }) 
   for (const o of orders || []) {
     if (o.status !== "completed" || !o.completedAt) continue;
     for (const out of o.outputs || []) {
+      // Saída esperada que não voltou fica gravada com returned 0 — não é produção
+      if (!(out.returnedQty > 0)) continue;
       const at = new Date(o.completedAt).getTime();
       if (!lastProdByItem[out.itemId] || at > lastProdByItem[out.itemId]) lastProdByItem[out.itemId] = at;
     }
