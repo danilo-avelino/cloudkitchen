@@ -506,6 +506,40 @@ function mapStockItemFromDb(row) {
   };
 }
 
+// Peso de UMA unidade do insumo, em kg. null quando não foi cadastrado
+// (Estoque › insumo › "Peso por unidade"). É o mesmo campo que a Produção usa.
+function stockItemUnitWeightKg(item) {
+  const pq = item && item.portionQty != null ? Number(item.portionQty) : null;
+  if (!(pq > 0)) return null;
+  return String(item.portionUnit || "kg").toLowerCase() === "g" ? pq / 1000 : pq;
+}
+
+// Custo do insumo na unidade escolhida na ficha técnica ('kg', 'g' ou 'un').
+// Passa sempre pelo custo por kg: kg ↔ g é só fator 1000 e não depende do peso da
+// unidade; só quem entra ou sai de "un" precisa dele.
+// Devolve null quando a conversão depende do peso por unidade e ele não existe —
+// o front usa esse null para pedir o peso antes de deixar trocar a unidade.
+function stockItemCostIn(item, unit) {
+  if (!item) return null;
+  const from = String(item.unit || "").toLowerCase();
+  const to   = String(unit || "").toLowerCase();
+  const cost = Number(item.cost) || 0;
+  if (from === to) return cost;
+  const w = stockItemUnitWeightKg(item);  // peso de 1 unidade, em kg
+
+  // Custo por kg do insumo. Unidade contável ("un" e afins) só resolve com o peso.
+  let perKg = null;
+  if (from === "kg")     perKg = cost;
+  else if (from === "g") perKg = cost * 1000;
+  else if (w > 0)        perKg = cost / w;
+  if (perKg == null) return null;
+
+  if (to === "kg") return perKg;
+  if (to === "g")  return perKg / 1000;
+  if (to === "un") return w > 0 ? perKg * w : null;
+  return null;
+}
+
 // Define o modo de auto min/max do item ('off' | 'weekly' | 'monthly').
 // Mantém auto_min_enabled em sync; o trigger no banco recalcula reorder/max.
 async function dbSetStockItemAutoMinMode(itemId, mode) {
@@ -1372,6 +1406,9 @@ function mapTechSheetFromDb(row) {
     .map((it) => {
       const arr = [it.display_name, `${Number(it.qty)} ${it.unit}`, Number(it.line_cost) || 0];
       arr.id = it.id;
+      // Origem do insumo: o modal de edição precisa dela para reconhecer a linha
+      // quando a unidade da ficha difere da unidade do estoque (kg × un).
+      arr.stockItemId = it.stock_item_id || null;
       arr.unitCost = Number(it.unit_cost) || 0;
       arr.qty = Number(it.qty) || 0;
       arr.unit = it.unit;
@@ -1554,8 +1591,10 @@ async function dbInsertPreparationItem(preparationId, ingredient, sortOrder = 0)
   const m = String(qtyText || "").match(/([\d,.]+)\s*(.*)/);
   const qty = m ? parseFloat(m[1].replace(",", ".")) || 0 : 0;
   const unit = m ? (m[2] || "kg").trim() : "kg";
-  const totalCost = Number(lineCost) || 0;
-  const unitCost = qty > 0 ? totalCost / qty : 0;
+  const unitCost = ingredient.unitCost != null
+    ? Number(ingredient.unitCost) || 0
+    : (qty > 0 ? (Number(lineCost) || 0) / qty : 0);
+  const totalCost = ingredient.unitCost != null ? qty * unitCost : (Number(lineCost) || 0);
   const { data, error } = await _client.from("preparation_items").insert({
     preparation_id: preparationId,
     stock_item_id:  ingredient.stockItemId || null,
@@ -1664,7 +1703,11 @@ async function dbInsertTechSheetItem(techSheetId, item, sortOrder = 0) {
   const m = String(qtyText || "").match(/([\d,.]+)\s*(.*)/);
   const qty = m ? parseFloat(m[1].replace(",", ".")) || 0 : 0;
   const unit = m ? (m[2] || "un").trim() : "un";
-  const unitCost = qty > 0 ? (Number(cost) || 0) / qty : 0;
+  // unitCost explícito vem do modal quando a ficha mede numa unidade diferente da
+  // do estoque — derivar de custo/qtd perderia a conversão nas casas decimais.
+  const unitCost = item.unitCost != null
+    ? Number(item.unitCost) || 0
+    : (qty > 0 ? (Number(cost) || 0) / qty : 0);
   const { data, error } = await _client.from("tech_sheet_items").insert({
     tech_sheet_id: techSheetId,
     stock_item_id: item.stock_item_id || item.stockItemId || null,
@@ -3875,6 +3918,21 @@ async function dbSupplyListTransfers(tenantId, { limit = 300 } = {}) {
   return { data: (data || []).map(mapSupplyTransferFromDb), error: null };
 }
 
+// Unidade de destino de cada transferência: { [transferId]: { name, tenantId } }.
+// Usado pelo painel do insumo para quebrar o consumo da rede por unidade em vez
+// de somar tudo numa linha só. A RLS de supply_transfers já libera o remetente.
+async function dbSupplyTransferDestinations(ids) {
+  const uniq = Array.from(new Set((ids || []).filter(Boolean)));
+  if (!isDbOnline() || !_client || uniq.length === 0) return { data: {}, error: null };
+  const { data, error } = await _client.from("supply_transfers")
+    .select("id, to_name, to_tenant_id")
+    .in("id", uniq);
+  if (error) return { data: {}, error };
+  const map = {};
+  for (const r of data || []) map[r.id] = { name: r.to_name || "—", tenantId: r.to_tenant_id || null };
+  return { data: map, error: null };
+}
+
 // Cria transferência em rascunho. items: [{fromItemId, name, qty, unit}]
 async function dbSupplyCreateTransfer(t) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
@@ -4280,6 +4338,7 @@ Object.assign(window, {
   dbListSuppliers, dbInsertSupplier, dbUpdateSupplier, dbDeleteSupplier,
   dbListStockItems, dbInsertStockItem, dbUpdateStockItem, dbDeleteStockItem, dbApplyStockMovement, dbListStockMovements,
   dbSetStockItemAutoMin, dbSetStockItemAutoMinMode,
+  stockItemUnitWeightKg, stockItemCostIn,
   dbListPaymentMethods,
   dbListRevenueEntries, dbInsertRevenueEntry, dbUpdateRevenueEntry, dbDeleteRevenueEntry,
   dbListKitchenRequests, dbInsertKitchenRequest, dbUpdateKitchenRequestStatus, dbDeleteKitchenRequest,
@@ -4326,7 +4385,7 @@ Object.assign(window, {
   mapProductionOrderFromDb, mapProductionRecipeFromDb, prodOrderWithLiveWeights,
   dbSupplyMembershipStatus,
   dbSupplyOverview, dbSupplyLookupByCode, dbSupplyInvite, dbSupplyRespondInvite, dbSupplyRemoveMember,
-  dbSupplyCatalog, dbSupplyListTransfers, dbSupplyCreateTransfer, dbSupplySendTransfer,
+  dbSupplyCatalog, dbSupplyListTransfers, dbSupplyTransferDestinations, dbSupplyCreateTransfer, dbSupplySendTransfer,
   dbSupplyReceiveTransfer, dbSupplyCancelTransfer, dbSupplyDeleteTransfer, dbSupplyItemLinks,
   dbSupplyDivergences,
   dbSupplyListRequests, dbSupplyCreateRequest, dbSupplyUpdateRequestStatus,

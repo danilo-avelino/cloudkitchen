@@ -3,7 +3,14 @@
 // Reaproveita as funções db* do desktop (page-recipes.jsx): custos são recalculados
 // pelos triggers do banco. Insumo pode vir do estoque ou de um preparo.
 
-const _rcBRL = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Abaixo de R$ 1,00 vira centavos — espelho de _brlText/_unitText do desktop.
+const _rcSubReal = (v) => { const n = Number(v) || 0; return n !== 0 && Math.abs(n) < 1; };
+const _rcCents = (v) => {
+  const c = (Number(v) || 0) * 100;
+  return c.toFixed(2).replace(/\.00$/, "").replace(".", ",") + (c === 1 ? " centavo" : " centavos");
+};
+const _rcBRL = (v) => _rcSubReal(v) ? _rcCents(v)
+  : "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const _rcNorm = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 const _rcNum = (raw) => { const n = parseFloat(String(raw ?? "").replace(",", ".")); return Number.isFinite(n) ? n : 0; };
 
@@ -110,6 +117,21 @@ function MobileRecipes({ scope = "all" }) {
     setLocal((prev) => prev.map((it) => it.id === item.id ? recompute({ ...it, items: (it.items || []).filter((_, i) => i !== idx) }) : it));
   };
 
+  // Peso de 1 unidade do insumo (kg), informado quando a ficha quer medir em kg
+  // um item cadastrado em "un". Grava no mesmo campo do Estoque (portion_qty).
+  const saveItemWeight = async (stockItemId, portionKg) => {
+    if (source === "db" && tenantId) {
+      const { error } = await dbUpdateStockItem(stockItemId, { portionQty: portionKg, portionUnit: "kg" });
+      if (error) { window.showToast?.(`Erro ao salvar o peso: ${error.message}`, { tone: "crit", ttl: 4500 }); return null; }
+    }
+    const next = (stockItems || []).map((si) =>
+      si.id === stockItemId ? { ...si, portionQty: portionKg, portionUnit: "kg" } : si);
+    setStockItems(next);
+    window.__stockItemsCache = next;
+    window.showToast?.("Peso por unidade salvo no insumo", { tone: "ok" });
+    return next.find((si) => si.id === stockItemId) || null;
+  };
+
   const base = isPrep ? preps : sheets;
   const q = _rcNorm(query.trim());
   const list = useMemo(() => base
@@ -149,6 +171,7 @@ function MobileRecipes({ scope = "all" }) {
       {detail && (
         <RecipeSheet
           item={detail} isPrep={isPrep} stockItems={stockItems} preparations={preps}
+          onSaveItemWeight={saveItemWeight}
           onClose={() => setDetailId(null)}
           onEdit={() => setForm({ edit: detail })}
           onAddIngredient={(ing) => addIngredient(detail, ing)}
@@ -194,7 +217,7 @@ function RecipeCard({ item, isPrep, onTap }) {
   );
 }
 
-function RecipeSheet({ item, isPrep, stockItems, preparations, onClose, onEdit, onAddIngredient, onRemoveIngredient }) {
+function RecipeSheet({ item, isPrep, stockItems, preparations, onSaveItemWeight, onClose, onEdit, onAddIngredient, onRemoveIngredient }) {
   const op = MOCK.opById ? MOCK.opById(item.op) : null;
   const items = item.items || [];
   const theo = Number(item.theo) || 0, price = Number(item.price) || 0;
@@ -261,6 +284,7 @@ function RecipeSheet({ item, isPrep, stockItems, preparations, onClose, onEdit, 
       {adding && (
         <IngredientSheet
           stockItems={stockItems} preparations={preparations} excludeId={isPrep ? item.id : null}
+          onSaveItemWeight={onSaveItemWeight}
           onClose={() => setAdding(false)}
           onConfirm={(ing) => { onAddIngredient(ing); setAdding(false); }}
         />
@@ -324,24 +348,86 @@ function RecipeForm({ isPrep, initial, cats, onClose, onSave }) {
   );
 }
 
+// Unidades oferecidas na ficha (espelha _measureOptions do desktop).
+const _rcMeasures = (item) => [...new Set([String(item?.unit || "").toLowerCase(), "kg", "g", "un"].filter(Boolean))];
+const _rcIsMass = (u) => ["kg", "g"].includes(String(u || "").toLowerCase());
+// Preparo tem rendimento (kg ou und), não peso por unidade — só converte kg ↔ g.
+const _rcMassCostIn = (cost, from, to) => {
+  const c = Number(cost) || 0;
+  const f = String(from || "").toLowerCase(), t = String(to || "").toLowerCase();
+  if (f === t) return c;
+  if (!_rcIsMass(f) || !_rcIsMass(t)) return null;
+  return t === "g" ? c / 1000 : c * 1000;
+};
+// Custo unitário precisa de mais casas que o total: R$/g cai na casa dos milésimos.
+const _rcUnitBRL = (v) => _rcSubReal(v) ? _rcCents(v)
+  : "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+
 // ===== Sheet: adicionar insumo (estoque ou preparo) =====
-function IngredientSheet({ stockItems, preparations, excludeId, onClose, onConfirm }) {
+function IngredientSheet({ stockItems, preparations, excludeId, onClose, onConfirm, onSaveItemWeight }) {
   const sources = [
-    ...(stockItems || []).map((si) => ({ key: `stock:${si.id}`, kind: "stock", name: si.name, unit: si.unit, cost: si.cost, label: `${si.name} · ${_rcBRL(si.cost)}/${si.unit}` })),
+    ...(stockItems || []).map((si) => ({ key: `stock:${si.id}`, kind: "stock", name: si.name, unit: si.unit, cost: si.cost, item: si, label: `${si.name} · ${_rcBRL(si.cost)}/${si.unit}` })),
     ...(preparations || []).filter((p) => !excludeId || p.id !== excludeId).map((p) => ({ key: `prep:${p.id}`, kind: "preparation", name: p.name, unit: p.yieldUnit, cost: p.unitCost || 0, label: `🔧 ${p.name} · ${_rcBRL(p.unitCost || 0)}/${p.yieldUnit}` })),
   ];
   const [sourceKey, setSourceKey] = useState("");
   const [qty, setQty] = useState("");
-  const src = sources.find((s) => s.key === sourceKey);
-  const unitCost = src ? src.cost : 0;
-  const cost = _rcNum(qty) * unitCost;
-  const valid = src && _rcNum(qty) > 0;
+  // Unidade usada NESTA ficha — pode diferir da unidade do estoque (kg × un).
+  const [unit, setUnit] = useState("");
+  const [askWeightFor, setAskWeightFor] = useState(null);
+  const [savingWeight, setSavingWeight] = useState(false);
 
+  const src = sources.find((s) => s.key === sourceKey);
+  const stockSrc = src?.kind === "stock" ? src.item : null;
+  const lineUnit = unit || src?.unit || "";
+  // Estoque converte pelo peso da unidade; preparo só entre kg e g.
+  const srcCostIn = (u) => !src ? null
+    : stockSrc ? stockItemCostIn(stockSrc, u) : _rcMassCostIn(src.cost, src.unit, u);
+  const unitCost = srcCostIn(lineUnit) ?? 0;
+  const cost = _rcNum(qty) * unitCost;
+  const valid = !!src && _rcNum(qty) > 0 && unitCost > 0;
+
+  // Vazio = origem sem conversão possível (preparo que rende em "und"): sem seletor.
+  const measureUnits = !src ? []
+    : stockSrc ? _rcMeasures(stockSrc)
+    : (_rcIsMass(src.unit) ? [...new Set([String(src.unit).toLowerCase(), "kg", "g"])] : []);
+
+  const pickSource = (key) => {
+    setSourceKey(key);
+    setUnit(sources.find((s) => s.key === key)?.unit || "");
+  };
+
+  // Converter de/para "un" exige saber quanto pesa 1 unidade do insumo; sem isso,
+  // pede antes. Só insumo de estoque tem como destravar (preparo nem oferece).
+  const changeMeasure = (u) => {
+    if (u === lineUnit) return;
+    if (!src) { setUnit(u); return; }
+    if (srcCostIn(u) == null) { if (stockSrc) setAskWeightFor(u); return; }
+    setUnit(u);
+  };
+
+  const saveItemWeight = async (grams) => {
+    if (savingWeight || !stockSrc || !askWeightFor) return;
+    setSavingWeight(true);
+    try {
+      const updated = typeof onSaveItemWeight === "function"
+        ? await onSaveItemWeight(stockSrc.id, grams / 1000)
+        : null;
+      if (!updated) return;
+      setUnit(askWeightFor);
+      setAskWeightFor(null);
+    } finally {
+      setSavingWeight(false);
+    }
+  };
+
+  const confirmedRef = useRef(false);
   const confirm = () => {
-    if (!valid) return;
-    const arr = [src.name, `${String(qty).replace(".", ",")} ${src.unit}`, Number(cost.toFixed(2))];
+    if (!valid || confirmedRef.current) return;
+    confirmedRef.current = true;
+    const arr = [src.name, `${String(qty).replace(".", ",")} ${lineUnit}`, Number(cost.toFixed(2))];
     if (sourceKey.startsWith("stock:")) arr.stockItemId = sourceKey.slice(6);
     else if (sourceKey.startsWith("prep:")) arr.sourcePrepId = sourceKey.slice(5);
+    arr.unitCost = unitCost;
     onConfirm(arr);
   };
 
@@ -353,17 +439,84 @@ function IngredientSheet({ stockItems, preparations, excludeId, onClose, onConfi
       footer={<MPrimaryButton onClick={confirm} disabled={!valid}>Adicionar{valid ? ` · ${_rcBRL(cost)}` : ""}</MPrimaryButton>}
     >
       <MField label="Insumo / preparo">
-        <select value={sourceKey} onChange={(e) => setSourceKey(e.target.value)} style={mInput}>
+        <select value={sourceKey} onChange={(e) => pickSource(e.target.value)} style={mInput}>
           <option value="">— Selecione —</option>
           {sources.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
         </select>
       </MField>
-      <MField label={`Quantidade${src ? ` (${src.unit})` : ""}`}>
+      {measureUnits.length > 0 && (
+        <MField label="Unidade na ficha"
+                hint={stockSrc
+                  ? "Medir em kg/g um insumo em un (ou o contrário) converte o custo pelo peso da unidade."
+                  : "O custo do preparo é convertido junto (kg ↔ g)."}>
+          <select value={lineUnit} onChange={(e) => changeMeasure(e.target.value)} style={mInput}>
+            {measureUnits.map((u) => <option key={u} value={u}>{u}</option>)}
+          </select>
+        </MField>
+      )}
+      <MField label={`Quantidade${lineUnit ? ` (${lineUnit})` : ""}`}>
         <input value={qty} inputMode="decimal" onChange={(e) => setQty(e.target.value)} placeholder="0" style={mInput} />
       </MField>
       {valid && (
         <div style={{ fontSize: 12.5, color: "var(--fg-2)", textAlign: "center" }}>
-          {_rcNum(qty).toLocaleString("pt-BR")} {src.unit} × {_rcBRL(unitCost)} = <strong style={{ color: "var(--fg-0)" }}>{_rcBRL(cost)}</strong>
+          {_rcNum(qty).toLocaleString("pt-BR")} {lineUnit} × {_rcUnitBRL(unitCost)} = <strong style={{ color: "var(--fg-0)" }}>{_rcBRL(cost)}</strong>
+        </div>
+      )}
+
+      {askWeightFor && stockSrc && (
+        <StockWeightSheet
+          item={stockSrc} targetUnit={askWeightFor} saving={savingWeight}
+          onClose={() => setAskWeightFor(null)}
+          onSubmit={saveItemWeight}
+        />
+      )}
+    </BottomSheet>
+  );
+}
+
+// Pergunta quanto pesa 1 unidade do insumo — espelho mobile do StockWeightModal.
+// Grava no cadastro do insumo (portion_qty), não na ficha.
+function StockWeightSheet({ item, targetUnit, saving, onClose, onSubmit }) {
+  const [grams, setGrams] = useState("");
+  const g = _rcNum(grams);
+  const valid = g > 0;
+  const preview = valid ? stockItemCostIn({ ...item, portionQty: g / 1000, portionUnit: "kg" }, targetUnit) : null;
+
+  const rows = [
+    ["SKU", item.code || "—"],
+    ["Categoria", item.cat || "—"],
+    ["Unidade no estoque", item.unit],
+    ["Custo unit.", `${_rcBRL(item.cost)}/${item.unit}`],
+    ["Saldo atual", `${Number(item.qty || 0).toLocaleString("pt-BR", { maximumFractionDigits: 3 })} ${item.unit}`],
+    ["Fornecedor", item.supplier || "—"],
+  ];
+
+  return (
+    <BottomSheet
+      title="Quanto pesa 1 unidade?"
+      subtitle={`${item.name} · para medir em ${targetUnit} na ficha`}
+      onClose={saving ? undefined : onClose}
+      footer={<MPrimaryButton onClick={() => onSubmit(g)} disabled={!valid} loading={saving}>Salvar peso e usar</MPrimaryButton>}
+    >
+      <div style={{ border: "1px solid var(--line)", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+        {rows.map(([label, value], i) => (
+          <div key={label} style={{
+            display: "flex", justifyContent: "space-between", gap: 12, padding: "9px 12px", fontSize: 12.5,
+            borderTop: i === 0 ? "none" : "1px solid var(--line-soft)",
+          }}>
+            <span style={{ color: "var(--fg-3)" }}>{label}</span>
+            <span style={{ fontFamily: "var(--mono)", color: "var(--fg-0)", textAlign: "right" }}>{value}</span>
+          </div>
+        ))}
+      </div>
+
+      <MField label="Peso por unidade (g)" hint="Salvo no cadastro do insumo — a Produção usa o mesmo peso.">
+        <input value={grams} inputMode="decimal" autoFocus onChange={(e) => setGrams(e.target.value)} placeholder="ex.: 3000 para 3 kg" style={mInput} />
+      </MField>
+
+      {preview != null && (
+        <div style={{ fontSize: 12.5, color: "var(--fg-2)", textAlign: "center", marginTop: 10 }}>
+          1 un = {g.toLocaleString("pt-BR")} g → <strong style={{ color: "var(--fg-0)" }}>{_rcUnitBRL(preview)}/{targetUnit}</strong> na ficha
         </div>
       )}
     </BottomSheet>

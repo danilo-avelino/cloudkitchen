@@ -273,7 +273,9 @@ function Recipes({ scope }) {
     // DB path: ficha técnica online → sempre usa DB
     if (!isPrep && source === "db" && dbStatus.isOnline && tenantId) {
       // ingredient is [name, qtyText, cost]
-      const { error } = await dbInsertTechSheetItem(sheet.id, ingredient);
+      // sort_order igual ao caminho do preparo: sem ele toda linha nasce com 0 e a
+      // composição reordena sozinha a cada reload.
+      const { error } = await dbInsertTechSheetItem(sheet.id, ingredient, sheetItems.length);
       if (error) {
         window.showToast(`Erro ao adicionar insumo: ${error.message}`, { tone: "crit" });
         return;
@@ -289,6 +291,7 @@ function Recipes({ scope }) {
     setCurrentList((prev) => prev.map((it) => it.id === itemId
       ? recompute({ ...it, items: [...(it.items || []), ingredient] })
       : it));
+    window.showToast("Insumo adicionado (local) · sem banco, some ao recarregar", { tone: "warn" });
   };
 
   const handleRemoveItem = async (itemId, idx) => {
@@ -333,7 +336,9 @@ function Recipes({ scope }) {
       const m = String(qtyText || "").match(/([\d,.]+)\s*(.*)/);
       const qty = m ? parseFloat(m[1].replace(",", ".")) || 0 : 0;
       const unit = m ? (m[2] || "un").trim() : "un";
-      const unitCost = qty > 0 ? (cost || 0) / qty : 0;
+      const unitCost = ingredient.unitCost != null
+        ? Number(ingredient.unitCost) || 0
+        : (qty > 0 ? (cost || 0) / qty : 0);
 
       const updFn = isPrep ? dbUpdatePreparationItem : dbUpdateTechSheetItem;
       const { error } = await updFn(item.id, { name, qty, unit, unitCost });
@@ -455,8 +460,23 @@ function Recipes({ scope }) {
     }
   };
 
-  const handleSave = (itemId) => {
-    window.showToast(`${capitalize(labelSingular)} ${itemId} salvo`, { tone: "ok" });
+  // Peso de 1 unidade do insumo (em kg), informado pelo modal da ficha quando a
+  // receita quer medir em kg um item cadastrado em "un". Grava no mesmo campo do
+  // Estoque (portion_qty) — é a mesma informação que a Produção usa.
+  const handleSaveItemWeight = async (stockItemId, portionKg) => {
+    if (tenantId && dbStatus.isOnline) {
+      const { error } = await dbUpdateStockItem(stockItemId, { portionQty: portionKg, portionUnit: "kg" });
+      if (error) {
+        window.showToast(`Erro ao salvar o peso: ${error.message}`, { tone: "crit", ttl: 4500 });
+        return null;
+      }
+    }
+    const next = (stockItems || []).map((si) =>
+      si.id === stockItemId ? { ...si, portionQty: portionKg, portionUnit: "kg" } : si);
+    setStockItems(next);
+    window.__stockItemsCache = next;
+    window.showToast("Peso por unidade salvo no insumo", { tone: "ok" });
+    return next.find((si) => si.id === stockItemId) || null;
   };
 
   // Fonte unificada de insumos disponíveis (usada pelo IngredientModal):
@@ -551,10 +571,11 @@ function Recipes({ scope }) {
               key={current.id}
               item={current}
               mode={mode}
+              source={source}
               stockItems={stockItems}
               availablePreparations={availablePreparations}
+              onSaveItemWeight={handleSaveItemWeight}
               onDuplicate={() => handleDuplicate(current.id)}
-              onSave={() => handleSave(current.id)}
               onEdit={() => setEditingId(current.id)}
               onAddItem={(ing) => handleAddItem(current.id, ing)}
               onRemoveItem={(idx) => handleRemoveItem(current.id, idx)}
@@ -704,12 +725,12 @@ function ListRow({ item, mode, isActive, onSelect, menuOpen, onToggleMenu, onEdi
           {isPrep ? (
             <>
               <span style={{ color: "var(--fg-2)" }}>{item.yieldQty} {item.yieldUnit}</span>
-              <span style={{ color: "var(--fg-3)" }}>R$ {(item.unitCost || 0).toFixed(2)}/{item.yieldUnit}</span>
+              <span style={{ color: "var(--fg-3)" }}>{_unitText(item.unitCost || 0)}/{item.yieldUnit}</span>
             </>
           ) : (
             <>
-              <span style={{ color: "var(--fg-2)" }}>R$ {item.price.toFixed(2)}</span>
-              <span style={{ color: "var(--fg-3)" }}>custo R$ {item.theo.toFixed(2)}</span>
+              <span style={{ color: "var(--fg-2)" }}>{_brlText(item.price)}</span>
+              <span style={{ color: "var(--fg-3)" }}>custo {_brlText(item.theo)}</span>
             </>
           )}
         </div>
@@ -761,7 +782,7 @@ function EmptyEditor({ mode, onCreate }) {
 }
 
 // ===== Editor unificado =====
-function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicate, onSave, onEdit, onAddItem, onRemoveItem, onUpdateItem }) {
+function Editor({ item, mode, source, stockItems = [], availablePreparations, onSaveItemWeight, onDuplicate, onEdit, onAddItem, onRemoveItem, onUpdateItem }) {
   const op = MOCK.opById(item.op);
   const isPrep = mode === "preparations";
   const items = item.items || [];
@@ -785,17 +806,17 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
   const kpis = isPrep ? (
     <>
       <KpiCard label="Aproveitamento" data={{ v: `${item.yieldQty || 1} ${item.yieldUnit || "kg"}`, d: "rendimento", tone: "up", sub: "" }} />
-      <KpiCard label="Custo total"    data={{ v: `R$ ${theo.toFixed(2)}`, d: `${items.length} insumos`, tone: "warn", sub: "" }} />
-      <KpiCard label="Custo unitário" data={{ v: `R$ ${(item.unitCost || 0).toFixed(2)}/${item.yieldUnit || "kg"}`, d: "usado em outras fichas", tone: "up", sub: "" }} accent />
+      <KpiCard label="Custo total"    data={{ v: _brlText(theo), d: `${items.length} insumos`, tone: "warn", sub: "" }} />
+      <KpiCard label="Custo unitário" data={{ v: `${_unitText(item.unitCost || 0)}/${item.yieldUnit || "kg"}`, d: "usado em outras fichas", tone: "up", sub: "" }} accent />
       <KpiCard label="Tipo" data={{ v: "Preparo", d: item.code || item.id, tone: "warn", sub: "" }} />
     </>
   ) : (
     <>
-      <KpiCard label="Preço de venda" data={{ v: `R$ ${price.toFixed(2)}`, d: "no iFood", tone: "up", sub: "" }} />
-      <KpiCard label="Custo composto" data={{ v: `R$ ${theo.toFixed(2)}`, d: `${items.length} insumos`, tone: "warn", sub: "" }} />
+      <KpiCard label="Preço de venda" data={{ v: _brlText(price), d: "no iFood", tone: "up", sub: "" }} />
+      <KpiCard label="Custo composto" data={{ v: _brlText(theo), d: `${items.length} insumos`, tone: "warn", sub: "" }} />
       <KpiCard label="CMV teórico"    data={{ v: `${cmv.toFixed(1)}%`, d: "meta 30%", tone: cmv > 31 ? "down" : "up", sub: "" }} accent />
       <KpiCard label="Margem de contribuição"   data={{
-        v: `R$ ${(price - theo).toFixed(2)}`,
+        v: _brlText(price - theo),
         d: price > 0 ? `${(((price - theo) / price) * 100).toFixed(1)}% por unidade` : "—",
         tone: "up", sub: ""
       }} />
@@ -822,7 +843,25 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
           {!isPrep && (
             <button className="btn" data-size="sm" onClick={() => notImplemented("Histórico de custo")}>Histórico de custo</button>
           )}
-          <button className="btn" data-variant="primary" data-size="sm" onClick={onSave}>Salvar</button>
+          {source === "db" ? (
+            <span className="mono" title="Insumos, custos e edições vão para o banco assim que você confirma."
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5, alignSelf: "center",
+                    padding: "0 4px", fontSize: 10, letterSpacing: "0.08em",
+                    textTransform: "uppercase", color: "var(--ok)",
+                  }}>
+              <I.Check size={11} />salvo automaticamente
+            </span>
+          ) : (
+            <span className="mono" title="Sem conexão com o banco — as alterações ficam só nesta sessão."
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5, alignSelf: "center",
+                    padding: "0 4px", fontSize: 10, letterSpacing: "0.08em",
+                    textTransform: "uppercase", color: "var(--warn)",
+                  }}>
+              <I.AlertTriangle size={11} />somente local
+            </span>
+          )}
         </div>
       </div>
 
@@ -859,6 +898,11 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
               const unitCost = row.unitCost != null
                 ? row.unitCost
                 : (row.qty > 0 ? cost / row.qty : 0);
+              // Custo de 1 unidade da medida DA LINHA (R$/un, R$/kg, R$/g…), que
+              // varia de linha para linha — sem o sufixo, R$ 70,17 e R$ 4,32 parecem
+              // a mesma escala. Linha em gramas cai na casa dos milésimos: com 2
+              // casas virava "R$ 0,00" mesmo com custo composto certo.
+              const rowUnit = row.unit || String(qty).match(/([a-zA-ZçÇãÃõÕéÉá-ú]+)\s*$/)?.[1] || "";
               const pct = item.theo > 0 ? (cost / item.theo) * 100 : 0;
               return (
                 <tr key={i}>
@@ -869,8 +913,8 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
                     </span>
                   </td>
                   <td className="num">{qty}</td>
-                  <td className="num">R$ {unitCost.toFixed(2)}</td>
-                  <td className="num">R$ {cost.toFixed(2)}</td>
+                  <td className="num">{_unitText(unitCost)}{rowUnit ? `/${rowUnit}` : ""}</td>
+                  <td className="num">{_brlText(cost)}</td>
                   <td className="num" style={{ color: "var(--fg-2)" }}>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
                       <span style={{ width: 40, height: 3, background: "var(--bg-3)", borderRadius: 1, overflow: "hidden", position: "relative" }}>
@@ -906,6 +950,7 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
         <IngredientModal
           stockItems={stockItems}
           availablePreparations={availablePreparations}
+          onSaveItemWeight={onSaveItemWeight}
           excludeId={isPrep ? item.id : null}  // não permite preparo se referenciar a si mesmo
           onCancel={() => setAdding(false)}
           onSubmit={(ing) => { onAddItem(ing); setAdding(false); }}
@@ -917,6 +962,7 @@ function Editor({ item, mode, stockItems = [], availablePreparations, onDuplicat
           stockItems={stockItems}
           initial={items[editingIdx]}
           availablePreparations={availablePreparations}
+          onSaveItemWeight={onSaveItemWeight}
           excludeId={isPrep ? item.id : null}
           onCancel={() => setEditingIdx(null)}
           onSubmit={(ing) => { onUpdateItem(editingIdx, ing); setEditingIdx(null); }}
@@ -1101,7 +1147,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
       animation: "fadeUp 160ms ease both",
     }}>
       <form onClick={(e) => e.stopPropagation()} onSubmit={submit} className="card" style={{
-        width: 480, maxWidth: "calc(100vw - 32px)",
+        width: 560, maxWidth: "calc(100vw - 32px)",
       }}>
         <div className="card-header">
           <div>
@@ -1113,7 +1159,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
           </button>
         </div>
         <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 12 }}>
             <Field label="Operação" hint="Marca/cozinha responsável.">
               <select className="select" value={op} onChange={(e) => setOp(e.target.value)} required>
                 {ops.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
@@ -1176,7 +1222,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
           </Field>
 
           {isPrep ? (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 128px", gap: 12 }}>
               <Field label="Rendimento" hint="Quantidade que esse preparo rende.">
                 <input className="input mono" inputMode="decimal" value={yieldQty}
                        onChange={(e) => setYieldQty(e.target.value)} placeholder="1" required />
@@ -1187,7 +1233,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
                     <button key={u} type="button" className="btn" data-size="sm"
                             onClick={() => setYieldUnit(u)}
                             style={{
-                              flex: 1, justifyContent: "center",
+                              flex: 1, minWidth: 0, justifyContent: "center",
                               background:   yieldUnit === u ? "var(--accent-soft)" : "var(--bg-2)",
                               borderColor:  yieldUnit === u ? "var(--accent-line)" : "var(--line)",
                               color:        yieldUnit === u ? "var(--accent-bright)" : "var(--fg-1)",
@@ -1199,7 +1245,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
               </Field>
             </div>
           ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 120px", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr) 128px", gap: 12 }}>
               <Field label="Preço de venda (R$)" hint={isEdit ? "Recalcula o CMV teórico automaticamente." : "Pode ser ajustado depois."}>
                 <input className="input" type="text" inputMode="decimal" value={price}
                        onChange={(e) => setPrice(e.target.value)} placeholder="0,00" />
@@ -1214,7 +1260,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
                     <button key={u} type="button" className="btn" data-size="sm"
                             onClick={() => setYieldUnit(u)}
                             style={{
-                              flex: 1, justifyContent: "center",
+                              flex: 1, minWidth: 0, justifyContent: "center",
                               background:   yieldUnit === u ? "var(--accent-soft)" : "var(--bg-2)",
                               borderColor:  yieldUnit === u ? "var(--accent-line)" : "var(--line)",
                               color:        yieldUnit === u ? "var(--accent-bright)" : "var(--fg-1)",
@@ -1366,7 +1412,47 @@ function IngredientSearchCombo({ sources, sourceKey, name, onPick, onTypeName, a
   );
 }
 
-function IngredientModal({ initial, stockItems, availablePreparations = [], excludeId, onCancel, onSubmit, onDelete }) {
+// Abaixo de R$ 1,00 o valor vira centavos: "R$ 0,0030/g" não se lê, "0,30 centavos/g" sim.
+// 2 casas em centavos cobrem exatamente as 4 casas de numeric(12,4) — nada se perde.
+const _isSubReal = (v) => { const n = Number(v) || 0; return n !== 0 && Math.abs(n) < 1; };
+const _centsText = (v) => {
+  const c = (Number(v) || 0) * 100;
+  return `${c.toFixed(2).replace(/\.00$/, "").replace(".", ",")} ${c === 1 ? "centavo" : "centavos"}`;
+};
+// Dinheiro fechado (custo composto, totais, preços): 2 casas.
+const _brlText  = (v) => _isSubReal(v) ? _centsText(v) : `R$ ${(Number(v) || 0).toFixed(2).replace(".", ",")}`;
+// Custo por unidade: até 4 casas, que é a precisão que o banco guarda.
+const _unitText = (v) => _isSubReal(v) ? _centsText(v) : `R$ ${_ucText(v)}`;
+
+// Custo unitário como texto do input. numeric(12,4) no banco — 4 casas é o
+// máximo que sobrevive à ida e volta, e nem kg × un nem R$/g são redondos.
+// Sem separador de milhar: o valor volta por parseFloat(v.replace(",", ".")).
+const _ucText = (v) =>
+  (Number(v) || 0).toFixed(4).replace(/(\.\d\d)0+$/, "$1").replace(".", ",");
+const _gText  = (g) => Number(g || 0).toLocaleString("pt-BR", { maximumFractionDigits: 1 });
+const _sameUnit = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
+// kg e g convertem entre si por fator 1000; qualquer outra unidade é contável e
+// só entra na conta pelo peso cadastrado.
+const _isMassUnit = (u) => _sameUnit(u, "kg") || _sameUnit(u, "g");
+
+// Conversão kg ↔ g pura. É o que dá pra fazer com um preparo: ele tem rendimento
+// (kg ou und), não tem peso por unidade como o insumo de estoque — então preparo
+// que rende em "und" não vira kg/g. null quando alguma ponta não é massa.
+function _massCostIn(cost, from, to) {
+  const c = Number(cost) || 0;
+  if (_sameUnit(from, to)) return c;
+  if (!_isMassUnit(from) || !_isMassUnit(to)) return null;
+  return _sameUnit(to, "g") ? c / 1000 : c * 1000;
+}
+
+// Unidades oferecidas na ficha: kg, g e un, mais a do cadastro quando é outra
+// (a lista do estoque hoje só tem kg/un, mas há bases antigas com L, cx, etc.).
+function _measureOptions(item, current) {
+  const native = String(item?.unit || "").toLowerCase();
+  return [...new Set([native, "kg", "g", "un", String(current || "").toLowerCase()].filter(Boolean))];
+}
+
+function IngredientModal({ initial, stockItems, availablePreparations = [], excludeId, onCancel, onSubmit, onDelete, onSaveItemWeight }) {
   const isEdit = !!initial;
   // Recebe stockItems via prop (carregado uma vez no parent · evita fetch a cada abertura)
   const stock = stockItems && stockItems.length ? stockItems : (window.__stockItemsCache || MOCK.STOCK_ITEMS);
@@ -1376,17 +1462,18 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
     ...stock.map((si) => ({
       key:   `stock:${si.id}`,
       kind:  "stock",
-      label: `${si.name} · ${si.cat} · R$ ${si.cost.toFixed(2)}/${si.unit}`,
+      label: `${si.name} · ${si.cat} · ${_unitText(si.cost)}/${si.unit}`,
       name:  si.name,
       unit:  si.unit,
       cost:  si.cost,
+      item:  si,
     })),
     ...availablePreparations
       .filter((p) => !excludeId || p.id !== excludeId)
       .map((p) => ({
         key:   `prep:${p.id}`,
         kind:  "preparation",
-        label: `🔧 ${p.name} · preparo · R$ ${(p.unitCost || 0).toFixed(2)}/${p.yieldUnit}`,
+        label: `🔧 ${p.name} · preparo · ${_unitText(p.unitCost || 0)}/${p.yieldUnit}`,
         name:  p.name,
         unit:  p.yieldUnit,
         cost:  p.unitCost || 0,
@@ -1396,6 +1483,12 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
   // Tenta achar a fonte que bata com o insumo existente
   const findInitialSource = () => {
     if (!initial) return "";
+    // A linha do banco sabe de qual insumo veio. Sem isso, uma linha em kg de um
+    // insumo cadastrado em "un" nunca casaria pelo par nome+unidade abaixo.
+    if (initial.stockItemId) {
+      const key = `stock:${initial.stockItemId}`;
+      if (sources.some((src) => src.key === key)) return key;
+    }
     const [iname, iqty] = initial;
     const m = String(iqty).match(/([a-zA-ZçÇãÃõÕéÉá-ú]+)\s*$/);
     const iunit = m ? m[1].toLowerCase() : null;
@@ -1413,10 +1506,36 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
   const [name, setName]           = useState(initial?.[0] || "");
   const [qtyVal, setQtyVal]       = useState(initial ? extractQty(initial[1]) : "");
   const [unit, setUnit]           = useState(initial ? extractUnit(initial[1]) : "und");
-  const [unitCost, setUnitCost]   = useState("");
+  const [unitCost, setUnitCost]   = useState(initial?.unitCost != null ? _ucText(initial.unitCost) : "");
   const [cost, setCost]           = useState(initial?.[2] != null ? String(initial[2]).replace(".", ",") : "");
   const [costEdited, setCostEdited] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Unidade escolhida na ficha que está esperando o peso do insumo ser cadastrado
+  const [askWeightFor, setAskWeightFor] = useState(null);
+  const [savingWeight, setSavingWeight] = useState(false);
+
+  const selectedSrc = sources.find((s) => s.key === sourceKey);
+  const isPrepSelected = selectedSrc?.kind === "preparation";
+  const stockSrc = selectedSrc?.kind === "stock" ? selectedSrc.item : null;
+
+  // Custo da origem na unidade escolhida na ficha. Insumo de estoque converte pelo
+  // peso da unidade; preparo só converte entre kg e g.
+  const srcCostIn = (u) => {
+    if (!selectedSrc) return null;
+    return stockSrc
+      ? stockItemCostIn(stockSrc, u)
+      : _massCostIn(selectedSrc.cost, selectedSrc.unit, u);
+  };
+
+  // Unidades ofertadas no seletor. Vazio = origem sem conversão possível (preparo
+  // que rende em "und", entrada manual), aí o campo volta a ser texto travado.
+  const measureUnits = !selectedSrc
+    ? []
+    : stockSrc
+      ? _measureOptions(stockSrc, unit)
+      : (_isMassUnit(selectedSrc.unit)
+          ? [...new Set([String(selectedSrc.unit).toLowerCase(), "kg", "g"])]
+          : []);
 
   const onSourceChange = (key) => {
     setSourceKey(key);
@@ -1425,8 +1544,44 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
     if (!src) return;
     setName(src.name);
     setUnit(src.unit);
-    setUnitCost(String(src.cost).replace(".", ","));
+    setUnitCost(_ucText(src.cost));
     setCostEdited(false);
+  };
+
+  // Medir a ficha numa unidade diferente da do estoque exige saber quanto pesa
+  // uma unidade do insumo. Sem esse peso cadastrado, pede antes de aplicar.
+  const applyMeasure = (u, converted) => {
+    setUnit(u);
+    setUnitCost(_ucText(converted));
+    setCostEdited(false);
+  };
+
+  const changeMeasure = (u) => {
+    if (u === unit) return;
+    if (!selectedSrc) { setUnit(u); return; }
+    const converted = srcCostIn(u);
+    // Só insumo de estoque tem como destravar a conversão (cadastrando o peso);
+    // preparo sem conversão possível nem chega a oferecer a unidade.
+    if (converted == null) { if (stockSrc) setAskWeightFor(u); return; }
+    applyMeasure(u, converted);
+  };
+
+  const saveItemWeight = async (grams) => {
+    if (savingWeight || !stockSrc || !askWeightFor) return;
+    setSavingWeight(true);
+    try {
+      const portionKg = grams / 1000;
+      const updated = typeof onSaveItemWeight === "function"
+        ? await onSaveItemWeight(stockSrc.id, portionKg)
+        : { ...stockSrc, portionQty: portionKg, portionUnit: "kg" };
+      if (!updated) return;
+      const converted = stockItemCostIn(updated, askWeightFor);
+      if (converted == null) return;
+      applyMeasure(askWeightFor, converted);
+      setAskWeightFor(null);
+    } finally {
+      setSavingWeight(false);
+    }
   };
 
   useEffect(() => {
@@ -1440,6 +1595,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
 
   const parsedCost = parseFloat(String(cost).replace(",", ".")) || 0;
   const parsedQty  = parseFloat(String(qtyVal).replace(",", "."));
+  const parsedUnitCost = parseFloat(String(unitCost).replace(",", "."));
   const valid = name.trim() && Number.isFinite(parsedQty) && parsedQty > 0 && parsedCost >= 0;
 
   // Guard síncrono contra duplo clique — onSubmit (onAddItem) insere item no banco
@@ -1453,18 +1609,18 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
     // Preserva stock_item_id e source_prep_id quando origem é selecionada
     if (sourceKey?.startsWith("stock:")) arr.stockItemId = sourceKey.slice(6);
     else if (sourceKey?.startsWith("prep:")) arr.sourcePrepId = sourceKey.slice(5);
+    // Custo unitário na unidade da ficha — é o que o banco guarda (line_cost é
+    // gerado a partir dele), então mandar o valor convertido evita arredondar.
+    if (sourceKey && Number.isFinite(parsedUnitCost) && parsedUnitCost > 0) arr.unitCost = parsedUnitCost;
     onSubmit(arr);
   };
-
-  const selectedSrc = sources.find((s) => s.key === sourceKey);
-  const isPrepSelected = selectedSrc?.kind === "preparation";
 
   return (
     <Modal
       title={isEdit ? "Editar insumo" : "Adicionar insumo"}
       subtitle="Selecione um insumo do estoque, um preparo, ou edite os campos manualmente."
       onClose={onCancel}
-      width={520}
+      width={560}
       footer={
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", gap: 8 }}>
           <div>
@@ -1505,23 +1661,34 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
           )}
         </FormRow>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 92px minmax(0,1fr)", gap: 12 }}>
           <FormRow label="Quantidade">
             <input className="input mono" inputMode="decimal" value={qtyVal}
                    onChange={(e) => setQtyVal(e.target.value)} placeholder="0,16" />
           </FormRow>
-          <FormRow label="Unidade" hint={sourceKey ? "vem da origem" : null}>
-            <input
-              className="input mono"
-              value={unit}
-              onChange={(e) => setUnit(e.target.value)}
-              placeholder="kg"
-              readOnly={!!sourceKey}
-              title={sourceKey ? "Unidade vinculada ao insumo de origem" : ""}
-              style={sourceKey ? { background: "var(--bg-3)", color: "var(--fg-2)", cursor: "not-allowed" } : null}
-            />
+          <FormRow label="Unidade"
+                   hint={measureUnits.length ? measureUnits.join(" / ") : (sourceKey ? "vem da origem" : null)}>
+            {measureUnits.length > 0 ? (
+              <select className="select mono" value={unit} onChange={(e) => changeMeasure(e.target.value)}
+                      title="Medida usada nesta ficha · o custo é convertido junto">
+                {measureUnits.map((u) => <option key={u} value={u}>{u}</option>)}
+              </select>
+            ) : (
+              <input
+                className="input mono"
+                value={unit}
+                onChange={(e) => setUnit(e.target.value)}
+                placeholder="kg"
+                readOnly={!!sourceKey}
+                title={sourceKey ? "Unidade vinculada ao insumo de origem" : ""}
+                style={sourceKey ? { background: "var(--bg-3)", color: "var(--fg-2)", cursor: "not-allowed" } : null}
+              />
+            )}
           </FormRow>
-          <FormRow label="Custo unit. (R$)" hint={sourceKey ? "vem da origem" : "opcional"}>
+          <FormRow label="Custo unit. (R$)"
+                   hint={selectedSrc && !_sameUnit(selectedSrc.unit, unit)
+                     ? `convertido · R$/${unit}`
+                     : (sourceKey ? "vem da origem" : "opcional")}>
             <input
               className="input mono"
               inputMode="decimal"
@@ -1534,6 +1701,21 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
             />
           </FormRow>
         </div>
+
+        {selectedSrc && !_sameUnit(selectedSrc.unit, unit) && (
+          <div style={{
+            padding: "8px 12px", background: "var(--bg-2)",
+            border: "1px solid var(--accent-line)", borderRadius: 4,
+            fontSize: 11.5, color: "var(--fg-2)",
+          }}>
+            ⓘ Convertido {stockSrc ? "do estoque" : "do preparo"}: {_unitText(selectedSrc.cost)}/{selectedSrc.unit}
+            {/* o peso só entra quando um dos lados é unidade contável; kg ↔ g dispensa */}
+            {stockSrc && stockItemUnitWeightKg(stockSrc) > 0 && (!_isMassUnit(stockSrc.unit) || !_isMassUnit(unit)) &&
+              ` · 1 ${_isMassUnit(stockSrc.unit) ? unit : stockSrc.unit} = ${_gText(stockItemUnitWeightKg(stockSrc) * 1000)} g`}
+            {" → "}
+            <strong style={{ color: "var(--fg-0)" }}>{_unitText(parsedUnitCost)}/{unit}</strong> na ficha.
+          </div>
+        )}
 
         <FormRow label="Custo composto (R$)"
                  hint={sourceKey
@@ -1555,6 +1737,16 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
         </FormRow>
       </div>
 
+      {askWeightFor && stockSrc && (
+        <StockWeightModal
+          item={stockSrc}
+          targetUnit={askWeightFor}
+          saving={savingWeight}
+          onCancel={() => setAskWeightFor(null)}
+          onSubmit={saveItemWeight}
+        />
+      )}
+
       <ConfirmDialog
         open={confirmDelete}
         tone="danger"
@@ -1569,6 +1761,85 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => { setConfirmDelete(false); onDelete && onDelete(); }}
       />
+    </Modal>
+  );
+}
+
+// Pergunta quanto pesa 1 unidade do insumo. Abre quando a ficha quer medir em kg
+// um item cadastrado em "un" (ou o contrário) e o cadastro ainda não tem o peso.
+// Grava no insumo, não na ficha: quem informa uma vez resolve para todo mundo.
+function StockWeightModal({ item, targetUnit, saving, onCancel, onSubmit }) {
+  const [grams, setGrams] = useState("");
+  const g = parseFloat(String(grams).replace(",", "."));
+  const valid = Number.isFinite(g) && g > 0;
+  const preview = valid
+    ? stockItemCostIn({ ...item, portionQty: g / 1000, portionUnit: "kg" }, targetUnit)
+    : null;
+
+  const submittedRef = useRef(false);
+  const submit = () => {
+    if (!valid || saving || submittedRef.current) return;
+    submittedRef.current = true;
+    Promise.resolve(onSubmit(g)).finally(() => { submittedRef.current = false; });
+  };
+
+  const rows = [
+    ["SKU", item.code || "—"],
+    ["Insumo", item.name],
+    ["Categoria", item.cat || "—"],
+    ["Unidade no estoque", item.unit],
+    ["Custo unit.", `${_unitText(item.cost)}/${item.unit}`],
+    ["Saldo atual", `${Number(item.qty || 0).toLocaleString("pt-BR", { maximumFractionDigits: 3 })} ${item.unit}`],
+    ["Fornecedor", item.supplier || "—"],
+  ];
+
+  return (
+    <Modal
+      title="Quanto pesa 1 unidade?"
+      subtitle={`Para medir este insumo em ${targetUnit} na ficha, o sistema precisa do peso de uma unidade.`}
+      onClose={saving ? undefined : onCancel}
+      width={460}
+      footer={
+        <>
+          <button className="btn" data-size="sm" onClick={onCancel} disabled={saving}>Cancelar</button>
+          <button className="btn" data-variant="primary" data-size="sm" disabled={!valid || saving} onClick={submit}>
+            {saving ? "Salvando…" : "Salvar peso e usar"}
+          </button>
+        </>
+      }
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ border: "1px solid var(--line)", borderRadius: 4, overflow: "hidden" }}>
+          {rows.map(([label, value], i) => (
+            <div key={label} style={{
+              display: "flex", justifyContent: "space-between", gap: 12,
+              padding: "7px 12px", fontSize: 12,
+              borderTop: i === 0 ? "none" : "1px solid var(--line-soft)",
+              background: i % 2 ? "var(--bg-2)" : "transparent",
+            }}>
+              <span style={{ color: "var(--fg-3)" }}>{label}</span>
+              <span className="mono" style={{ color: "var(--fg-0)", textAlign: "right" }}>{value}</span>
+            </div>
+          ))}
+        </div>
+
+        <FormRow label="Peso por unidade (g)"
+                 hint="Salvo no cadastro do insumo — a Produção usa o mesmo peso para calcular aproveitamento e desperdício.">
+          <input className="input mono" autoFocus inputMode="decimal" value={grams}
+                 onChange={(e) => setGrams(e.target.value)} placeholder="ex.: 3000 para 3 kg"
+                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }} />
+        </FormRow>
+
+        {preview != null && (
+          <div style={{
+            padding: "8px 12px", background: "var(--bg-2)",
+            border: "1px solid var(--accent-line)", borderRadius: 4,
+            fontSize: 11.5, color: "var(--fg-2)",
+          }}>
+            ⓘ 1 un = {_gText(g)} g → custo de <strong style={{ color: "var(--fg-0)" }}>{_unitText(preview)}/{targetUnit}</strong> na ficha.
+          </div>
+        )}
+      </div>
     </Modal>
   );
 }

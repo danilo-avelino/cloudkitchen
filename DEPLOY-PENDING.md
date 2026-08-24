@@ -1,186 +1,243 @@
 # DEPLOY-PENDING — pendências de migration, deploy e commit
 
-> Atualizado em **2026-08-11**. **3 migrations pendentes** (seção 0, cadeia de
-> suprimentos). Restam também as 4 edge functions, os commits, os smoke tests e
-> ligar o trigger do rateio.
-> O MCP do Supabase foi reautenticado em 2026-08-10 (as migrations 1c/1d foram
-> aplicadas por ele), mas **nas sessões de hoje o MCP do Supabase não está
-> disponível** — as migrations da seção 0 não puderam ser aplicadas nem passar
-> pelos advisors.
+> Atualizado em **2026-08-24**. **Backend 100% aplicado**: nenhuma migration
+> pendente e as 4 edge functions estão em produção. O que resta são os **smoke
+> tests** (seção 3) e os **commits** do front (seção 4) — este último só com
+> pedido explícito.
 
-## 0. ⏳ PENDENTE — Cadeia de suprimentos (aplicar na ordem 0 → 1 → 2)
+## 0-ter. ✅ Aplicado em 2026-08-24 (via Supabase CLI) — Preparo → ficha respeita a unidade
 
 | # | Arquivo | O que faz |
 |---|---------|-----------|
-| 2 | `supabase/migrations/20260811160000_supply_receipt_divergence.sql` | **Divergência de recebimento.** Quem recebe confere item a item (`supply_transfer_items.received_qty` + `divergence_reason`) e o que diferir vira divergência. Regra: **entra o que chegou, cobra o que chegou** — `supply_transfers.received_value` (= Σ `received_qty × unit_cost`) passa a alimentar `supply_ledger_entries` e o financeiro dos dois lados no lugar de `total_value` (que continua sendo o valor **enviado**, imutável); `divergence_value` = recebido − enviado (negativo = faltou). A perda por falta fica com quem enviou, cujo estoque já saiu no envio. Nova assinatura `supply_receive_transfer(uuid, jsonb, text)` (a de 2 args é dropada) e view `supply_divergence_lines` (security_invoker) alimentando a aba Divergências. **Aplicar depois da 1.** |
-| 1 | `supabase/migrations/20260811120000_supply_direct_kitchen_per_item.sql` | **"Direto na cozinha" vira item a item** (era da transferência inteira): colunas `direct_to_kitchen`/`receive_operation_id` em `supply_transfer_items` e `auto_direct_kitchen`/`direct_kitchen_operation_id` em `stock_items` (memória da escolha, pré-marca o próximo recebimento). `create or replace` de `app.tg_supply_transfer_transition()` mexendo **só** no ramo `sent → received` (flag por linha, com fallback no flag da transferência p/ linhas antigas). RPC nova `supply_receive_transfer(uuid, jsonb)` — o destinatário não tem policy de escrita em `supply_transfer_items`, então a marcação e a virada de status acontecem numa DEFINER, na mesma transação. **Aplicar depois da 0.** |
-| 0 | `supabase/migrations/20260810180000_supply_assortment.sql` | **A central passa a gerir o estoque das unidades.** `supply_item_links.is_assortment` marca o catálogo de abastecimento; `stock_items.managed_by_central_id` marca o item gerido; trigger `tg_stock_items_central_guard` impede a unidade de mexer em `reorder_point`/`max_qty`/`auto_min_*` (libera updates internos via `pg_trigger_depth() > 1`, que é como o `compute_auto_min_max` roda). RPCs novos: `supply_assortment_add/set/remove` (escrita, só gestor da central) e `supply_unit_assortment` / `supply_units_summary` / `supply_replenishment` (leitura cross-tenant). |
+| 0 | `supabase/migrations/20260824180000_preparation_cost_unit_aware.sql` | **Mesma armadilha da seção 0, no caminho do preparo.** `propagate_preparation_cost()` e `propagate_preparation_yield_change()` gravavam `total ÷ yield_qty` (custo por unidade de **rendimento**) em toda `tech_sheet_items` com aquele `source_prep_id`, ignorando a `unit` da linha — uma linha em `g` de um preparo que rende em `kg` ficaria 1000× mais cara na primeira edição do preparo. As duas passam por `app.stock_unit_cost_in(custo, yield_unit, tsi.unit, NULL, NULL)` (peso NULL → só kg ↔ g converte, o resto cai no fallback = comportamento anterior). Bloco 3 do `recompute_all_costs` idem. De quebra: as duas funções ganharam o `SET search_path` que faltava (§5.1) e o trigger de rendimento passou a disparar também em `yield_unit`. |
 
-Sem a migration 0 aplicada, o resto do app segue normal: as abas **Unidades** e
-**Reposição** da Central apenas ficam vazias (os wrappers tratam o erro da RPC
-inexistente devolvendo lista vazia) e nenhum item aparece como "gerido pela central".
-Já a 1 e a 2 **são bloqueantes para o recebimento**: o modal de confirmar recebimento
-chama `supply_receive_transfer` e hoje passa 3 argumentos, então até aplicá-las o
-recebimento falha com "function does not exist". A aba **Divergências** (Central e
-Cadeia de suprimentos) fica vazia sem a 2 — a view `supply_divergence_lines` e as
-colunas `received_value`/`divergence_value` não existem, e o select de transferências
-falha (o `_SUPPLY_TRANSFER_FIELDS` pede as colunas novas).
+**Verificações pós-migration (CLAUDE.md §5) — feitas** (mesmo método da 0-bis:
+workdir isolado + probe com `RAISE EXCEPTION`, que não deixa linha no histórico):
+- [x] `migration list --linked`: `20260824180000` com local **e** remoto preenchidos.
+- [x] Conversão na função em prod: preparo a R$ 13,5217/kg → `kg→g` = **0,0135217**;
+      `kg→kg` = 13,5217 (intacto); preparo que rende em `und`: `und→und` = 4,50 e
+      `und→g` = 4,50 (**fallback preservado** — preparo em und não vira massa, e o
+      front nem oferece a unidade).
+- [x] `prosecdef` = false e `proconfig` = `search_path=app, public, pg_temp` nas duas
+      funções de propagação e em `recompute_all_costs`.
+- [x] Os 4 triggers seguem ligados: `trg_propagate_prep_cost_ins/_upd/_del` e
+      `trg_propagate_prep_yield`.
+- [ ] `get_advisors` — **não rodado** (precisa do MCP). Só `CREATE OR REPLACE` de
+      funções existentes + GRANTs já vigentes; nenhum objeto novo. Ver a ressalva da
+      seção 0-bis.
 
-**Pós-migration (obrigatório, CLAUDE.md §5):**
-- [ ] `apply_migration` dos 3 arquivos acima, na ordem.
-- [ ] `get_advisors` — confirmar que não regrediu do baseline de 3 WARNs.
-- [ ] Conferir que `authenticated` tem EXECUTE nos 6 RPCs novos e que `anon`/`PUBLIC` foram revogados.
-- [ ] Smoke test: cadastrar 1 item para uma unidade → conferir que ele nasce no
-      estoque dela com saldo 0 e mín/máx travados no app da unidade; baixar o saldo
-      abaixo do mínimo → conferir que aparece em Reposição com qtd = máx − atual.
-- [ ] Smoke test do guard: tentar editar o mín do item pela unidade → deve falhar
-      com "mín/máx de X é gerido pela central"; e uma movimentação de estoque no
-      item (com auto ligado) deve continuar recalculando normalmente.
-- [ ] Smoke test do direto na cozinha: receber uma transferência com 1 item marcado
-      → conferir os 2 movimentos (`in` + `out` com `operation_id`) só naquele item,
-      e que o outro item ficou só com o `in`; reabrir o próximo recebimento do mesmo
-      insumo → deve vir pré-marcado com a mesma operação.
-- [ ] Smoke test da divergência: enviar 50 un a R$ 3,47 → no recebimento clicar
-      **Relatar divergência**, informar 46 un com motivo "Não veio" → confirmar.
-      Conferir: movimento `in` de 46 (não 50); `received_value` = 159,62 e
-      `divergence_value` = −13,88 na transferência; `supply_ledger_entries` e as
-      duas `finance_entries` (destinatário +159,62 / remetente −159,62) com o valor
-      recebido; a linha aparecendo na aba **Divergências** dos dois lados com o KPI
-      de % batendo com |13,88| ÷ 173,50. Testar também um item com 0 recebido
-      (não pode gerar movimento nem criar insumo novo no destino) e uma sobra.
-
-## 1c. ✅ Aplicada em 2026-08-10 (via MCP) — só falta commitar
+## 0-bis. ✅ Aplicado em 2026-08-24 (via Supabase CLI) — Gramas (g) na ficha técnica
 
 | # | Arquivo | O que faz |
 |---|---------|-----------|
-| 0 | `supabase/migrations/20260810120000_production_order_separation.sql` | **Solicitação de insumos passa pelo módulo Requisições (2026-08-10)**: colunas `separated_at`/`separated_by` em `production_orders` + índice parcial da fila de abertas. Não mexe em trigger nenhum — "separada" é só carimbo sobre a ordem `draft`; a baixa continua no `draft → issued` (entrega). |
+| 0 | `supabase/migrations/20260824160000_recipe_unit_cost_grams.sql` | **`app.stock_unit_cost_in` passa a aceitar `g`.** `create or replace` da função criada na seção 0: em vez de tratar só o par kg × un, normaliza para **custo por kg** e converte a partir daí — `kg ↔ g` é fator 1000 e **não** precisa de `portion_qty`; só entrar ou sair de `un` precisa do peso. Mesmo contrato de fallback (sem conversão possível, devolve o custo original). Trigger e `recompute_all_costs` não mudam — já chamam a função. |
 
-Verificado em prod: as 2 colunas existem e o índice `production_orders_open_idx`
-foi criado. O front (`_PROD_ORDER_FIELDS` com `separated_at`) já pode subir.
->
->
-> ⚠️ **Não cadastrar conta Foody antes de deployar as edge functions.** O cron
-> `foody-poll-5min` já está agendado; hoje ele não faz nada porque `foody_poll`
-> tem guard de "nenhuma conta ativa", mas a primeira conta cadastrada faz o cron
-> chamar `foody-ingest` (inexistente) a cada 5 minutos.
+**Como foi aplicada:** o MCP do Supabase não estava disponível; usei o **CLI**
+(`supabase db push --linked --workdir <tmp>`). O projeto está linkado
+(`supabase/.temp/project-ref`), mas 15 migrations locais nunca foram registradas em
+`supabase_migrations.schema_migrations` (foram aplicadas à mão pelo SQL Editor), e
+um `db push` normal tentaria reaplicar todas. Solução: workdir temporário com **só
+esta migration** + placeholders vazios para as versões que existem no remoto (a
+checagem de histórico do CLI é por versão, e placeholder já registrado nunca
+executa). `--dry-run` confirmou "Would push these migrations: 20260824160000" antes.
+**Se for preciso repetir esse tipo de push, refazer o workdir isolado — nunca rodar
+`db push` na raiz do projeto e nunca aceitar o `migration repair` que o CLI sugere.**
 
-## 1d. ✅ Aplicada em 2026-08-10 (via MCP) — só falta commitar
+**Verificações pós-migration (CLAUDE.md §5) — feitas:**
+- [x] `migration list --linked`: `20260824160000` com local **e** remoto preenchidos.
+- [x] Conversão conferida direto na função em prod, com os números do Fermento 200 g
+      (`un`, R$ 14,98, `portion_qty` = 0,2): `un→kg` = **74,90**, `un→g` = **0,0749**.
+      Insumo em kg sem peso: `kg→g` = **0,0054** (não cai no fallback — kg ↔ g
+      dispensa `portion_qty`); `kg→un` com peso 0,5 kg = **2,70**; `g→kg` = **5,40**.
+      `un→g` **sem** peso devolve 14,98/1,20 (fallback intacto; o front bloqueia antes,
+      pedindo o peso no modal).
+- [x] `has_schema_privilege('authenticated','app','USAGE')` = true e EXECUTE em
+      `app.stock_unit_cost_in` = true para `authenticated` e `anon` (o trigger **não**
+      é DEFINER — sem isso todo UPDATE de insumo no Estoque falharia com
+      "permission denied for schema app").
+- [x] `prosecdef` = false e `proconfig` = `search_path=app, public, pg_temp` na função
+      nova; `propagate_stock_item_cost` manteve o mesmo `search_path` e o trigger
+      `trg_propagate_stock_item_cost` continua apontando para ela.
+- [ ] `get_advisors` — **não rodado**: precisa do MCP/Management API, indisponível na
+      sessão. A migration só fez `CREATE OR REPLACE` de uma função já existente (mesma
+      assinatura, mesmo `search_path`, sem virar DEFINER) e repetiu GRANTs que já
+      estavam de pé — nenhuma tabela, view ou RPC novo. A superfície de advisor é a
+      mesma validada na seção 0. Rodar na próxima sessão com MCP por garantia.
 
-| # | Arquivo | O que faz |
-|---|---------|-----------|
-| 0 | `supabase/migrations/20260810160000_production_input_weight_from_unit.sql` | **Desperdício para insumo em "un" (2026-08-10)**: `create or replace` de `app.tg_production_order_transition()` com uma mudança só, no ramo `draft → issued` — o peso do insumo cai em `stock_items.portion_qty/portion_unit` quando a unidade não é de massa. Sem isso, uma linha em "un" zera `input_weight` e o lote nunca calcula `yield_pct`/`waste_qty`. |
+As verificações acima foram feitas por um bloco `DO` que termina em
+`RAISE EXCEPTION` de propósito: os valores voltam na mensagem de erro e a transação
+aborta, então o probe **não** deixou linha no histórico de migrations.
 
-Base: a versão de `20260713120000` (última a definir a função). O ramo `completed`
-fica **intocado** — a pendência de religar `tg_production_apply_complete_alloc()`
-continua aberta e não conflita. Sem coluna nova: reusa `portion_qty`.
-
-Antes de aplicar, o `prosrc` de produção foi comparado com o arquivo: era
-byte-a-byte a versão de `20260713120000` (nenhum patch manual em cima), e as
-únicas diferenças eram as 3 pretendidas. Pós-aplicação, verificado em prod: o
-fallback por `portion_qty` está no corpo, `search_path = app, public, pg_temp`
-preservado, o trigger `tg_production_orders_transition` segue apontando para a
-função e `authenticated` mantém EXECUTE.
-
-## 1. Migrations
-
-### 1a. Aplicadas em 2026-08-09 (via SQL Editor) — só falta commitar
-
-| # | Arquivo | O que faz |
-|---|---------|-----------|
-| 1 | `supabase/migrations/20260706120000_foody_ingest.sql` | Integração Foody Delivery: tabelas `foody_accounts` / `foody_point_map` / pedidos; token da API no Vault (RPC service-role-only, só `token_hint` no banco); **trava de exclusividade** Agilizone×Foody (trigger nas duas tabelas de contas); RPC `foody_poll` + `cron.schedule('foody-poll-5min')` disparando o ingest via pg_net com header `x-ingest-secret`. |
-| 2 | `supabase/migrations/20260706121000_logistics_rpcs_unified.sql` | View `delivery_orders_unified` (security_invoker) normalizando Agilizone + Foody; os 5 RPCs de logística passam a ler a view mantendo nome/assinatura/shape (front não muda). |
-
-| 2b | `supabase/migrations/20260809120000_production_cost_allocation_ref_value.sql` | **Rateio multi-saída por valor de referência** (REVISAO-PRODUCAO.md §3.5): coluna `ref_value` em `production_recipe_outputs` e `production_order_outputs`; função `app.tg_production_apply_complete_alloc()` com direcionador em cascata valor → peso → quantidade (o 3º nível remove as exceções que travavam a devolução multi-saída sem `portion_qty`). **Trigger ainda NÃO religado** — ver pendência abaixo. |
-
-**Pós-migrations (obrigatório, CLAUDE.md §5) — TODAS ABERTAS:**
-- [ ] `get_advisors` — **9 migrations já aplicadas sem checagem** (as 6 de julho + as 3 de 2026-08-09). Baseline: 3 WARNs da auditoria 2026-05-27.
-- [ ] Conferir GRANTs: USAGE/EXECUTE no schema `app` e USAGE+ALL em `public` para `service_role`.
-- [ ] Confirmar que o secret `x-ingest-secret` criado pela migration bate com o que a edge function `foody-ingest` valida.
-- [ ] **Ligar o rateio por `ref_value`**: o ramo `completed` de `app.tg_production_apply_status()` precisa passar a chamar `app.tg_production_apply_complete_alloc()`. Até lá o rateio multi-saída segue por peso (distorcendo custo entre produto nobre e subproduto). Requer o `prosrc` atual da função para reescrita segura.
-- [ ] Smoke test da Logística após a troca dos 5 RPCs para `delivery_orders_unified` (mesma assinatura, mas é troca em produção).
-
-### 1b. Já aplicadas em prod (2026-07-11/15, via SQL Editor) — só falta commitar
-
-Aplicadas manualmente nesta ordem. O patch consolidado que servia de "cola" foi
-removido depois de aplicado; estes arquivos são a fonte de verdade (e o que roda
-num ambiente novo).
+## 0. ✅ Aplicado em 2026-08-24 (via MCP)
 
 | # | Arquivo | O que faz |
 |---|---------|-----------|
-| 3 | `supabase/migrations/20260711120000_production_module.sql` | **Módulo Produção & Porcionamento (Fase A do PRD-PRODUCAO-E-DISTRIBUICAO.md)**: `stock_items.item_kind/portion_qty/portion_unit`; tabelas `production_orders/_inputs/_outputs` (multi-saída, custo rateado por peso) + `production_recipes/_inputs/_outputs`; trigger de transição de status (issue baixa insumos com `reference_type='production_order'`, complete dá entrada dos transformados com custo convertido, cancel gera inversos); RLS por `can_access_module`; `app.role_default_modules` ganha `production` p/ kitchen/stock. |
-| 4 | `supabase/migrations/20260711130000_supply_network.sql` | **Rede de suprimentos (Fase B)**: `tenants.kind` ('standard'\|'distribution_center') + `tenants.supply_code` (8 dígitos, único, backfill p/ todos + trigger em novos); `supply_members` (invited→active/rejected; removed/left); RPCs DEFINER `supply_lookup_tenant_by_code`, `supply_invite_tenant`, `supply_respond_invite`, `supply_remove_member` (escrita em supply_members SÓ via RPC). |
-| 5 | `supabase/migrations/20260711140000_supply_transfers.sql` | **Transferências/Gastos/Solicitações (Fase C)**: `supply_transfers/_items` (draft→sent→received; triggers DEFINER fazem baixa no remetente, mapeamento/criação de item no destino via `supply_item_links`, entrada + saída "direto na cozinha" com `reference_type='supply_transfer_kitchen'`); `supply_ledger_entries` imutável + view `v_supply_balances`; lançamentos automáticos em `finance_entries` (subs "Compras · Rede de suprimentos" / "Repasses à rede (−)" no grupo cmv — subs normais, NÃO autofeed); `supply_requests/_items`; RPCs `supply_network_overview`, `supply_list_catalog`, `supply_ledger_adjust`; `role_default_modules`: owner/admin/manager += supply+distribution, stock += supply. |
-| 6 | `supabase/migrations/20260711150000_production_exit_order_flow.sql` | **Fluxo de ordem de saída (2026-07-11)**: envio não exige mais transformados pré-definidos; saídas podem ser inseridas com a ordem em `issued` (a devolução cria as linhas com `returned_qty`); validação de porção/rateio movida pro completed. |
-| 7 | `supabase/migrations/20260712120000_transformed_into_production.sql` | **Transformados vira abas do módulo Produção (2026-07-12)**: RLS de escrita do catálogo (stock_items transformados) e das receitas passa a aceitar o módulo `production` (mantém `transformed` por compat); `role_default_modules` sem 'transformed'. |
-| 8 | `supabase/migrations/20260713120000_production_allow_negative_stock.sql` | **Ordem de saída sem saldo (2026-07-13)**: remove o guard 'Saldo insuficiente' do `draft → issued` — a produção pode retirar insumo com estoque zerado e o saldo fica negativo (regulariza depois pela entrada da compra; os negativos já aparecem em Estoque → Pendências de lançamento). O guard das transferências da rede (supply_transfers) **continua**. |
+| 1 | `supabase/migrations/20260811160000_supply_receipt_divergence.sql` | **Divergência de recebimento.** Quem recebe confere item a item (`supply_transfer_items.received_qty` + `divergence_reason`) e o que diferir vira divergência. Regra: **entra o que chegou, cobra o que chegou** — `supply_transfers.received_value` (= Σ `received_qty × unit_cost`) alimenta `supply_ledger_entries` e o financeiro dos dois lados no lugar de `total_value` (que continua sendo o valor **enviado**, imutável); `divergence_value` = recebido − enviado (negativo = faltou). A perda por falta fica com quem enviou, cujo estoque já saiu no envio. Nova assinatura `supply_receive_transfer(uuid, jsonb, text)` (a de 2 args foi dropada) e view `supply_divergence_lines` (security_invoker) alimentando a aba Divergências. |
+| 2 | `supabase/migrations/20260824120000_recipe_unit_conversion.sql` | **A ficha técnica pode medir em kg um insumo cadastrado em "un"** (e vice-versa). Nova `app.stock_unit_cost_in(custo, unidade_estoque, unidade_receita, portion_qty, portion_unit)` — espelho de `stockItemCostIn()` no front. `create or replace` de `public.propagate_stock_item_cost()` (converte em vez de copiar `unit_cost`, dispara também em `portion_qty`/`portion_unit` e ganha o `SET search_path` que faltava) e de `public.recompute_all_costs(uuid)` (blocos 1 e 2; bloco 3 intocado). |
 
-- [ ] Rodar `get_advisors` quando o MCP voltar (as 6 acima foram aplicadas sem checagem de advisor).
+**Verificações pós-migration (CLAUDE.md §5) — feitas:**
+- [x] Antes de aplicar, o `prosrc` em produção das 3 funções recriadas foi
+      comparado com a versão-base de cada migration: `app.tg_supply_transfer_transition`
+      era byte-a-byte a de `20260811120000` (md5 `1853ddf8…`, 10.709 bytes),
+      `propagate_stock_item_cost` a de `20260510032658` e `recompute_all_costs` a de
+      `20260527122400`. Nenhum patch manual foi sobrescrito.
+- [x] `get_advisors` sem regressão: fora da regra nova `0029`, seguem só os 2 WARNs
+      conhecidos (`pg_net` no schema public — limitação da extensão — e leaked
+      password protection). A `0029_authenticated_security_definer_function_executable`
+      é uma regra **nova** do linter que sinaliza todo RPC `SECURITY DEFINER` chamável
+      por `authenticated`; ela lista RPCs pré-existentes e é exatamente o padrão do
+      §5.1 (validação de `tenant_members.role` no corpo, que o linter não lê).
+      `recompute_all_costs` e `supply_receive_transfer` já eram DEFINER antes.
+- [x] `supply_divergence_lines` com `security_invoker=true`, `SELECT` para
+      `authenticated`/`service_role` e `anon` revogado.
+- [x] `supply_receive_transfer` existe **só** na assinatura de 3 args; ACL =
+      `postgres`/`service_role`/`authenticated`, sem `PUBLIC` nem `anon`.
+- [x] `has_schema_privilege('authenticated','app','USAGE')` = true e EXECUTE em
+      `app.stock_unit_cost_in` = true (o trigger **não** é DEFINER — sem isso todo
+      UPDATE de insumo no Estoque falharia com "permission denied for schema app").
+- [x] O trigger `trg_propagate_stock_item_cost` é `AFTER UPDATE` **sem lista de
+      colunas**, então o novo ramo de `portion_qty`/`portion_unit` realmente dispara
+      (se fosse `UPDATE OF unit_cost` a mudança 2 da migration seria código morto).
+- [x] Conversão conferida direto na função, com os números do smoke test:
+      `stock_unit_cost_in(45,'un','kg',3,'kg')` = 15 → 0,2 kg = **R$ 3,00**; com o
+      custo em R$ 60 → **R$ 4,00** (não R$ 12,00). Peso em gramas (3000 g) dá o mesmo.
+      Sem peso, peso 0 ou par não conversível devolve o custo original (fallback seguro).
 
-## 2. Edge functions a deployar
+## 1. ✅ Migrations anteriores — todas em produção
 
-| Função | Status | Mudança |
-|--------|--------|---------|
-| `foody-admin` | **nova** | CRUD de contas Foody, mapeamento de pontos de coleta → operações, discover, sync manual. |
-| `foody-ingest` | **nova** | Ingest de pedidos da Foody (espelho da `agilizone-ingest`); chamada pelo cron `foody-poll-5min` via pg_net. |
-| `agilizone-admin` | modificada | Trava de exclusividade: `list-accounts` retorna `otherActive`; conta nova nasce **pausada** se Foody ativa (`lockedPaused`); `toggle-account` retorna 409 se Foody ativa. |
-| `invite-member` | modificada | **Fix de segurança**: nunca resetar senha de usuário já existente (e-mail é global — reset permitiria tomar conta de outro tenant); apenas vincula membership e retorna `linkedExisting`/`passwordApplied`. |
+Reconciliado em 2026-08-24, arquivo local × estrutura no banco. Nada pendente.
 
-## 3. Commits pendentes (git — só com pedido explícito)
+| Quando | Como | Arquivos |
+|--------|------|----------|
+| 2026-07-11/15 | SQL Editor | `20260711120000_production_module`, `20260711130000_supply_network`, `20260711140000_supply_transfers`, `20260711150000_production_exit_order_flow`, `20260712120000_transformed_into_production`, `20260713120000_production_allow_negative_stock` |
+| 2026-08-09 | SQL Editor | `20260706120000_foody_ingest`, `20260706121000_logistics_rpcs_unified`, `20260809120000_production_cost_allocation_ref_value` |
+| 2026-08-10/11 | MCP | `20260810120000_production_order_separation`, `20260810160000_production_input_weight_from_unit`, `20260810180000_supply_assortment`, `20260810120000_fix_production_cascade_delete`, `20260811120000_supply_direct_kitchen_per_item`, `20260811140000_production_enable_ref_value_allocation` |
 
-Front (funciona junto com o backend acima — commitar no mesmo lote do deploy):
-- `lib-supabase.jsx` — helpers `dbFoody*` (via edge fn `foody-admin`) + `dbLogisticsIntegrationActive` (Agilizone OU Foody).
-- `page-settings.jsx` — aba **Configurações → Foody Delivery** (FoodyTab, cards, modal, avisos da trava de exclusividade dos dois lados).
-- `page-delivery.jsx` — Logística usa `dbLogisticsIntegrationActive`; textos deixam de ser Agilizone-only.
-- `supabase/functions/*` e `supabase/migrations/*` listados nas seções 1–2.
+Conferido no banco: as 6 tabelas de produção, `stock_items.item_kind/portion_qty/portion_unit`,
+`tenants.kind/supply_code`, as 7 tabelas de suprimentos, `v_supply_balances`, os 7 RPCs
+de rede, as colunas `ref_value` e a ausência do guard "Saldo insuficiente" na produção.
 
-Fluxo em 2 fases da produção (2026-08-10) — **depende da migration da seção 1c**:
-- `supabase/migrations/20260810120000_production_order_separation.sql` (**novo**).
-- `lib-supabase.jsx` — `separated_at/separated_by` em `_PROD_ORDER_FIELDS` + mapper; `dbSeparateProductionOrder`/`dbUnseparateProductionOrder`.
-- `page-production.jsx` — "Produzir hoje" vira política mín/máx com lotes inteiros da receita (`planProduction`, exposto no window); bloco "Em andamento"; o modal de lote virou **solicitação de insumos** (só cria `draft`, não baixa nada); a entrega saiu da tela (mora em Requisições).
-- `page-requests.jsx` — solicitações da Produção no quadro/lista (pendente → separada → entregue), cupom térmico com cabeçalho "Separação para produção".
-- `page-mobile-production.jsx` / `page-mobile-requests-board.jsx` — espelhos das duas telas.
-- `page-stock.jsx` / `page-mobile-stock.jsx` — modal de insumo alargado (680) e grids com `minmax(0,…)`; campo **Peso por unidade (g)** para itens em "un" (grava em `portion_qty`/`portion_unit`, em kg). **Fix 2026-08-11**: o handler de *edição* de insumo não repassava `portionQty`/`portionUnit` ao `dbUpdateStockItem` — o peso só era gravado na criação, e editar um item existente descartava o valor em silêncio (por isso as ordens ficavam sem desperdício/aproveitamento).
-- `lib-supabase.jsx` / `page-production.jsx` / `page-mobile-production.jsx` — **peso vivo (2026-08-11)**: `prodOrderWithLiveWeights(order, stockItems)` recalcula `inputWeight`/`outputWeight`/`yieldPct`/`wasteQty` a partir do peso ATUAL de `stock_items.portion_qty` na leitura das ordens; as colunas do banco viram fallback. Cadastrar o peso depois passa a corrigir o histórico sozinho — nenhum backfill de dados é necessário. Custo continua congelado (`unit_cost`/`total_input_cost` são preço do dia, não atributo físico).
-- `page-transformed.jsx` — aba Análises avisa quais insumos estão sem peso e por isso zeram desperdício/aproveitamento.
+**Rateio por `ref_value`: LIGADO.** Essa pendência (arrastada desde 2026-08-09) foi
+fechada pela `20260811140000_production_enable_ref_value_allocation`, que **embutiu** a
+cascata valor → peso → quantidade dentro de `app.tg_production_order_transition()` e
+dropou a `app.tg_production_apply_complete_alloc()`. Por isso a função separada não
+existe mais no banco — não é sinal de pendência.
 
-Front do PRD Produção/Distribuição (Fases A–D — migrations 3–8 **já aplicadas em prod**, então este front pode ir a qualquer momento):
-- `page-production.jsx` (**novo**) — módulo Produção com abas: Ordens de saída (criar/enviar/devolução/cancelar, alertas de tempo de espera), Transformados (catálogo), Receitas de produção, Análises e Consumo por tenant (só central). O módulo Transformados foi fundido aqui em 2026-07-12.
-- `page-transformed.jsx` (**novo**) — componentes embutíveis consumidos pelo page-production (TransformedCatalog, ProductionRecipesPanel, TransformedAnalytics, TransformedByTenant); não é mais página/módulo próprio.
-- `page-supply.jsx` (**novo**) — Suprimentos: aceitar/recusar convite, solicitar da central, pedir/enviar entre tenants, confirmar recebimentos (mapeamento de itens + "direto na cozinha"), extrato de gastos. Componentes compartilhados com a Central.
-- `page-distribution.jsx` (**novo**) — Central: convidar por código, membros, transferências, solicitações recebidas (aprovar/atender), gastos por tenant + ajuste manual.
-- `lib-supabase.jsx` — funções `dbProduction*`/`dbSupply*` (~25 novas); `mapStockItemFromDb` com `itemKind/portionQty/portionUnit`; `dbListTenantsAdmin`/`dbUpdateTenantAdmin` com `kind` (⚠️ o select explícito de `kind` quebra se a migration 4 não estiver aplicada — deploy do front SÓ depois das migrations).
-- `widgets.jsx` — helper `isNonCmvMovement` (`production_order`/`supply_transfer` fora do CMV).
-- `page-cmv.jsx` + `page-dashboard.jsx` — exclusões de CMV por `referenceType` (6 + 3 pontos).
-- `page-dre.jsx` — card "Repasses à rede no mês" (aparece quando há repasses; decisão PRD §12.4).
-- `page-purchases.jsx` + `page-shopping.jsx` — transformados fora das sugestões de compra.
-- `shell.jsx`, `src/App.jsx`, `src/main.jsx`, `page-settings.jsx` — módulos `production`/`supply`/`distribution` (#/producao, #/suprimentos, #/central; slug legado #/transformados redireciona p/ produção); visibilidade condicional (Central só p/ kind='distribution_center'; Suprimentos p/ membro/convidado **ou** central); chip "Código da rede" em Configurações; presets kitchen/stock.
-- `page-superadmin.jsx` — seletor "Tipo de tenant" no modal de edição (promove a central de distribuição).
-- `PRD-PRODUCAO-E-DISTRIBUICAO.md` — spec + decisões confirmadas em 2026-07-11.
+## 2. ✅ Edge functions — deployadas em 2026-08-10
 
-Divergência de recebimento (2026-08-11) — **depende da migration 2 da seção 0**:
-- `supabase/migrations/20260811160000_supply_receipt_divergence.sql` (**novo**).
-- `lib-supabase.jsx` — `received_qty`/`divergence_reason`/`received_value`/`divergence_value`/`divergence_notes` no `_SUPPLY_TRANSFER_FIELDS` e nos mappers; `dbSupplyReceiveTransfer` passa a mandar a conferência + observação; `dbSupplyDivergences` (view + recebimentos do período, paginados por `.range()`).
-- `page-supply.jsx` — botão **Relatar divergência** no modal de recebimento (input de qtd conferida por linha, motivo obrigatório, resumo do impacto); componente compartilhado `SupplyDivergenceView` (KPIs, filtros de mês/contraparte/motivo, rankings e tabela de ocorrências); aba **Divergências**; recebido vs. enviado na lista e no detalhe da transferência.
-- `page-distribution.jsx` — aba **Divergências** na Central (mesmo componente, `isCentral`).
-- `page-mobile-supply.jsx` / `page-mobile-distribution.jsx` — aba Divergências read-only (`MobileSupplyDivergences`, StatStrip + cards).
-- Nesse mesmo lote: **Recebimentos** virou a primeira aba da Cadeia de suprimentos.
+| Função | Versão em prod | Mudança |
+|--------|----------------|---------|
+| `foody-admin` | v1 | CRUD de contas Foody, mapeamento de pontos de coleta → operações, discover, sync manual. |
+| `foody-ingest` | v1 (`verify_jwt: false`) | Ingest de pedidos da Foody (espelho da `agilizone-ingest`); chamada pelo cron `foody-poll-5min` via pg_net. |
+| `agilizone-admin` | v4 | Trava de exclusividade: `list-accounts` retorna `otherActive`; conta nova nasce **pausada** se Foody ativa (`lockedPaused`); `toggle-account` retorna 409 se Foody ativa. |
+| `invite-member` | v11 | **Fix de segurança**: nunca resetar senha de usuário já existente (e-mail é global — reset permitiria tomar conta de outro tenant); apenas vincula membership e retorna `linkedExisting`/`passwordApplied`. |
+
+- [x] `x-ingest-secret`: `foody_poll` lê `vault.decrypted_secrets` na linha
+      `foody_ingest_secret` e a `foody-ingest` valida contra **a mesma** linha do
+      Vault — não têm como divergir. Secret existe desde 2026-07-07.
+- [x] O aviso "não cadastrar conta Foody antes do deploy" **caiu**: a `foody-ingest`
+      está no ar. Hoje há 0 contas Foody, então o cron `foody-poll-5min` segue
+      no-op pelo guard de "nenhuma conta ativa".
+
+## 3. ⏳ Smoke tests pendentes
+
+Precisam da UI e de tenants reais — não dá pra fechar por SQL.
+
+**Ficha técnica em kg / g / un** (a matemática das três unidades já foi validada
+direto na função — seções 0 e 0-bis; falta a UI):
+- [ ] Insumo em "un" a R$ 45 com peso 3.000 g → na ficha escolher **kg** → 0,2 kg deve
+      custar R$ 3,00. Mudar o custo para R$ 60 no Estoque → a linha vai para R$ 4,00.
+      Rodar "Recalcular custos" em Fichas e conferir que não mexe.
+- [ ] Insumo em "un" **sem** peso → escolher kg na ficha abre o modal com o SKU →
+      informar 3000 g → conferir `stock_items.portion_qty` = 3 (grava em kg) e que a
+      Produção passa a calcular aproveitamento desse insumo (mesmo campo).
+- [ ] **Gramas:** mesma linha em `g` tem que dar o mesmo custo composto que em kg
+      (200 g do Fermento a R$ 14,98/un com peso 200 g = R$ 14,98; 0,2 kg = idem).
+      Insumo cadastrado em **kg** deve aceitar `g` **sem** pedir o peso da unidade
+      (kg ↔ g não depende dele) — só `un` abre o modal.
+
+**Divergência de recebimento:**
+- [ ] Enviar 50 un a R$ 3,47 → no recebimento clicar **Relatar divergência**, informar
+      46 un com motivo "Não veio" → confirmar. Conferir: movimento `in` de 46 (não 50);
+      `received_value` = 159,62 e `divergence_value` = −13,88; `supply_ledger_entries`
+      e as duas `finance_entries` (destinatário +159,62 / remetente −159,62) com o valor
+      recebido; a linha na aba **Divergências** dos dois lados com o KPI de % batendo
+      com |13,88| ÷ 173,50. Testar também um item com 0 recebido (não pode gerar
+      movimento nem criar insumo novo no destino) e uma sobra.
+
+**Cadeia de suprimentos / catálogo por unidade:**
+- [ ] Cadastrar 1 item para uma unidade → nasce no estoque dela com saldo 0 e mín/máx
+      travados no app da unidade; baixar o saldo abaixo do mínimo → aparece em
+      Reposição com qtd = máx − atual.
+- [ ] Guard: editar o mín pela unidade deve falhar com "mín/máx de X é gerido pela
+      central"; movimentação de estoque (com auto ligado) segue recalculando normal.
+- [ ] Direto na cozinha: receber transferência com 1 item marcado → 2 movimentos
+      (`in` + `out` com `operation_id`) só naquele item, o outro só com `in`; o próximo
+      recebimento do mesmo insumo vem pré-marcado com a mesma operação.
+
+**Foody / Logística:**
+- [ ] Configurações → Foody Delivery: cadastrar conta com token, mapear pontos,
+      sincronizar; Logística carrega com dados unificados; trava de exclusividade nos
+      dois sentidos; convite de e-mail já existente vincula sem trocar senha.
+- [ ] Logística após a troca dos 5 RPCs para `delivery_orders_unified` (mesma
+      assinatura, mas foi troca em produção).
+
+**Produção — fluxo em 2 fases** (PRD §3.4 itens 1–2):
+- [ ] Criar transformado "Calabresa porcionada 100g" (porção 100 g, mín/máx) → em
+      Produzir hoje conferir a sugestão em lotes inteiros → **Solicitar insumos**
+      (10 kg de calabresa) → a ordem aparece em Requisições como "🏭 Produção ·
+      Pendente" → Separar → Confirmar entrega (só aqui o estoque baixa) → volta em
+      Produção como "aguardando devolução" → devolução de 95 porções → conferir
+      custo/porção (custo total ÷ 95), aproveitamento 95%, CMV do dia inalterado,
+      transformado requisitável em Requisições e fora da lista de Compras.
+
+**Rede** (PRD §3.4 itens 3–5, precisa de 3 tenants: central + A + B):
+- [ ] Superadmin promove um tenant a "Central de distribuição"; central convida A e B
+      pelo código; A e B aceitam no módulo Suprimentos.
+- [ ] Central transfere 50 porções a A → A confirma → estoque de A +50 a R$3,00; gasto
+      de A +R$150; finance: +150 "Compras · Rede de suprimentos" (A) e −150 "Repasses
+      à rede (−)" (central); CMV dos dois inalterado.
+- [ ] A envia 10 porções a B → B confirma → gastos A=120/B=30; soma = 150.
+- [ ] B recebe transferência com "direto na cozinha" → CMV do dia de B sobe pelo valor;
+      estoque de B não muda no líquido.
+- [ ] Solicitação: A pede itens do catálogo da central → central aprova → "Atender"
+      cria a transferência → recebida → solicitação vira "Atendida".
+- [ ] DRE da central mostra o card "Repasses à rede no mês".
+
+## 4. ⏳ Commits pendentes (git — só com pedido explícito)
+
+O grosso do backlog já foi commitado (`36aeb5e`, `f068af2`, `dc2f344`). As edge
+functions e todas as migrations até `20260811160000` **já estão versionadas**.
+
+Falta commitar a árvore de trabalho atual:
+
+- `supabase/migrations/20260824120000_recipe_unit_conversion.sql` (**novo, não rastreado**).
+- `supabase/migrations/20260824160000_recipe_unit_cost_grams.sql` (**novo, não rastreado**) — `g` em `app.stock_unit_cost_in`.
+- `lib-supabase.jsx` — `stockItemUnitWeightKg()` / `stockItemCostIn()` (expostos no
+  window); `mapTechSheetFromDb` carrega `stockItemId` na linha (o modal de edição
+  precisa dele quando a unidade da ficha difere da do estoque);
+  `dbInsertTechSheetItem`/`dbInsertPreparationItem` aceitam `unitCost` explícito em vez
+  de derivar de custo÷qtd (a conversão perderia casas decimais).
+- `supabase/migrations/20260824180000_preparation_cost_unit_aware.sql` (**novo, não rastreado**) — propagação preparo → ficha por unidade.
+- `page-recipes.jsx` — campo **Unidade** do modal de insumo vira seletor: kg/g/un para
+  insumo do estoque, kg/g para preparo que rende em kg (preparo em "und" segue campo
+  travado, porque não há peso de uma "unidade" de preparo); `StockWeightModal` pede o
+  peso por unidade (mostrando SKU, categoria, custo, saldo e fornecedor) quando ele
+  ainda não existe e grava em `stock_items.portion_qty`. Correções de layout: modal de
+  nova ficha 480→560 e modal de insumo 520→560, grids com `minmax(0,…)` (input de texto
+  tem min-width intrínseco e vazava o card — era o toggle kg/und cortado) e custo
+  unitário formatado com `_ucText` (vinha `13,521739130434783` cru do preparo).
+- `page-mobile-recipes.jsx` — espelho: campo "Unidade na ficha" + `StockWeightSheet`.
+- `page-stock.jsx` / `page-mobile-stock.jsx`, `page-production.jsx` /
+  `page-mobile-production.jsx`, `page-supply.jsx` / `page-mobile-distribution.jsx`,
+  `page-distribution.jsx`, `page-dre.jsx`, `page-settings.jsx`, `page-transformed.jsx`,
+  `mobile-ui.jsx` — ajustes do mesmo lote.
+- `DEPLOY-PENDING.md`, `PLANO-MOBILE.md`.
+
+Mensagem sugerida: `Ficha técnica: insumo em "un" pode ser medido em kg (e vice-versa)`.
 
 Não versionados — decidir antes do commit:
-- `.claude/skills/` (skills oficiais Supabase instaladas em 2026-07-11) — pode commitar se quisermos compartilhar.
-- `.claude/settings.local.json` — **não commitar** (config local); considerar adicionar `.claude/settings.local.json` ao `.gitignore`.
-
-## 4. Roteiro do dia do deploy
-
-1. Reautenticar MCP: terminal comum → `claude /mcp` → supabase → Authenticate (URL do `.mcp.json` está correta; erro anterior era `resource` sem o path `/mcp`).
-2. Aplicar a migration da **seção 1c** (separação das ordens de produção) — obrigatória antes do front novo. As 1a/1b já estão em prod; não reaplicar (embora sejam idempotentes).
-3. Deploy das 4 edge functions.
-4. Smoke test Foody: Configurações → Foody Delivery (cadastrar conta com token, mapear pontos, sincronizar); Logística carrega com dados unificados; trava de exclusividade nos dois sentidos; convite de e-mail já existente vincula sem trocar senha.
-5. Smoke test Produção — fluxo em 2 fases (exemplo canônico do PRD §3.4 itens 1–2): criar transformado "Calabresa porcionada 100g" (porção 100 g, mín/máx definidos) → em Produzir hoje conferir a quantidade sugerida em lotes inteiros → **Solicitar insumos** (10 kg de calabresa) → a ordem aparece em Requisições como "🏭 Produção · Pendente" → Separar → Confirmar entrega (só aqui o estoque baixa) → volta em Produção como "aguardando devolução" → devolução de 95 porções → conferir custo/porção (custo total ÷ 95), aproveitamento 95%, CMV do dia inalterado, transformado requisitável em Requisições e fora da lista de Compras.
-6. Smoke test Rede (PRD §3.4 itens 3–5, precisa de 3 tenants: central + A + B):
-   - Superadmin promove um tenant a "Central de distribuição"; central convida A e B pelo código (Configurações → chip "Código da rede"); A e B aceitam no módulo Suprimentos.
-   - Central transfere 50 porções a A → A confirma → estoque de A +50 a R$3,00; gasto de A +R$150; finance: +150 "Compras · Rede de suprimentos" (A) e −150 "Repasses à rede (−)" (central); CMV dos dois inalterado.
-   - A envia 10 porções a B → B confirma → gastos A=120/B=30 (aba Gastos da central); soma = 150.
-   - B recebe outra transferência com "direto na cozinha" → CMV do dia de B sobe pelo valor; estoque de B não muda no líquido.
-   - Solicitação: A pede itens do catálogo da central → central aprova → "Atender" cria a transferência → recebida → solicitação vira "Atendida".
-   - DRE da central mostra o card "Repasses à rede no mês".
-7. Commit + push (mensagens sugeridas: `Foody Delivery: integração de logística (contas, point map, ingest, trava de exclusividade)`, `invite-member: não resetar senha de usuário existente` e `Produção & Rede de Suprimentos: módulos production/transformed/supply/distribution (PRD Fases A-D)`).
+- `.claude/skills/` (skills oficiais Supabase instaladas em 2026-07-11) — pode commitar
+  se quisermos compartilhar.
+- `.claude/settings.local.json` — **não commitar** (config local); considerar adicionar
+  ao `.gitignore`.
