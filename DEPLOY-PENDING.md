@@ -1,9 +1,23 @@
 # DEPLOY-PENDING — pendências de migration, deploy e commit
 
-> Atualizado em **2026-08-24**. **Backend 100% aplicado**: nenhuma migration
+> Atualizado em **2026-08-26**. **Backend 100% aplicado**: nenhuma migration
 > pendente e as 4 edge functions estão em produção. O que resta são os **smoke
 > tests** (seção 3) e os **commits** do front (seção 4) — este último só com
 > pedido explícito.
+
+## 0-quater. ✅ Aplicado em 2026-08-26 (via Supabase CLI) — Modo de preparo
+
+| # | Arquivo | O que faz |
+|---|---------|-----------|
+| 0 | `supabase/migrations/20260826120000_recipe_instructions.sql` | Coluna `instructions text` em `tech_sheets` e `preparations` — texto livre com o modo de preparo, exibido na ficha e na impressão A4. **Coluna nova de propósito**: em `tech_sheets` o campo `notes` está ocupado guardando a categoria no formato `cat:<uuid>` (ver `mapTechSheetFromDb`), então escrever texto livre ali apagaria a categoria da ficha. Sem GRANT novo: privilégio de tabela vale para colunas adicionadas depois e a RLS das duas tabelas é por linha, não por coluna. |
+
+**Verificações pós-migration (CLAUDE.md §5) — feitas** (workdir isolado + probe com
+`RAISE EXCEPTION`, ver [[feedback_supabase_cli_isolated_push]]):
+- [x] `migration list --linked`: `20260826120000` com local e remoto preenchidos.
+- [x] `information_schema.columns` em prod: `tech_sheets.instructions` e
+      `preparations.instructions`, ambas `text` e nullable.
+- [ ] `get_advisors` — **não rodado** (precisa do MCP). São duas colunas nullable
+      em tabelas existentes, sem função, view ou policy nova.
 
 ## 0-ter. ✅ Aplicado em 2026-08-24 (via Supabase CLI) — Preparo → ficha respeita a unidade
 
@@ -141,6 +155,29 @@ existe mais no banco — não é sinal de pendência.
 
 ## 3. ⏳ Smoke tests pendentes
 
+**Categoria da ficha técnica (2 bugs corrigidos, sem migration):**
+- [ ] Editar uma ficha trocando a **categoria** → salvar → recarregar: a nova
+      categoria persiste (antes o `dbUpdateTechSheet` ignorava `cat` e `op`; o
+      `dbUpdatePreparation` tinha a mesma lacuna).
+- [ ] Conferir que trocar a categoria **não** apaga o modo de preparo — são colunas
+      diferentes (`notes` guarda `cat:<uuid>`, `instructions` guarda o texto).
+- [ ] Filtro de **Categoria** em Fichas e em Preparos devolve os itens certos;
+      trocar de aba zera o filtro. Verificado em prod que as **23 fichas** têm
+      `cat:` gravado e que **nenhuma** resolvia com a regex antiga (`\w` parava no
+      primeiro hífen do UUID) contra **23/23** com a corrigida — sem backfill.
+
+**Modo de preparo + impressão da ficha:**
+- [ ] Escrever o modo de preparo numa ficha e num preparo → recarregar → texto
+      persiste com as quebras de linha.
+- [ ] Conferir que editar a ficha **não** perde a categoria (o `notes` com
+      `cat:<uuid>` e o `instructions` são colunas separadas).
+- [ ] **Imprimir ficha** → abre janela A4 com cabeçalho, 4 indicadores, tabela de
+      composição com total, modo de preparo e espaço de anotações; o diálogo de
+      impressão abre sozinho. Ficha longa deve ir para 2 páginas em vez de encolher
+      demais (o auto-zoom tem piso de 0,7 e só age até 135% da altura útil).
+- [ ] No **celular**, imprimir a partir do botão do rodapé do preparo: a tela não
+      pode desmontar durante o `window.print()` (guard `beforeprint` do `useIsMobile`).
+
 Precisam da UI e de tenants reais — não dá pra fechar por SQL.
 
 **Ficha técnica em kg / g / un** (a matemática das três unidades já foi validada
@@ -219,6 +256,28 @@ Falta commitar a árvore de trabalho atual:
   `dbInsertTechSheetItem`/`dbInsertPreparationItem` aceitam `unitCost` explícito em vez
   de derivar de custo÷qtd (a conversão perderia casas decimais).
 - `supabase/migrations/20260824180000_preparation_cost_unit_aware.sql` (**novo, não rastreado**) — propagação preparo → ficha por unidade.
+
+Modo de preparo + impressão A4 (2026-08-26) — migration da seção 0-quater já aplicada:
+- `supabase/migrations/20260826120000_recipe_instructions.sql` (**novo, não rastreado**).
+- `lib-supabase.jsx` — `instructions` no select/insert/update e nos mappers de
+  `tech_sheets` e `preparations`.
+- `page-recipes.jsx` — campo **Modo de preparo** (textarea) no formulário, card no
+  editor e `buildRecipePrintHtml()` + botão **Imprimir ficha** (janela A4 standalone,
+  mesma técnica da DRE/CMV; exposto no window porque o mobile consome).
+- `page-mobile-recipes.jsx` — espelho: campo no formulário, bloco no detalhe e
+  botão de impressão no rodapé.
+
+Categoria: 2 bugs + filtro (2026-08-26) — só front, sem migration:
+- `lib-supabase.jsx` — regex da categoria da ficha passa de `\w+` para `[\w-]+` (o
+  UUID vinha truncado no primeiro hífen); `dbUpdateTechSheet` passa a gravar `cat`
+  (via `notes: cat:<uuid>`) e `op`, e `dbUpdatePreparation` grava `category_id` e
+  `operation_id` — os dois ignoravam esses campos em silêncio; helper
+  `_resolveOperationId()` compartilhado (aceita UUID ou slug legado).
+- `page-recipes.jsx` — categorias carregadas na página (4º fetch paralelo) e
+  **select de Categoria** na barra de filtros, listando só as que têm item no modo
+  atual; trocar de aba zera o filtro.
+- `page-mobile-recipes.jsx` — espelho em chips horizontais com contagem, no padrão
+  do `MpChips` da Produção.
 - `page-recipes.jsx` — campo **Unidade** do modal de insumo vira seletor: kg/g/un para
   insumo do estoque, kg/g para preparo que rende em kg (preparo em "und" segue campo
   travado, porque não há peso de uma "unidade" de preparo); `StockWeightModal` pede o

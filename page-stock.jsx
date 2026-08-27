@@ -1680,6 +1680,7 @@ function AllocationPanel({ item, onClose }) {
   const [movements, setMovements] = useState(null);
   const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
   const [sharedSplits30, setSharedSplits30] = useState({}); // { [requestId]: [{op, pct}] } das requisições compartilhadas
+  const [transferDests30, setTransferDests30] = useState({}); // { [transferId]: {name, tenantId} } das saídas p/ a rede
   const [consumption7d, setConsumption7d] = useState(null);
   const [showHistory, setShowHistory] = useState(false); // modal "Ver histórico" do item
   // Modo de auto min/max: 'off' | 'weekly' | 'monthly'
@@ -1717,10 +1718,10 @@ function AllocationPanel({ item, onClose }) {
   };
 
   useEffect(() => {
-    if (!dbStatus.isOnline || !item.id) { setMovements([]); setMovements30([]); setSharedSplits30({}); setConsumption7d({ qty: 0, daily: 0, window: 30, hasData: false }); return; }
+    if (!dbStatus.isOnline || !item.id) { setMovements([]); setMovements30([]); setSharedSplits30({}); setTransferDests30({}); setConsumption7d({ qty: 0, daily: 0, window: 30, hasData: false }); return; }
     // Zera os dados do insumo anterior pra exibir o estado de carregamento
     // enquanto busca os reais — senão o painel mostra dados do item antigo.
-    setMovements(null); setMovements30(null); setSharedSplits30({}); setConsumption7d(null);
+    setMovements(null); setMovements30(null); setSharedSplits30({}); setTransferDests30({}); setConsumption7d(null);
     let cancelled = false;
     (async () => {
       const ctx = await dbGetCurrentContext();
@@ -1750,9 +1751,18 @@ function AllocationPanel({ item, onClose }) {
       const reqIds = outs30
         .filter((m) => m.referenceType === "kitchen_request" && m.referenceId)
         .map((m) => m.referenceId);
-      const splitsRes = await (window.dbListSharedSplits?.(tid, reqIds) || { data: {} });
+      // Saída para a rede não tem operation_id: o destino real é a unidade que
+      // recebeu, e é isso que a quebra por operação mostra.
+      const transferIds = outs30
+        .filter((m) => m.referenceType === "supply_transfer" && m.referenceId)
+        .map((m) => m.referenceId);
+      const [splitsRes, destRes] = await Promise.all([
+        window.dbListSharedSplits?.(tid, reqIds) || { data: {} },
+        window.dbSupplyTransferDestinations?.(transferIds) || { data: {} },
+      ]);
       if (cancelled) return;
       setSharedSplits30(splitsRes.data || {});
+      setTransferDests30(destRes.data || {});
 
       setConsumption7d({
         qty: useMonthly ? total30 : total7,
@@ -1898,8 +1908,15 @@ function AllocationPanel({ item, onClose }) {
             // Saída de produção/rede não tem operation_id: sem isto tudo caía em
             // "Sem operação" e o insumo parecia ter sumido. Agrupa pelo destino.
             const origin = movementOrigin(m);
-            const key   = splits ? "__shared__" : (m.operationId || (origin ? `__ref_${m.referenceType}` : "__none__"));
+            // Transferência da rede: uma linha por unidade de destino ("Loja 1",
+            // "Loja 2"), não um "Rede" somando todas — o que interessa é para
+            // onde o insumo foi.
+            const dest = m.referenceType === "supply_transfer" ? transferDests30[m.referenceId] : null;
+            const key   = splits ? "__shared__"
+                        : dest ? `__dest_${dest.tenantId || dest.name}`
+                        : (m.operationId || (origin ? `__ref_${m.referenceType}` : "__none__"));
             const label = splits ? "Compartilhado"
+                        : dest ? dest.name
                         : (m.operationName || (m.op && m.op !== "—" ? m.op : (origin ? origin.label : "Sem operação")));
             const color = splits ? "var(--fg-2)"
                         : (m.operationColor || (origin ? "var(--info)" : "var(--fg-3)"));

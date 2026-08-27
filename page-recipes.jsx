@@ -14,6 +14,8 @@ function Recipes({ scope }) {
 
   // Cache de stock items (carregado paralelo às fichas e mantido em window p/ reuso)
   const [stockItems, setStockItems] = useState(window.__stockItemsCache || MOCK.STOCK_ITEMS);
+  // Categorias de receita — alimentam o filtro; o modal recarrega as suas.
+  const [cats, setCats] = useState(MOCK.RECIPE_CATEGORIES);
 
   // Carrega fichas + preparos + stock items do DB em paralelo (precarrega o dropdown)
   useEffect(() => {
@@ -28,12 +30,14 @@ function Recipes({ scope }) {
         setTenantId(tid || null);
         if (!tid) return;
         setSource("db"); // Conectado ao Supabase; queries abaixo só podem retornar do DB.
-        const [sheetsRes, prepsRes, stockRes] = await Promise.all([
+        const [sheetsRes, prepsRes, stockRes, catsRes] = await Promise.all([
           dbListTechSheets(tid),
           dbListPreparations(tid),
           dbListStockItems(tid),
+          typeof dbListRecipeCategories === "function" ? dbListRecipeCategories(tid) : Promise.resolve({ data: null }),
         ]);
         if (cancelled) return;
+        if (catsRes?.data) setCats(catsRes.data);
         setAllSheets(sheetsRes.data || []);
         setAllPreparations(prepsRes.data || []);
         const items = stockRes.data || [];
@@ -74,11 +78,14 @@ function Recipes({ scope }) {
   const labelSingular  = isPrep ? "preparo" : "ficha";
   const labelPlural    = isPrep ? "preparos" : "fichas técnicas";
 
+  // filterOp pode ser UUID (vindo dos chips de MOCK.OPERATIONS recém-populado)
+  // enquanto it.op fica como slug ("nippon"). Compara contra ambos os formatos.
+  // Fica solto porque o filtro de categoria também precisa do mesmo recorte.
+  const matchesOp = (it) => filterOp === "all" || it.op === filterOp || it.operationId === filterOp;
+
   // ----- Filtragem da lista (fichas técnicas ordenadas por CMV desc; preparos mantêm ordem alfabética)
   const items = currentList.filter((it) => {
-    // filterOp pode ser UUID (vindo dos chips de MOCK.OPERATIONS recém-populado)
-    // enquanto it.op fica como slug ("nippon"). Compara contra ambos os formatos.
-    if (filterOp !== "all" && it.op !== filterOp && it.operationId !== filterOp) return false;
+    if (!matchesOp(it)) return false;
     if (filterCat !== "all" && it.cat !== filterCat) return false;
     if (query.trim()) {
       const q = query.trim().toLowerCase();
@@ -125,6 +132,7 @@ function Recipes({ scope }) {
       const { data, error } = await dbInsertTechSheet(tenantId, {
         code, op: draft.op, cat: draft.cat, name: draft.name,
         price: draft.price, yieldQty: 1, yieldUnit: "un",
+        instructions: draft.instructions,
         items: [],
       });
       if (error) {
@@ -144,6 +152,7 @@ function Recipes({ scope }) {
       const { data, error } = await dbInsertPreparation(tenantId, {
         code, op: draft.op, cat: draft.cat, name: draft.name,
         yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit,
+        instructions: draft.instructions,
       });
       if (error) {
         window.showToast(`Erro ao criar preparo: ${error.message}`, { tone: "crit", ttl: 4500 });
@@ -155,6 +164,7 @@ function Recipes({ scope }) {
         op: data.operation_id, cat: data.category_id,
         yieldQty: Number(data.yield_qty) || 1,
         yieldUnit: data.yield_unit || "kg",
+        instructions: data.instructions || "",
         items: [], theo: 0, unitCost: 0,
       };
       setAllPreparations((prev) => [optimistic, ...prev]);
@@ -170,8 +180,8 @@ function Recipes({ scope }) {
     // Fallback MOCK
     const id = nextId();
     const base = isPrep
-      ? { id, op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit, theo: 0, unitCost: 0, items: [] }
-      : { id, op: draft.op, cat: draft.cat, name: draft.name, price: draft.price, theo: 0, cmv: 0, items: [] };
+      ? { id, op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit, instructions: draft.instructions, theo: 0, unitCost: 0, items: [] }
+      : { id, op: draft.op, cat: draft.cat, name: draft.name, price: draft.price, instructions: draft.instructions, theo: 0, cmv: 0, items: [] };
     setCurrentList((prev) => [recompute(base), ...prev]);
     setSelected(id);
     setCreating(false);
@@ -366,8 +376,8 @@ function Recipes({ scope }) {
   const handleEditSubmit = async (draft) => {
     if (!editingId) return;
     const partial = isPrep
-      ? { op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit }
-      : { op: draft.op, cat: draft.cat, name: draft.name, price: draft.price };
+      ? { op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit, instructions: draft.instructions }
+      : { op: draft.op, cat: draft.cat, name: draft.name, price: draft.price, instructions: draft.instructions };
 
     // DB persist
     if (dbStatus.isOnline && tenantId) {
@@ -484,7 +494,22 @@ function Recipes({ scope }) {
   const availablePreparations = allPreparations;
 
   const activeOpLabel  = filterOp  === "all" ? "Todas as operações" : MOCK.opById(filterOp).name;
-  const activeCatLabel = filterCat === "all" ? "Todas as categorias" : (MOCK.recipeCatById(filterCat)?.label || filterCat);
+  const catLabel = (id) => {
+    const c = cats.find((x) => x.id === id);
+    return c ? (c.label || c.name) : (MOCK.recipeCatById(id)?.label || id);
+  };
+  const activeCatLabel = filterCat === "all" ? "Todas as categorias" : catLabel(filterCat);
+
+  // Só as categorias que têm item no modo atual E na operação selecionada: o filtro
+  // oferece apenas o que dá resultado. "Todas as categorias" nunca some.
+  const catsInUse = cats.filter((c) => currentList.some((it) => matchesOp(it) && it.cat === c.id));
+
+  // Trocar de operação (ou de aba) pode deixar selecionada uma categoria que sumiu
+  // da lista: o <select> ficaria em branco e a listagem, vazia sem explicação.
+  useEffect(() => {
+    if (filterCat === "all") return;
+    if (!currentList.some((it) => matchesOp(it) && it.cat === filterCat)) setFilterCat("all");
+  }, [filterOp, mode, filterCat]);
 
   if (pageLoading) return <PageLoading label="Carregando fichas técnicas…" variant="table" />;
 
@@ -526,6 +551,15 @@ function Recipes({ scope }) {
             </FilterChip>
           ))}
         </div>
+        <span style={{ width: 1, height: 18, background: "var(--line)" }} />
+        <span style={filterLabelStyle}>Categoria</span>
+        <select className="select" value={filterCat} onChange={(e) => setFilterCat(e.target.value)}
+                style={{ minWidth: 170, maxWidth: 220 }}>
+          <option value="all">Todas as categorias</option>
+          {catsInUse.map((c) => (
+            <option key={c.id} value={c.id}>{c.label || c.name}</option>
+          ))}
+        </select>
         <span style={{ width: 1, height: 18, background: "var(--line)" }} />
         <input
           className="input"
@@ -725,7 +759,7 @@ function ListRow({ item, mode, isActive, onSelect, menuOpen, onToggleMenu, onEdi
           {isPrep ? (
             <>
               <span style={{ color: "var(--fg-2)" }}>{item.yieldQty} {item.yieldUnit}</span>
-              <span style={{ color: "var(--fg-3)" }}>{_unitText(item.unitCost || 0)}/{item.yieldUnit}</span>
+              <span style={{ color: "var(--fg-3)" }}>{_brlText(item.unitCost || 0)}/{item.yieldUnit}</span>
             </>
           ) : (
             <>
@@ -781,6 +815,180 @@ function EmptyEditor({ mode, onCreate }) {
   );
 }
 
+// ---------- Impressão da ficha (A4 via diálogo do navegador) ----------
+// Documento standalone em nova janela, mesma técnica da DRE e do CMV: o CSS de
+// impressão do app (styles.css) é para cupom térmico 80mm e quebraria o A4.
+// Serve ficha técnica e preparo — muda o cabeçalho de indicadores e o rodapé.
+function buildRecipePrintHtml({ item, isPrep, opName, tenantName }) {
+  const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const items = item.items || [];
+  const theo  = Number(item.theo) || 0;
+  const price = Number(item.price) || 0;
+  const cmv   = price > 0 ? (theo / price) * 100 : 0;
+
+  const rows = items.map((row) => {
+    const [name, qty, cost] = row;
+    const pct = theo > 0 ? (cost / theo) * 100 : 0;
+    return `<tr>
+      <td>${esc(name)}</td>
+      <td class="num">${esc(qty)}</td>
+      <td class="num">${esc(_brlText(cost))}</td>
+      <td class="num">${pct.toFixed(1)}%</td>
+    </tr>`;
+  }).join("");
+
+  // Indicadores: preparo mede rendimento e custo unitário; ficha mede preço e CMV.
+  const stats = isPrep
+    ? [["Rendimento", `${item.yieldQty || 1} ${item.yieldUnit || "kg"}`],
+       ["Custo total", _brlText(theo)],
+       ["Custo unitário", `${_brlText(item.unitCost || 0)}/${item.yieldUnit || "kg"}`],
+       ["Insumos", String(items.length)]]
+    : [["Preço de venda", _brlText(price)],
+       ["Custo composto", _brlText(theo)],
+       ["CMV teórico", `${cmv.toFixed(1)}%`],
+       ["Margem", price > 0 ? `${_brlText(price - theo)} · ${(((price - theo) / price) * 100).toFixed(1)}%` : "—"]];
+
+  const now = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  const genAt = `${p2(now.getDate())}/${p2(now.getMonth() + 1)}/${now.getFullYear()} ${p2(now.getHours())}:${p2(now.getMinutes())}`;
+  const kind = isPrep ? "Preparo" : "Ficha técnica";
+
+  return `<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>${esc(kind)} · ${esc(item.name)}</title>
+<style>
+  @page { size: A4; margin: 12mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 9.5px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; color: #16181c; background: #fff; }
+  .toolbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: #f3f4f6; border-bottom: 1px solid #dfe2e6; }
+  .toolbar button { font: 600 12px/1 inherit; padding: 8px 16px; border: 0; border-radius: 5px; background: #1a6d4a; color: #fff; cursor: pointer; }
+  .toolbar span { font-size: 11.5px; color: #6a7077; }
+  /* Na tela simula a mancha do A4; na impressão quem manda é a regra @media abaixo. */
+  main { padding: 16px 20px 24px; width: 100%; max-width: 186mm; margin: 0 auto; }
+  header { border-bottom: 1.5px solid #16181c; padding-bottom: 7px; margin-bottom: 10px; }
+  .eyebrow { font-size: 8px; letter-spacing: 0.09em; text-transform: uppercase; color: #6a7077; margin-bottom: 4px; }
+  h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.02em; }
+  .code { margin-top: 3px; font-size: 8.5px; color: #6a7077; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  /* minmax(0,…): sem isso o track não encolhe abaixo do min-content do card e a
+     linha de indicadores estoura a largura da página. */
+  .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-bottom: 11px; }
+  .stat { border: 1px solid #dfe2e6; border-radius: 3px; padding: 5px 7px; }
+  .stat span { display: block; font-size: 7px; letter-spacing: 0.06em; text-transform: uppercase; color: #6a7077; }
+  .stat b { display: block; font-size: 11px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+  h2 { font-size: 8px; letter-spacing: 0.09em; text-transform: uppercase; color: #6a7077; font-weight: 600;
+       margin: 0 0 6px; padding-bottom: 4px; border-bottom: 1px solid #dfe2e6; }
+  section { margin-bottom: 12px; }
+  /* fixed + larguras declaradas: com layout auto o min-content das colunas mono
+     ("26,32 centavos/g") pode passar de 100% e a tabela vaza para fora do papel. */
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  /* As colunas de dinheiro precisam caber "26,32 centavos/g" numa linha: quebrar
+     em duas dobra a altura de TODAS as linhas e é o que jogava a ficha p/ a p.2. */
+  col.c-name { width: 44%; } col.c-qty { width: 15%; }
+  col.c-cost { width: 24%; } col.c-pct { width: 17%; }
+  td:first-child { overflow-wrap: anywhere; }
+  th { text-align: left; font-size: 7px; letter-spacing: 0.06em; text-transform: uppercase; color: #6a7077;
+       font-weight: 600; padding: 4px 5px; border-bottom: 1.2px solid #16181c; }
+  td { padding: 3.5px 5px; border-bottom: 1px solid #eceef0; }
+  td.num, th.num { text-align: right; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  td.num { white-space: nowrap; font-size: 9px; }
+  tr.total td { font-weight: 600; border-top: 1.5px solid #16181c; border-bottom: none; }
+  .steps { white-space: pre-wrap; font-size: 10px; line-height: 1.6; }
+  .empty { color: #9aa0a6; font-style: italic; }
+  .notes { margin-top: 3px; border: 1px dashed #cfd4d9; border-radius: 3px; min-height: 16mm; }
+  footer { display: flex; justify-content: space-between; margin-top: 12px; padding-top: 6px;
+           border-top: 1px solid #dfe2e6; font-size: 8px; color: #6a7077; }
+  @media print {
+    .toolbar { display: none; }
+    /* O @page acima declara a margem, mas o diálogo do navegador pode ignorá-la
+       ("Margens: Nenhuma") — aí o conteúdo encosta na borda e a faixa que a
+       impressora fisicamente não alcança (~3–4 mm em jato de tinta) corta as
+       laterais. Este padding é o piso de segurança, valha o @page ou não. */
+    /* A folga fica no body porque o zoom abaixo se aplica ao main — se o padding
+       estivesse nele, encolheria junto e voltaria a encostar na borda. */
+    body { padding: 0 6mm; }
+    main { max-width: none; width: 100%; margin: 0; padding: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button onclick="window.print()">Imprimir / Salvar PDF</button>
+  <span>A4 · ${esc(kind)} · ${esc(item.name)}</span>
+</div>
+<main>
+  <header>
+    <div class="eyebrow">${esc(kind)}${opName ? " · " + esc(opName) : ""}${tenantName ? " · " + esc(tenantName) : ""}</div>
+    <h1>${esc(item.name)}</h1>
+    <div class="code">${esc(item.code || item.id || "")}</div>
+  </header>
+
+  <div class="stats">
+    ${stats.map(([l, v]) => `<div class="stat"><span>${esc(l)}</span><b>${esc(v)}</b></div>`).join("")}
+  </div>
+
+  <section>
+    <h2>Composição · ${items.length} ${items.length === 1 ? "insumo" : "insumos"}</h2>
+    <table>
+      <colgroup>
+        <col class="c-name" /><col class="c-qty" /><col class="c-cost" /><col class="c-pct" />
+      </colgroup>
+      <thead>
+        <tr><th>Insumo</th><th class="num">Qtd</th><th class="num">Custo composto</th><th class="num">% do total</th></tr>
+      </thead>
+      <tbody>
+        ${rows || `<tr><td colspan="4" class="empty">Sem insumos cadastrados.</td></tr>`}
+        <tr class="total"><td>Total</td><td></td><td class="num">${esc(_brlText(theo))}</td><td class="num">100%</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Modo de preparo</h2>
+    ${item.instructions
+      ? `<div class="steps">${esc(item.instructions)}</div>`
+      : `<div class="steps empty">Sem modo de preparo cadastrado.</div>`}
+  </section>
+
+  <section>
+    <h2>Anotações</h2>
+    <div class="notes"></div>
+  </section>
+
+  <footer><span>Gerado pelo Cloud Kitchen</span><span>${genAt}</span></footer>
+</main>
+<script>
+// A ficha técnica é um documento de UMA página — quem leva pra bancada não quer
+// folha 2 com o rodapé. O zoom encolhe sempre que precisar, sem teto.
+//
+// Itera em vez de calcular de uma vez: mudar o zoom refaz o refluxo do texto, e a
+// altura nova não é exatamente a antiga vezes a razão — numa passada só a ficha
+// longa sobrava por uns poucos pixels e ia pra folha 2 do mesmo jeito. Em elemento
+// com zoom, scrollHeight vem no sistema de coordenadas dele, então a altura
+// renderizada é scrollHeight × zoom.
+//
+// O piso de 0.55 é onde o corpo (9.5px) ainda se lê no papel. Ficha que precisar de
+// menos que isso vai para 2 páginas de propósito — melhor virar folha do que usar
+// lupa. Na prática cabe até ~50 insumos numa página.
+window.addEventListener("load", function () {
+  var main = document.querySelector("main");
+  var availPx = (297 - 24) * 96 / 25.4; // altura útil do A4 com as margens de 12mm
+  var z = 1;
+  for (var i = 0; i < 4; i++) {
+    var renderedPx = main.scrollHeight * z;
+    if (renderedPx <= availPx) break;
+    z = Math.max(0.55, z * (availPx / renderedPx) * 0.995); // 0.5% de folga
+    main.style.zoom = z;
+    if (z <= 0.55) break;
+  }
+  setTimeout(function () { window.print(); }, 300);
+});
+</script>
+</body>
+</html>`;
+}
+
 // ===== Editor unificado =====
 function Editor({ item, mode, source, stockItems = [], availablePreparations, onSaveItemWeight, onDuplicate, onEdit, onAddItem, onRemoveItem, onUpdateItem }) {
   const op = MOCK.opById(item.op);
@@ -791,6 +999,26 @@ function Editor({ item, mode, source, stockItems = [], availablePreparations, on
   const [adding, setAdding] = useState(false);
   const [editingIdx, setEditingIdx] = useState(null);
   const [openMenu, setOpenMenu] = useState(null);
+  const [printing, setPrinting] = useState(false);
+
+  const printSheet = () => {
+    if (printing) return;
+    setPrinting(true);
+    try {
+      const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
+      const w = window.open("", "_blank");
+      if (!w) {
+        window.showToast("Pop-up bloqueado pelo navegador · permita pop-ups para imprimir", { tone: "warn", ttl: 4500 });
+        return;
+      }
+      w.document.open();
+      w.document.write(buildRecipePrintHtml({ item, isPrep, opName: op?.name || null, tenantName }));
+      w.document.close();
+    } finally {
+      // diálogo de impressão já disparado na outra janela · solta o guard depois
+      setTimeout(() => setPrinting(false), 800);
+    }
+  };
 
   useEffect(() => {
     if (openMenu === null) return;
@@ -807,7 +1035,7 @@ function Editor({ item, mode, source, stockItems = [], availablePreparations, on
     <>
       <KpiCard label="Aproveitamento" data={{ v: `${item.yieldQty || 1} ${item.yieldUnit || "kg"}`, d: "rendimento", tone: "up", sub: "" }} />
       <KpiCard label="Custo total"    data={{ v: _brlText(theo), d: `${items.length} insumos`, tone: "warn", sub: "" }} />
-      <KpiCard label="Custo unitário" data={{ v: `${_unitText(item.unitCost || 0)}/${item.yieldUnit || "kg"}`, d: "usado em outras fichas", tone: "up", sub: "" }} accent />
+      <KpiCard label="Custo unitário" data={{ v: `${_brlText(item.unitCost || 0)}/${item.yieldUnit || "kg"}`, d: "usado em outras fichas", tone: "up", sub: "" }} accent />
       <KpiCard label="Tipo" data={{ v: "Preparo", d: item.code || item.id, tone: "warn", sub: "" }} />
     </>
   ) : (
@@ -840,6 +1068,9 @@ function Editor({ item, mode, source, stockItems = [], availablePreparations, on
             <I.Edit size={12} />Editar {isPrep ? "preparo" : "ficha"}
           </button>
           <button className="btn" data-size="sm" onClick={onDuplicate}>Duplicar</button>
+          <button className="btn" data-size="sm" onClick={printSheet} disabled={printing}>
+            <I.Print size={12} />{printing ? "Abrindo…" : "Imprimir ficha"}
+          </button>
           {!isPrep && (
             <button className="btn" data-size="sm" onClick={() => notImplemented("Histórico de custo")}>Histórico de custo</button>
           )}
@@ -881,7 +1112,6 @@ function Editor({ item, mode, source, stockItems = [], availablePreparations, on
             <tr>
               <th>Insumo</th>
               <th className="num">Qtd</th>
-              <th className="num">Custo unit.</th>
               <th className="num">Custo composto</th>
               <th className="num">% do total</th>
               <th />
@@ -889,20 +1119,12 @@ function Editor({ item, mode, source, stockItems = [], availablePreparations, on
           </thead>
           <tbody>
             {!hasItems && (
-              <tr><td colSpan={6} style={{ textAlign: "center", color: "var(--fg-3)", padding: "24px 12px" }}>
+              <tr><td colSpan={5} style={{ textAlign: "center", color: "var(--fg-3)", padding: "24px 12px" }}>
                 Sem insumos · clique em "Adicionar insumo" para compor.
               </td></tr>
             )}
             {items.map((row, i) => {
               const [name, qty, cost] = row;
-              const unitCost = row.unitCost != null
-                ? row.unitCost
-                : (row.qty > 0 ? cost / row.qty : 0);
-              // Custo de 1 unidade da medida DA LINHA (R$/un, R$/kg, R$/g…), que
-              // varia de linha para linha — sem o sufixo, R$ 70,17 e R$ 4,32 parecem
-              // a mesma escala. Linha em gramas cai na casa dos milésimos: com 2
-              // casas virava "R$ 0,00" mesmo com custo composto certo.
-              const rowUnit = row.unit || String(qty).match(/([a-zA-ZçÇãÃõÕéÉá-ú]+)\s*$/)?.[1] || "";
               const pct = item.theo > 0 ? (cost / item.theo) * 100 : 0;
               return (
                 <tr key={i}>
@@ -913,7 +1135,6 @@ function Editor({ item, mode, source, stockItems = [], availablePreparations, on
                     </span>
                   </td>
                   <td className="num">{qty}</td>
-                  <td className="num">{_unitText(unitCost)}{rowUnit ? `/${rowUnit}` : ""}</td>
                   <td className="num">{_brlText(cost)}</td>
                   <td className="num" style={{ color: "var(--fg-2)" }}>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
@@ -944,6 +1165,28 @@ function Editor({ item, mode, source, stockItems = [], availablePreparations, on
             })}
           </tbody>
         </table>
+      </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h3 className="card-title">Modo de preparo</h3>
+          <button className="btn" data-variant="ghost" data-size="sm" onClick={onEdit}>
+            <I.Edit size={12} />{item.instructions ? "Editar" : "Escrever"}
+          </button>
+        </div>
+        <div className="card-body">
+          {item.instructions ? (
+            // whiteSpace pre-wrap: o texto é digitado em linhas (1., 2., 3.) e as
+            // quebras são a estrutura — sem isso vira parágrafo corrido.
+            <div style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.6, color: "var(--fg-1)" }}>
+              {item.instructions}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12.5, color: "var(--fg-3)" }}>
+              Sem modo de preparo. Descreva as etapas para quem vai executar — o texto sai na impressão da ficha.
+            </div>
+          )}
+        </div>
       </div>
 
       {adding && (
@@ -1015,6 +1258,16 @@ function Field({ label, hint, children }) {
 }
 
 // ===== Modal de criar/editar Ficha ou Preparo =====
+// 'un' é o valor canônico de unidade contável — é o default do banco, o que as 23
+// fichas usam no rendimento e o que o modal de insumo já fala. 'und' entrou pelo
+// toggle de rendimento e pelo default do campo manual de insumo, e sobrou gravado
+// em preparos e linhas antigas; normalizar na leitura faz eles casarem e o próximo
+// save cura o registro. Não baixa a caixa do resto: 'L' tem que continuar 'L'.
+const _normUnit = (u) => (/^(und|unid|unidade)$/i.test(String(u || "")) ? "un" : String(u || ""));
+// Toggle mostra kg e un, mais a unidade atual quando é outra (há preparos em L) —
+// sem isso o botão some e a ficha fica com a unidade "selecionada" invisível.
+const _yieldUnitOptions = (current) => [...new Set(["kg", "un", _normUnit(current)].filter(Boolean))];
+
 function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit }) {
   const isPrep = mode === "preparations";
   const isEdit = !!initial;
@@ -1099,7 +1352,8 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
   const [name, setName]   = useState(initial?.name  || "");
   const [price, setPrice] = useState(initial?.price != null ? String(initial.price).replace(".", ",") : "");
   const [yieldQty, setYieldQty]   = useState(initial?.yieldQty != null ? String(initial.yieldQty).replace(".", ",") : "");
-  const [yieldUnit, setYieldUnit] = useState(initial?.yieldUnit || "kg");
+  const [yieldUnit, setYieldUnit] = useState(_normUnit(initial?.yieldUnit) || "kg");
+  const [instructions, setInstructions] = useState(initial?.instructions || "");
 
   // Validação: nome + operação obrigatórios; categoria opcional
   // (para preparos sem categoria definida, não bloqueia o save)
@@ -1117,11 +1371,13 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
           op, cat, name: name.trim(),
           yieldQty:  parseFloat(String(yieldQty).replace(",", ".")) || 0,
           yieldUnit: yieldUnit,
+          instructions: instructions.trim(),
         });
       } else {
         await onSubmit({
           op, cat, name: name.trim(),
           price: parseFloat(String(price).replace(",", ".")) || 0,
+          instructions: instructions.trim(),
         });
       }
     } finally {
@@ -1229,7 +1485,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
               </Field>
               <Field label="Unidade">
                 <div style={{ display: "flex", gap: 4 }}>
-                  {["kg", "und"].map((u) => (
+                  {_yieldUnitOptions(yieldUnit).map((u) => (
                     <button key={u} type="button" className="btn" data-size="sm"
                             onClick={() => setYieldUnit(u)}
                             style={{
@@ -1256,7 +1512,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
               </Field>
               <Field label="Unidade">
                 <div style={{ display: "flex", gap: 4 }}>
-                  {["kg", "und"].map((u) => (
+                  {_yieldUnitOptions(yieldUnit).map((u) => (
                     <button key={u} type="button" className="btn" data-size="sm"
                             onClick={() => setYieldUnit(u)}
                             style={{
@@ -1272,6 +1528,16 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
               </Field>
             </div>
           )}
+
+          <Field label="Modo de preparo"
+                 hint="Descrição, etapas, tempos, pontos de atenção — sai na impressão da ficha.">
+            <textarea className="input" rows={6} value={instructions}
+                      onChange={(e) => setInstructions(e.target.value)}
+                      placeholder={isPrep
+                        ? "ex.: 1. Hidratar o fermento em 200 ml de água morna\n2. Misturar a farinha e sovar por 10 min\n3. Descansar 1 h coberto"
+                        : "ex.: 1. Abrir a massa e furar com garfo\n2. Espalhar o molho deixando 1 cm de borda\n3. Forno 280°C por 6 min"}
+                      style={{ resize: "vertical", minHeight: 96, lineHeight: 1.5, fontFamily: "inherit" }} />
+          </Field>
         </div>
         <div style={{
           padding: "12px 16px", borderTop: "1px solid var(--line-soft)",
@@ -1419,14 +1685,14 @@ const _centsText = (v) => {
   const c = (Number(v) || 0) * 100;
   return `${c.toFixed(2).replace(/\.00$/, "").replace(".", ",")} ${c === 1 ? "centavo" : "centavos"}`;
 };
-// Dinheiro fechado (custo composto, totais, preços): 2 casas.
-const _brlText  = (v) => _isSubReal(v) ? _centsText(v) : `R$ ${(Number(v) || 0).toFixed(2).replace(".", ",")}`;
-// Custo por unidade: até 4 casas, que é a precisão que o banco guarda.
-const _unitText = (v) => _isSubReal(v) ? _centsText(v) : `R$ ${_ucText(v)}`;
+// Todo valor exibido em reais fica em 2 casas, inclusive custo por unidade: o
+// cálculo guarda as casas seguintes (numeric(12,4)), a tela não mostra.
+const _brlText = (v) => _isSubReal(v) ? _centsText(v) : `R$ ${(Number(v) || 0).toFixed(2).replace(".", ",")}`;
 
-// Custo unitário como texto do input. numeric(12,4) no banco — 4 casas é o
-// máximo que sobrevive à ida e volta, e nem kg × un nem R$/g são redondos.
-// Sem separador de milhar: o valor volta por parseFloat(v.replace(",", ".")).
+// Custo unitário como valor do input — único lugar que mostra 4 casas, porque é
+// o número reenviado no submit: cortar em 2 casas gravaria um custo menos preciso.
+// numeric(12,4) no banco é o teto do que sobrevive à ida e volta. Sem separador de
+// milhar: o valor volta por parseFloat(v.replace(",", ".")).
 const _ucText = (v) =>
   (Number(v) || 0).toFixed(4).replace(/(\.\d\d)0+$/, "$1").replace(".", ",");
 const _gText  = (g) => Number(g || 0).toLocaleString("pt-BR", { maximumFractionDigits: 1 });
@@ -1462,7 +1728,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
     ...stock.map((si) => ({
       key:   `stock:${si.id}`,
       kind:  "stock",
-      label: `${si.name} · ${si.cat} · ${_unitText(si.cost)}/${si.unit}`,
+      label: `${si.name} · ${si.cat} · ${_brlText(si.cost)}/${si.unit}`,
       name:  si.name,
       unit:  si.unit,
       cost:  si.cost,
@@ -1473,7 +1739,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
       .map((p) => ({
         key:   `prep:${p.id}`,
         kind:  "preparation",
-        label: `🔧 ${p.name} · preparo · ${_unitText(p.unitCost || 0)}/${p.yieldUnit}`,
+        label: `🔧 ${p.name} · preparo · ${_brlText(p.unitCost || 0)}/${p.yieldUnit}`,
         name:  p.name,
         unit:  p.yieldUnit,
         cost:  p.unitCost || 0,
@@ -1505,7 +1771,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
   const [sourceKey, setSourceKey] = useState(findInitialSource());
   const [name, setName]           = useState(initial?.[0] || "");
   const [qtyVal, setQtyVal]       = useState(initial ? extractQty(initial[1]) : "");
-  const [unit, setUnit]           = useState(initial ? extractUnit(initial[1]) : "und");
+  const [unit, setUnit]           = useState(initial ? _normUnit(extractUnit(initial[1])) : "un");
   const [unitCost, setUnitCost]   = useState(initial?.unitCost != null ? _ucText(initial.unitCost) : "");
   const [cost, setCost]           = useState(initial?.[2] != null ? String(initial[2]).replace(".", ",") : "");
   const [costEdited, setCostEdited] = useState(false);
@@ -1596,6 +1862,12 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
   const parsedCost = parseFloat(String(cost).replace(",", ".")) || 0;
   const parsedQty  = parseFloat(String(qtyVal).replace(",", "."));
   const parsedUnitCost = parseFloat(String(unitCost).replace(",", "."));
+  // "Houve conversão" é o custo ter mudado, não a unidade estar escrita diferente.
+  // Comparar as strings acusava conversão em linha 'und' vs origem 'un' (mesma coisa)
+  // e em 'Litros' vs 'L' — e ainda erraria em toda grafia nova que aparecesse.
+  const converted = !!selectedSrc
+    && Number.isFinite(parsedUnitCost)
+    && Math.abs(parsedUnitCost - (Number(selectedSrc.cost) || 0)) > 0.00005;
   const valid = name.trim() && Number.isFinite(parsedQty) && parsedQty > 0 && parsedCost >= 0;
 
   // Guard síncrono contra duplo clique — onSubmit (onAddItem) insere item no banco
@@ -1686,9 +1958,7 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
             )}
           </FormRow>
           <FormRow label="Custo unit. (R$)"
-                   hint={selectedSrc && !_sameUnit(selectedSrc.unit, unit)
-                     ? `convertido · R$/${unit}`
-                     : (sourceKey ? "vem da origem" : "opcional")}>
+                   hint={converted ? `convertido · R$/${unit}` : (sourceKey ? "vem da origem" : "opcional")}>
             <input
               className="input mono"
               inputMode="decimal"
@@ -1702,18 +1972,18 @@ function IngredientModal({ initial, stockItems, availablePreparations = [], excl
           </FormRow>
         </div>
 
-        {selectedSrc && !_sameUnit(selectedSrc.unit, unit) && (
+        {converted && (
           <div style={{
             padding: "8px 12px", background: "var(--bg-2)",
             border: "1px solid var(--accent-line)", borderRadius: 4,
             fontSize: 11.5, color: "var(--fg-2)",
           }}>
-            ⓘ Convertido {stockSrc ? "do estoque" : "do preparo"}: {_unitText(selectedSrc.cost)}/{selectedSrc.unit}
+            ⓘ Convertido {stockSrc ? "do estoque" : "do preparo"}: {_brlText(selectedSrc.cost)}/{selectedSrc.unit}
             {/* o peso só entra quando um dos lados é unidade contável; kg ↔ g dispensa */}
             {stockSrc && stockItemUnitWeightKg(stockSrc) > 0 && (!_isMassUnit(stockSrc.unit) || !_isMassUnit(unit)) &&
               ` · 1 ${_isMassUnit(stockSrc.unit) ? unit : stockSrc.unit} = ${_gText(stockItemUnitWeightKg(stockSrc) * 1000)} g`}
             {" → "}
-            <strong style={{ color: "var(--fg-0)" }}>{_unitText(parsedUnitCost)}/{unit}</strong> na ficha.
+            <strong style={{ color: "var(--fg-0)" }}>{_brlText(parsedUnitCost)}/{unit}</strong> na ficha.
           </div>
         )}
 
@@ -1788,7 +2058,7 @@ function StockWeightModal({ item, targetUnit, saving, onCancel, onSubmit }) {
     ["Insumo", item.name],
     ["Categoria", item.cat || "—"],
     ["Unidade no estoque", item.unit],
-    ["Custo unit.", `${_unitText(item.cost)}/${item.unit}`],
+    ["Custo unit.", `${_brlText(item.cost)}/${item.unit}`],
     ["Saldo atual", `${Number(item.qty || 0).toLocaleString("pt-BR", { maximumFractionDigits: 3 })} ${item.unit}`],
     ["Fornecedor", item.supplier || "—"],
   ];
@@ -1836,7 +2106,7 @@ function StockWeightModal({ item, targetUnit, saving, onCancel, onSubmit }) {
             border: "1px solid var(--accent-line)", borderRadius: 4,
             fontSize: 11.5, color: "var(--fg-2)",
           }}>
-            ⓘ 1 un = {_gText(g)} g → custo de <strong style={{ color: "var(--fg-0)" }}>{_unitText(preview)}/{targetUnit}</strong> na ficha.
+            ⓘ 1 un = {_gText(g)} g → custo de <strong style={{ color: "var(--fg-0)" }}>{_brlText(preview)}/{targetUnit}</strong> na ficha.
           </div>
         )}
       </div>
@@ -1845,3 +2115,6 @@ function StockWeightModal({ item, targetUnit, saving, onCancel, onSubmit }) {
 }
 
 window.Recipes = Recipes;
+// Consumido também por page-mobile-recipes.jsx (arquivos legados não compartilham
+// escopo de módulo; este é importado antes do mobile no bootstrap).
+window.buildRecipePrintHtml = buildRecipePrintHtml;

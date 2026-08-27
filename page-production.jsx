@@ -434,6 +434,10 @@ function ProductionRequestModal({ tid, stockItems, recipes, nextCode, initialRec
 
   const recipe = (recipes || []).find((r) => r.id === recipeId) || null;
   const batchN = _prodParseNum(batches) || 0;
+  // Com receita escolhida os insumos são receita × lotes: linhas travadas, o
+  // ajuste é pelo nº de lotes. Só a solicitação avulsa (sem receita) é montada
+  // à mão — mesmo princípio da devolução, onde a saída da receita não é trocável.
+  const fromRecipe = !!recipe;
 
   // Só a receita define o rendimento esperado — não é digitável. Sem receita não
   // há expectativa nenhuma, e a ordem vai sem saída pré-declarada (os
@@ -569,10 +573,37 @@ function ProductionRequestModal({ tid, stockItems, recipes, nextCode, initialRec
 
         <div>
           <div style={secLabel}>Insumos a separar</div>
+          {fromRecipe && (
+            <div style={{ fontSize: 11, color: "var(--fg-3)", marginBottom: 8, lineHeight: 1.5 }}>
+              Travados pela receita × {batchN.toLocaleString("pt-BR")} {batchN === 1 ? "lote" : "lotes"} — mude os
+              lotes para ajustar, ou escolha "sem receita" para montar a solicitação à mão.
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {inputs.map((l, i) => {
               const item = byId[l.itemId];
               const qtyN = _prodParseNum(l.qty);
+              // Linha vinda de receita é leitura pura: quantidade é receita × lotes.
+              // Editar aqui desfaria a conta que a própria receita define.
+              if (fromRecipe) {
+                return (
+                  <div key={i} style={{ ...lineStyle, padding: "7px 10px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, color: "var(--fg-0)" }}>{item?.name || "—"}</div>
+                      <div style={{ fontSize: 10.5, color: "var(--fg-3)", fontFamily: "var(--mono)" }}>
+                        saldo {(item?.qty ?? 0).toLocaleString("pt-BR")} {item?.unit}
+                      </div>
+                    </div>
+                    <span className="mono" style={{ fontSize: 12.5, color: qtyN > (item?.qty || 0) ? "var(--crit)" : "var(--fg-0)", textAlign: "right" }}>
+                      {qtyN.toLocaleString("pt-BR", { maximumFractionDigits: 3 })} {item?.unit}
+                    </span>
+                    <span style={{ fontSize: 11.5, color: "var(--fg-2)", fontFamily: "var(--mono)", textAlign: "right" }}>
+                      {item && qtyN > 0 ? _prodFmtBRL(qtyN * (item.cost || 0)) : "—"}
+                    </span>
+                    <I.Lock size={11} style={{ color: "var(--fg-4)", justifySelf: "center" }} />
+                  </div>
+                );
+              }
               return (
                 <div key={i} style={lineStyle}>
                   <StockItemPicker
@@ -591,9 +622,11 @@ function ProductionRequestModal({ tid, stockItems, recipes, nextCode, initialRec
               );
             })}
           </div>
-          <button type="button" className="btn" data-size="sm" style={{ marginTop: 8 }} onClick={addLine}>
-            <I.Plus size={12} /> Adicionar insumo
-          </button>
+          {!fromRecipe && (
+            <button type="button" className="btn" data-size="sm" style={{ marginTop: 8 }} onClick={addLine}>
+              <I.Plus size={12} /> Adicionar insumo
+            </button>
+          )}
         </div>
 
         {/* Leitura pura: a expectativa é a receita × lotes. Sem receita não há o
@@ -751,21 +784,11 @@ function planProduction(item, recipe) {
 }
 window.planProduction = planProduction;
 
-function ProduceTodayPanel({ stockItems, recipes, orders, onProduce, onReturn, onOpenOrder }) {
-  const byId = {};
-  (stockItems || []).forEach((i) => { byId[i.id] = i; });
-
-  // Ordens abertas: 'draft' ainda está na fila de Requisições (a separar ou
-  // separada, aguardando entrega); 'issued' já retirou os insumos e deve a
-  // devolução. As duas ocupam a tela inicial porque são trabalho em aberto.
-  const open = (orders || []).filter((o) => o.status === "draft" || o.status === "issued");
-  const waiting  = open.filter((o) => o.status === "issued");
-  const queued   = open.filter((o) => o.status === "draft");
-  // Transformado que já tem lote a caminho não deve ser pedido de novo sem o
-  // operador saber — a linha ganha um aviso em vez de sumir da lista.
-  const inFlight = new Set();
-  open.forEach((o) => (o.outputs || []).forEach((l) => l.itemId && inFlight.add(l.itemId)));
-
+// Lista do "Produzir hoje": cada transformado com a receita que o produz e o
+// plano de reposição, já ordenada por urgência (maior déficit relativo primeiro,
+// sem parâmetro no fim) e separada nos três grupos que a tela mostra.
+// Exposto no window — a tela do tablet monta a mesma lista.
+function prodPlanRows(stockItems, recipes) {
   const rows = (stockItems || [])
     .filter((i) => i.itemKind === "transformed")
     .map((i) => {
@@ -782,9 +805,31 @@ function ProduceTodayPanel({ stockItems, recipes, orders, onProduce, onReturn, o
       return rb - ra;
     });
 
-  const toProduce = rows.filter((r) => r.plan.produce > 0);
-  const ok        = rows.filter((r) => r.plan.target != null && !(r.plan.produce > 0));
-  const noPar     = rows.filter((r) => r.plan.target == null);
+  return {
+    rows,
+    toProduce: rows.filter((r) => r.plan.produce > 0),
+    ok:        rows.filter((r) => r.plan.target != null && !(r.plan.produce > 0)),
+    noPar:     rows.filter((r) => r.plan.target == null),
+  };
+}
+window.prodPlanRows = prodPlanRows;
+
+function ProduceTodayPanel({ stockItems, recipes, orders, onProduce, onReturn, onOpenOrder }) {
+  const byId = {};
+  (stockItems || []).forEach((i) => { byId[i.id] = i; });
+
+  // Ordens abertas: 'draft' ainda está na fila de Requisições (a separar ou
+  // separada, aguardando entrega); 'issued' já retirou os insumos e deve a
+  // devolução. As duas ocupam a tela inicial porque são trabalho em aberto.
+  const open = (orders || []).filter((o) => o.status === "draft" || o.status === "issued");
+  const waiting  = open.filter((o) => o.status === "issued");
+  const queued   = open.filter((o) => o.status === "draft");
+  // Transformado que já tem lote a caminho não deve ser pedido de novo sem o
+  // operador saber — a linha ganha um aviso em vez de sumir da lista.
+  const inFlight = new Set();
+  open.forEach((o) => (o.outputs || []).forEach((l) => l.itemId && inFlight.add(l.itemId)));
+
+  const { rows, toProduce, ok, noPar } = prodPlanRows(stockItems, recipes);
 
   const th = { fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.08em", textTransform: "uppercase", textAlign: "left", padding: "6px 8px", borderBottom: "1px solid var(--line)" };
   const td = { fontSize: 12.5, color: "var(--fg-1)", padding: "8px 8px", borderBottom: "1px solid var(--line-soft)" };
@@ -982,6 +1027,7 @@ function TransformedLevelBar({ qty, min, max }) {
     </div>
   );
 }
+window.TransformedLevelBar = TransformedLevelBar;
 
 // Linha do "Produzir hoje". Abre os insumos que o plano consome (receita × nº
 // de lotes) para dar de ver, antes de abrir o modal, se o estoque cobre o lote.
@@ -1094,6 +1140,9 @@ const _PROD_VIEWS = [
   { id: "catalog",  label: "Transformados" },
   { id: "recipes",  label: "Receitas de produção" },
   { id: "insights", label: "Análises" },
+  // Consumo serve qualquer unidade (quanto cada marca gastou dos porcionados);
+  // a tabela da rede dentro dele é que só aparece na central.
+  { id: "consumption", label: "Consumo por Operação" },
 ];
 
 function Production({ scope }) {
@@ -1106,7 +1155,7 @@ function Production({ scope }) {
   const [stockItems, setStockItems] = useState([]);
   const [categories, setCategories] = useState([]);
   const [recipes, setRecipes] = useState([]);
-  const [supplyTransfers, setSupplyTransfers] = useState([]); // só central (Consumo por tenant)
+  const [supplyTransfers, setSupplyTransfers] = useState([]); // só central (tabela da rede em Consumo)
   const [statusFilter, setStatusFilter] = useState("all");
   const [batchModal, setBatchModal] = useState(null); // { recipeId, batches } | null
   const [detail, setDetail] = useState(null);        // ordem aberta no modal
@@ -1224,7 +1273,7 @@ function Production({ scope }) {
           </button>
         </div>
         <div style={{ display: "flex", gap: 2, borderBottom: "1px solid var(--line)", marginTop: 14 }}>
-          {(kind === "distribution_center" ? [..._PROD_VIEWS, { id: "bytenant", label: "Consumo por tenant" }] : _PROD_VIEWS).map((v) => (
+          {_PROD_VIEWS.map((v) => (
             <button key={v.id} onClick={() => setView(v.id)}
               style={{
                 background: "none", border: "none", cursor: "pointer",
@@ -1260,7 +1309,10 @@ function Production({ scope }) {
             onChanged={() => reload()} />
         )}
         {view === "insights" && <TransformedAnalytics orders={orders} stockItems={stockItems} />}
-        {view === "bytenant" && <TransformedByTenant tid={tid} transfers={supplyTransfers} />}
+        {view === "consumption" && (
+          <TransformedConsumption tid={tid} isCentral={kind === "distribution_center"}
+            transfers={supplyTransfers} stockItems={stockItems} />
+        )}
 
         {view === "orders" && (<>
       {(() => {

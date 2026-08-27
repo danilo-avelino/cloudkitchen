@@ -957,7 +957,7 @@ function SupplyLedgerTable({ entries, nameByTenant, showTenant = false }) {
       <thead>
         <tr>
           <th style={_supTh}>Data</th>
-          {showTenant && <th style={_supTh}>Tenant</th>}
+          {showTenant && <th style={_supTh}>Unidade</th>}
           <th style={_supTh}>Tipo</th>
           <th style={_supTh}>Obs.</th>
           <th style={{ ..._supTh, textAlign: "right" }}>Valor</th>
@@ -1226,7 +1226,7 @@ function SupplyDivergenceView({ tid, isCentral = false, scopeCentralId = null })
 const _SUP_VIEWS = [
   { id: "receipts",    label: "Recebimentos" },
   { id: "central",     label: "Solicitar da central" },
-  { id: "peers",       label: "Entre tenants" },
+  { id: "peers",       label: "Entre unidades" },
   { id: "divergences", label: "Divergências" },
   { id: "ledger",      label: "Gastos" },
 ];
@@ -1425,21 +1425,21 @@ function Suprimentos({ scope }) {
               <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
                 <div>
                   <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)" }}>Pedidos entre tenants</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)" }}>Pedidos entre unidades</div>
                     <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                       <button className="btn" data-size="sm" disabled={peers.length === 0}
                         onClick={() => setRequestForm({ suppliers: peers.map((p) => ({ id: p.tenantId, name: p.name })) })}>
-                        <I.Plus size={12} /> Pedir de outro tenant
+                        <I.Plus size={12} /> Pedir de outra unidade
                       </button>
                       <button className="btn" data-variant="primary" data-size="sm" disabled={peers.length === 0}
                         onClick={() => setTransferForm({ toOptions: peers.map((p) => ({ id: p.tenantId, name: p.name })), prefillRequest: null })}>
-                        <I.ArrowRight size={12} /> Enviar para outro tenant
+                        <I.ArrowRight size={12} /> Enviar para outra unidade
                       </button>
                     </div>
                   </div>
                   {peers.length === 0 && (
                     <div style={{ fontSize: 12, color: "var(--fg-3)", marginBottom: 10 }}>
-                      A rede ainda não tem outros tenants ativos.
+                      A rede ainda não tem outras unidades ativas.
                     </div>
                   )}
                   <SupplyRequestList
@@ -1451,7 +1451,7 @@ function Suprimentos({ scope }) {
                       toOptions: [{ id: r.requesterTenantId, name: r.requesterName }],
                       prefillRequest: r,
                     })}
-                    emptyHint="Nenhum pedido entre tenants ainda."
+                    emptyHint="Nenhum pedido entre unidades ainda."
                   />
                 </div>
                 <div>

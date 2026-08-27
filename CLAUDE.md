@@ -109,11 +109,11 @@ Sem USAGE em `public`, edge functions caem em 500 com `permission denied for sch
 **Nunca fazer commit sem pedido explícito do usuário.**
 
 - Não rodar `git commit`, `git push`, criar PR, push de branch ou merge por iniciativa própria — mesmo que pareça o "próximo passo natural" depois de uma mudança. Terminar a tarefa, mostrar o que mudou e esperar o usuário pedir o commit.
-- `apply_migration` e `deploy_edge_function` **podem** ser feitos como parte natural da tarefa (sem pedido explícito), desde que a mudança esteja validada (advisors, GRANTs das seções 5.x). O que não pode é o commit/push do código no git.
+- `apply_migration` e `deploy_edge_function` **podem** ser feitos como parte natural da tarefa (sem pedido explícito). O que não pode é o commit/push do código no git.
 
 ---
 7. Botões. Em todos os novos botões devemos adicionar um guard de duplo-clique e aviso de Carregando
 
-8. Se forem feitas modificações em uma pagina, sempre lembre de alterara sua versão mobile
+8. Se forem feitas modificações em uma pagina, sempre lembre de alterar a sua versão mobile
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

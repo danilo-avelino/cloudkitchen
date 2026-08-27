@@ -1399,6 +1399,19 @@ async function dbInsertGoodsReceipt(tenantId, draft) {
 // =====================================================================
 // TECH SHEETS · Fichas técnicas / Receitas
 // =====================================================================
+
+// Aceita UUID de operação direto (o que os chips do app mandam) ou slug legado.
+// Devolve undefined quando não resolve, para o chamador simplesmente não tocar na
+// coluna em vez de gravar null e desvincular a ficha da operação.
+async function _resolveOperationId(tenantId, op) {
+  const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+  if (!op) return undefined;
+  if (isUuid(op)) return op;
+  if (!tenantId) return undefined;
+  const { data } = await _client.from("operations")
+    .select("id").eq("tenant_id", tenantId).eq("slug", op).maybeSingle();
+  return data?.id || undefined;
+}
 function mapTechSheetFromDb(row) {
   // Mantém id em propriedade do array para que update/delete funcionem por posição
   const items = (row.items || [])
@@ -1421,7 +1434,11 @@ function mapTechSheetFromDb(row) {
     code:  row.code,
     op:    row.operation?.slug || row.operation_id,
     operationId: row.operation_id,
-    cat:   row.notes?.match(/^cat:(\w+)/)?.[1] || "outro",
+    // [\w-] e não \w: category_id é UUID e \w para no primeiro hífen, devolvendo
+    // só o primeiro bloco ("8f3a1b2c") — id que não casa com categoria nenhuma.
+    // O valor gravado sempre foi completo, então corrigir a leitura já recupera
+    // as fichas existentes, sem backfill.
+    cat:   row.notes?.match(/^cat:([\w-]+)/)?.[1] || "outro",
     name:  row.name,
     price: Number(row.sale_price) || 0,
     theo:  cost,
@@ -1429,6 +1446,8 @@ function mapTechSheetFromDb(row) {
     yieldQty:  Number(row.yield_qty) || 1,
     yieldUnit: row.yield_unit,
     notes: row.notes,
+    // Modo de preparo. Coluna própria porque `notes` guarda a categoria (`cat:<uuid>`).
+    instructions: row.instructions || "",
     items, // formato [[name, "X kg", cost], ...]
   };
 }
@@ -1437,7 +1456,7 @@ async function dbListTechSheets(tenantId) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const { data, error } = await _client.from("tech_sheets")
     .select(`
-      id, code, name, sale_price, yield_qty, yield_unit, notes, is_active,
+      id, code, name, sale_price, yield_qty, yield_unit, notes, instructions, is_active,
       operation_id, operation:operations(id, slug, name),
       items:tech_sheet_items(id, display_name, qty, unit, unit_cost, line_cost, stock_item_id, sort_order)
     `)
@@ -1503,7 +1522,7 @@ async function dbListPreparations(tenantId) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const { data, error } = await _client.from("preparations")
     .select(`
-      id, code, name, operation_id, category_id, yield_qty, yield_unit, notes,
+      id, code, name, operation_id, category_id, yield_qty, yield_unit, notes, instructions,
       operation:operations(slug),
       category:recipe_categories(name),
       items:preparation_items!preparation_id(id, name, qty, unit, unit_cost, total_cost, stock_item_id, source_prep_id, sort_order)
@@ -1531,7 +1550,7 @@ async function dbListPreparations(tenantId) {
         op: r.operation_id, opSlug: r.operation?.slug,
         cat: r.category_id, catName: r.category?.name,
         yieldQty, yieldUnit: r.yield_unit,
-        notes: r.notes, items,
+        notes: r.notes, instructions: r.instructions || "", items,
         theo,
         unitCost: yieldQty > 0 ? theo / yieldQty : 0,
       };
@@ -1558,17 +1577,31 @@ async function dbInsertPreparation(tenantId, draft) {
     yield_qty:    Number(draft.yieldQty) || 1,
     yield_unit:   draft.yieldUnit || "kg",
     notes:        draft.notes || null,
+    instructions: draft.instructions || null,
   }).select().single();
   return { data, error };
 }
 
 async function dbUpdatePreparation(id, patch) {
   if (!isDbOnline() || !_client) return { data: null, error: new Error("DB offline") };
+  const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
   const update = {};
   if (patch.name      !== undefined) update.name = patch.name;
   if (patch.yieldQty  !== undefined) update.yield_qty = Number(patch.yieldQty) || 1;
   if (patch.yieldUnit !== undefined) update.yield_unit = patch.yieldUnit;
   if (patch.notes     !== undefined) update.notes = patch.notes;
+  if (patch.instructions !== undefined) update.instructions = patch.instructions || null;
+  // Aqui categoria tem coluna própria. "" / "outro" (o id mock) viram null.
+  if (patch.cat !== undefined) update.category_id = isUuid(patch.cat) ? patch.cat : null;
+  if (patch.op !== undefined) {
+    let tenantId = null;
+    if (!isUuid(patch.op)) {
+      const { data: row } = await _client.from("preparations").select("tenant_id").eq("id", id).maybeSingle();
+      tenantId = row?.tenant_id || null;
+    }
+    const opId = await _resolveOperationId(tenantId, patch.op);
+    if (opId) update.operation_id = opId;
+  }
   const { data, error } = await _client.from("preparations").update(update).eq("id", id).select().single();
   return { data, error };
 }
@@ -1651,6 +1684,7 @@ async function dbInsertTechSheet(tenantId, draft) {
     yield_qty:    Number(header.yieldQty) || 1,
     yield_unit:   header.yieldUnit || "un",
     notes:        header.cat ? `cat:${header.cat}` : header.notes,
+    instructions: header.instructions || null,
   }).select().single();
   if (error) return { data: null, error };
 
@@ -1687,6 +1721,22 @@ async function dbUpdateTechSheet(id, patch) {
   if (patch.yieldQty  !== undefined) update.yield_qty = Number(patch.yieldQty) || 1;
   if (patch.yieldUnit !== undefined) update.yield_unit = patch.yieldUnit;
   if (patch.notes     !== undefined) update.notes = patch.notes;
+  if (patch.instructions !== undefined) update.instructions = patch.instructions || null;
+  // Categoria mora em `notes` no formato `cat:<uuid>` (a tabela não tem coluna
+  // própria) — mesma convenção do insert. Vem depois de `notes` de propósito:
+  // quando os dois chegam juntos, a categoria manda, como no dbInsertTechSheet.
+  if (patch.cat) update.notes = `cat:${patch.cat}`;
+  if (patch.op !== undefined) {
+    // Precisa do tenant para resolver slug; com UUID (caso normal) nem consulta.
+    let tenantId = null;
+    const isUuid = (v) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+    if (!isUuid(patch.op)) {
+      const { data: row } = await _client.from("tech_sheets").select("tenant_id").eq("id", id).maybeSingle();
+      tenantId = row?.tenant_id || null;
+    }
+    const opId = await _resolveOperationId(tenantId, patch.op);
+    if (opId) update.operation_id = opId;
+  }
   const { data, error } = await _client.from("tech_sheets").update(update).eq("id", id).select().single();
   return { data, error };
 }

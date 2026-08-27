@@ -219,7 +219,9 @@ function MBadge({ tone, children }) {
 }
 
 // ---------------------------------------------------------------------------
-// BottomSheet — modal ancorado no rodapé (ações curtas, detalhe de item)
+// BottomSheet — modal centralizado (ações curtas, detalhe de item)
+// Nome mantido: é o primitivo usado por todas as páginas mobile. Ficava colado
+// no rodapé; centralizado lê melhor em tablet, que também usa este shell.
 // ---------------------------------------------------------------------------
 function BottomSheet({ title, subtitle, onClose, children, footer, maxHeight = "86vh" }) {
   useEffect(() => {
@@ -232,18 +234,18 @@ function BottomSheet({ title, subtitle, onClose, children, footer, maxHeight = "
     <div onClick={onClose} style={{
       position: "fixed", inset: 0, zIndex: 300,
       background: "rgba(7,8,10,0.6)",
-      display: "flex", flexDirection: "column", justifyContent: "flex-end",
+      display: "flex", flexDirection: "column", justifyContent: "center",
+      padding: "env(safe-area-inset-top) 0 env(safe-area-inset-bottom)",
       animation: "fadeUp 140ms ease both",
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        background: "var(--bg-1)", borderTop: "1px solid var(--line-strong)",
-        borderTopLeftRadius: 16, borderTopRightRadius: 16,
+        background: "var(--bg-1)", border: "1px solid var(--line-strong)",
+        borderRadius: 16,
         width: "100%", maxWidth: 520, margin: "0 auto",
         display: "flex", flexDirection: "column", maxHeight,
       }}>
-        <div style={{ width: 38, height: 4, borderRadius: 2, background: "var(--line-strong)", margin: "10px auto 6px", flexShrink: 0 }} />
         {(title || onClose) && (
-          <div style={{ padding: "4px 18px 10px", display: "flex", alignItems: "flex-start", gap: 10, flexShrink: 0 }}>
+          <div style={{ padding: "16px 18px 10px", display: "flex", alignItems: "flex-start", gap: 10, flexShrink: 0 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               {title && <div style={{ fontSize: 17, fontWeight: 600, color: "var(--fg-0)" }}>{title}</div>}
               {subtitle && <div style={{ fontSize: 12, color: "var(--fg-3)", marginTop: 2 }}>{subtitle}</div>}
@@ -261,7 +263,7 @@ function BottomSheet({ title, subtitle, onClose, children, footer, maxHeight = "
           {children}
         </div>
         {footer && (
-          <div style={{ padding: "12px 18px calc(12px + env(safe-area-inset-bottom))", borderTop: "1px solid var(--line)", flexShrink: 0 }}>
+          <div style={{ padding: "12px 18px", borderTop: "1px solid var(--line)", flexShrink: 0 }}>
             {footer}
           </div>
         )}

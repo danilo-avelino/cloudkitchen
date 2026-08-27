@@ -11,6 +11,14 @@ Estoque · Compras · Dashboard · Requisições (quadro de gestão; criação u
 
 **Pendentes:** nenhum — **todos os 16 módulos têm tela mobile dedicada** (2026-08-07).
 
+**Produção — paridade total (2026-08-12):** o módulo passou a rodar **só no tablet**,
+então a tela mobile ganhou as 6 abas do desktop: Produzir hoje · Histórico ·
+**Transformados** (CRUD) · **Receitas** (CRUD) · **Análises** · **Consumo**. Nenhuma
+tarefa manda mais o operador para o desktop. As regras vieram por extração no `window`
+(`prodPlanRows`, `TransformedLevelBar` em page-production.jsx; `trAnalytics`, `trRange`,
+`trConsumptionRows`, `trNetworkRows`, `trProducedItems`, `trMissingWeightInputs`,
+`trLastProdByItem` em page-transformed.jsx) — desktop e tablet leem as mesmas funções.
+
 Adaptados no último bloco: DRE & Fechamento (P&L + detalhamento + fechar/reabrir mês),
 Logística (Tempos/Entregadores/Bairros, read), Análise de Cardápio (Itens/Adicionais, read),
 CRM (Contatos CRUD + Negócios + Conversas/Campanhas "em breve"), Suprimentos (membro:

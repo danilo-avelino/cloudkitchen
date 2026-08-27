@@ -51,7 +51,7 @@ function MobileDistribution() {
     return <MobilePage><div style={{ padding: 24 }}><div style={{ fontSize: 12.5, color: "var(--warn)", padding: "12px 14px", background: "var(--warn-soft)", border: "1px solid var(--warn-line)", borderRadius: 8 }}>Central só fica disponível com Supabase online.</div></div></MobilePage>;
   }
   if (kind !== "distribution_center") {
-    return <MobilePage><div style={{ padding: 24 }}><div style={{ fontSize: 12.5, color: "var(--fg-2)", padding: "14px 16px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 8, lineHeight: 1.6 }}>Este módulo é exclusivo de tenants do tipo <strong>Central de Distribuição</strong>.</div></div></MobilePage>;
+    return <MobilePage><div style={{ padding: 24 }}><div style={{ fontSize: 12.5, color: "var(--fg-2)", padding: "14px 16px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 8, lineHeight: 1.6 }}>Este módulo é exclusivo de unidades do tipo <strong>Central de Distribuição</strong>.</div></div></MobilePage>;
   }
 
   const members = overview?.asCentral || [];

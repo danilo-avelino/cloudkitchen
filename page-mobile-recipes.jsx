@@ -3,7 +3,7 @@
 // Reaproveita as funções db* do desktop (page-recipes.jsx): custos são recalculados
 // pelos triggers do banco. Insumo pode vir do estoque ou de um preparo.
 
-// Abaixo de R$ 1,00 vira centavos — espelho de _brlText/_unitText do desktop.
+// Abaixo de R$ 1,00 vira centavos — espelho de _brlText do desktop.
 const _rcSubReal = (v) => { const n = Number(v) || 0; return n !== 0 && Math.abs(n) < 1; };
 const _rcCents = (v) => {
   const c = (Number(v) || 0) * 100;
@@ -24,6 +24,7 @@ function MobileRecipes({ scope = "all" }) {
   const [tenantId, setTenantId] = useState(null);
   const [source, setSource] = useState("mock");
   const [query, setQuery] = useState("");
+  const [filterCat, setFilterCat] = useState("all");
   const [pageLoading, setPageLoading] = useState(true);
   const [detailId, setDetailId] = useState(null);
   const [form, setForm] = useState(null); // { edit?: item }
@@ -69,7 +70,9 @@ function MobileRecipes({ scope = "all" }) {
   const handleSave = async (draft, editId) => {
     if (source === "db" && tenantId) {
       if (editId) {
-        const partial = isPrep ? { op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit } : { op: draft.op, cat: draft.cat, name: draft.name, price: draft.price };
+        const partial = isPrep
+          ? { op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit, instructions: draft.instructions }
+          : { op: draft.op, cat: draft.cat, name: draft.name, price: draft.price, instructions: draft.instructions };
         const updFn = isPrep ? dbUpdatePreparation : dbUpdateTechSheet;
         const { error } = await updFn(editId, partial);
         if (error) { window.showToast?.(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
@@ -77,12 +80,12 @@ function MobileRecipes({ scope = "all" }) {
       }
       if (isPrep) {
         const code = `PRP-${Date.now().toString(36).slice(-6).toUpperCase()}`;
-        const { data, error } = await dbInsertPreparation(tenantId, { code, op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit });
+        const { data, error } = await dbInsertPreparation(tenantId, { code, op: draft.op, cat: draft.cat, name: draft.name, yieldQty: draft.yieldQty, yieldUnit: draft.yieldUnit, instructions: draft.instructions });
         if (error) { window.showToast?.(`Erro ao criar: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
         await reloadPreps(); window.showToast?.(`Preparo ${code} criado`, { tone: "ok" }); setDetailId(data.id); return true;
       }
       const code = `FIC-${Date.now().toString(36).slice(-6).toUpperCase()}`;
-      const { data, error } = await dbInsertTechSheet(tenantId, { code, op: draft.op, cat: draft.cat, name: draft.name, price: draft.price, yieldQty: 1, yieldUnit: "un", items: [] });
+      const { data, error } = await dbInsertTechSheet(tenantId, { code, op: draft.op, cat: draft.cat, name: draft.name, price: draft.price, yieldQty: 1, yieldUnit: "un", instructions: draft.instructions, items: [] });
       if (error) { window.showToast?.(`Erro ao criar: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
       await reloadSheets(); window.showToast?.(`Ficha ${code} criada`, { tone: "ok" }); setDetailId(data.id); return true;
     }
@@ -136,9 +139,28 @@ function MobileRecipes({ scope = "all" }) {
   const q = _rcNorm(query.trim());
   const list = useMemo(() => base
     .filter((it) => scope === "all" || it.op === scope)
+    .filter((it) => filterCat === "all" || it.cat === filterCat)
     .filter((it) => !q || _rcNorm(it.name).includes(q) || _rcNorm(it.code).includes(q))
     .sort((a, b) => (a.name || "").localeCompare(b.name || "", "pt-BR")),
-    [base, scope, q]);
+    [base, scope, q, filterCat]);
+
+  // Só as categorias que têm item no modo atual E na operação do escopo — chip que
+  // não filtra nada só ocupa a régua horizontal.
+  const catChips = useMemo(() => {
+    const inScope = base.filter((it) => scope === "all" || it.op === scope);
+    return [
+      { id: "all", label: "Todas", count: inScope.length },
+      ...cats
+        .map((c) => ({ id: c.id, label: c.label || c.name, count: inScope.filter((it) => it.cat === c.id).length }))
+        .filter((c) => c.count > 0),
+    ];
+  }, [base, cats, scope]);
+
+  // Trocar a operação pode tirar da régua o chip que estava ativo; sem isso a lista
+  // fica vazia com nenhum chip marcado.
+  useEffect(() => {
+    if (filterCat !== "all" && !catChips.some((c) => c.id === filterCat)) setFilterCat("all");
+  }, [catChips, filterCat]);
   const detail = detailId ? base.find((it) => it.id === detailId) : null;
 
   if (pageLoading) return <PageLoading label="Carregando fichas…" variant="table" />;
@@ -154,9 +176,41 @@ function MobileRecipes({ scope = "all" }) {
         <MSearch value={query} onChange={setQuery} placeholder={isPrep ? "Buscar preparo…" : "Buscar ficha…"} />
       </div>
 
+      {catChips.length > 1 && (
+        <div style={{
+          display: "flex", gap: 6, padding: "0 14px 10px",
+          overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none",
+        }}>
+          {catChips.map((c) => {
+            const active = filterCat === c.id;
+            return (
+              <button key={c.id} onClick={() => setFilterCat(c.id)} style={{
+                flexShrink: 0, height: 34, padding: "0 12px", borderRadius: 999,
+                background: active ? "var(--bg-3)" : "transparent",
+                border: `1px solid ${active ? "var(--line-strong)" : "var(--line)"}`,
+                color: active ? "var(--fg-0)" : "var(--fg-2)",
+                fontSize: 12.5, fontWeight: active ? 600 : 400, whiteSpace: "nowrap",
+                display: "inline-flex", alignItems: "center", gap: 5,
+              }}>
+                {c.label}
+                <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: active ? "var(--fg-2)" : "var(--fg-3)" }}>{c.count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <MobileScroll style={{ padding: "0 14px 14px" }}>
         {list.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "40px 12px", color: "var(--fg-3)", fontSize: 13 }}>Nenhum{isPrep ? " preparo" : "a ficha"} encontrad{isPrep ? "o" : "a"}.</div>
+          <div style={{ textAlign: "center", padding: "40px 12px", color: "var(--fg-3)", fontSize: 13 }}>
+            Nenhum{isPrep ? " preparo" : "a ficha"} encontrad{isPrep ? "o" : "a"}.
+            {(filterCat !== "all" || query) && (
+              <button onClick={() => { setFilterCat("all"); setQuery(""); }}
+                      style={{ display: "block", margin: "10px auto 0", background: "none", border: "none", color: "var(--accent-bright)", fontSize: 13 }}>
+                Limpar filtros
+              </button>
+            )}
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {list.map((it) => <RecipeCard key={it.id} item={it} isPrep={isPrep} onTap={() => setDetailId(it.id)} />)}
@@ -224,6 +278,32 @@ function RecipeSheet({ item, isPrep, stockItems, preparations, onSaveItemWeight,
   const cmv = Number(item.cmv) || (price > 0 ? (theo / price) * 100 : 0);
   const margin = price - theo;
   const [adding, setAdding] = useState(false);
+  const [printing, setPrinting] = useState(false);
+
+  // Mesma janela A4 do desktop — buildRecipePrintHtml vive em page-recipes.jsx e
+  // é lido do window (arquivos legados não compartilham escopo de módulo).
+  const printSheet = () => {
+    if (printing) return;
+    setPrinting(true);
+    try {
+      const build = window.buildRecipePrintHtml;
+      if (typeof build !== "function") {
+        window.showToast?.("Impressão indisponível nesta tela", { tone: "warn" });
+        return;
+      }
+      const w = window.open("", "_blank");
+      if (!w) {
+        window.showToast?.("Pop-up bloqueado · permita pop-ups para imprimir", { tone: "warn", ttl: 4500 });
+        return;
+      }
+      const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
+      w.document.open();
+      w.document.write(build({ item, isPrep, opName: op?.name || null, tenantName }));
+      w.document.close();
+    } finally {
+      setTimeout(() => setPrinting(false), 800);
+    }
+  };
 
   return (
     <BottomSheet
@@ -233,6 +313,8 @@ function RecipeSheet({ item, isPrep, stockItems, preparations, onSaveItemWeight,
       footer={
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={onEdit} style={{ height: 50, padding: "0 16px", borderRadius: 10, background: "var(--bg-2)", border: "1px solid var(--line)", color: "var(--fg-1)", fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><I.Edit size={15} />Editar</button>
+          <button onClick={printSheet} disabled={printing} aria-label="Imprimir ficha" title="Imprimir ficha"
+                  style={{ height: 50, width: 50, borderRadius: 10, background: "var(--bg-2)", border: "1px solid var(--line)", color: printing ? "var(--fg-3)" : "var(--fg-1)", display: "grid", placeItems: "center" }}><I.Print size={16} /></button>
           <div style={{ flex: 1 }}><MPrimaryButton onClick={() => setAdding(true)}><I.Plus size={16} />Adicionar insumo</MPrimaryButton></div>
         </div>
       }
@@ -281,6 +363,16 @@ function RecipeSheet({ item, isPrep, stockItems, preparations, onSaveItemWeight,
         })}
       </div>
 
+      <MSectionLabel>Modo de preparo</MSectionLabel>
+      <div style={{ marginTop: 8, marginBottom: 4 }}>
+        {item.instructions ? (
+          // pre-wrap: as quebras de linha são a estrutura das etapas.
+          <div style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.6, color: "var(--fg-1)" }}>{item.instructions}</div>
+        ) : (
+          <div style={{ fontSize: 12.5, color: "var(--fg-3)" }}>Sem modo de preparo · toque em Editar para escrever.</div>
+        )}
+      </div>
+
       {adding && (
         <IngredientSheet
           stockItems={stockItems} preparations={preparations} excludeId={isPrep ? item.id : null}
@@ -293,6 +385,9 @@ function RecipeSheet({ item, isPrep, stockItems, preparations, onSaveItemWeight,
   );
 }
 
+// Espelho de _normUnit do desktop: 'und' gravado antigamente casa com 'un'.
+const _rcNormUnit = (u) => (/^(und|unid|unidade)$/i.test(String(u || "")) ? "un" : String(u || ""));
+
 // ===== Form: criar/editar ficha ou preparo =====
 function RecipeForm({ isPrep, initial, cats, onClose, onSave }) {
   const ops = (MOCK.OPERATIONS || []).filter((o) => o.id !== "all");
@@ -301,7 +396,8 @@ function RecipeForm({ isPrep, initial, cats, onClose, onSave }) {
   const [name, setName] = useState(initial?.name || "");
   const [price, setPrice] = useState(initial?.price != null ? String(initial.price).replace(".", ",") : "");
   const [yieldQty, setYieldQty] = useState(initial?.yieldQty != null ? String(initial.yieldQty).replace(".", ",") : "");
-  const [yieldUnit, setYieldUnit] = useState(initial?.yieldUnit || "kg");
+  const [yieldUnit, setYieldUnit] = useState(_rcNormUnit(initial?.yieldUnit) || "kg");
+  const [instructions, setInstructions] = useState(initial?.instructions || "");
   const [saving, setSaving] = useState(false);
   const valid = op && name.trim() && (isPrep ? _rcNum(yieldQty) > 0 : true);
 
@@ -309,8 +405,8 @@ function RecipeForm({ isPrep, initial, cats, onClose, onSave }) {
     if (saving || !valid) return; setSaving(true);
     try {
       const draft = isPrep
-        ? { op, cat, name: name.trim(), yieldQty: _rcNum(yieldQty), yieldUnit }
-        : { op, cat, name: name.trim(), price: _rcNum(price) };
+        ? { op, cat, name: name.trim(), yieldQty: _rcNum(yieldQty), yieldUnit, instructions: instructions.trim() }
+        : { op, cat, name: name.trim(), price: _rcNum(price), instructions: instructions.trim() };
       await onSave(draft);
     } finally { setSaving(false); }
   };
@@ -344,6 +440,11 @@ function RecipeForm({ isPrep, initial, cats, onClose, onSave }) {
       ) : (
         <MField label="Preço de venda (R$)" hint="Usado no CMV teórico."><input value={price} inputMode="decimal" onChange={(e) => setPrice(e.target.value)} placeholder="0,00" style={mInput} /></MField>
       )}
+      <MField label="Modo de preparo" hint="Etapas, tempos, pontos de atenção — sai na impressão da ficha.">
+        <textarea value={instructions} rows={6} onChange={(e) => setInstructions(e.target.value)}
+                  placeholder={isPrep ? "1. Hidratar o fermento\n2. Sovar por 10 min" : "1. Abrir a massa\n2. Forno 280°C por 6 min"}
+                  style={{ ...mInput, height: "auto", minHeight: 120, resize: "vertical", lineHeight: 1.5, fontFamily: "inherit" }} />
+      </MField>
     </FullSheet>
   );
 }
@@ -359,16 +460,22 @@ const _rcMassCostIn = (cost, from, to) => {
   if (!_rcIsMass(f) || !_rcIsMass(t)) return null;
   return t === "g" ? c / 1000 : c * 1000;
 };
-// Custo unitário precisa de mais casas que o total: R$/g cai na casa dos milésimos.
-const _rcUnitBRL = (v) => _rcSubReal(v) ? _rcCents(v)
-  : "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 
 // ===== Sheet: adicionar insumo (estoque ou preparo) =====
 function IngredientSheet({ stockItems, preparations, excludeId, onClose, onConfirm, onSaveItemWeight }) {
   const sources = [
-    ...(stockItems || []).map((si) => ({ key: `stock:${si.id}`, kind: "stock", name: si.name, unit: si.unit, cost: si.cost, item: si, label: `${si.name} · ${_rcBRL(si.cost)}/${si.unit}` })),
-    ...(preparations || []).filter((p) => !excludeId || p.id !== excludeId).map((p) => ({ key: `prep:${p.id}`, kind: "preparation", name: p.name, unit: p.yieldUnit, cost: p.unitCost || 0, label: `🔧 ${p.name} · ${_rcBRL(p.unitCost || 0)}/${p.yieldUnit}` })),
+    ...(stockItems || []).map((si) => ({ key: `stock:${si.id}`, kind: "stock", name: si.name, unit: si.unit, cost: si.cost, item: si })),
+    ...(preparations || []).filter((p) => !excludeId || p.id !== excludeId).map((p) => ({ key: `prep:${p.id}`, kind: "preparation", name: p.name, unit: p.yieldUnit, cost: p.unitCost || 0 })),
   ];
+  // O <select> nativo abre o picker do sistema, que não tem busca — com catálogo
+  // grande vira rolagem interminável. MStockPicker é o padrão mobile: bottom sheet
+  // com campo de busca, filtrando por nome ou categoria (acento/caixa ignorados).
+  const pickerItems = sources.map((s) => ({
+    id:   s.key,
+    name: s.kind === "preparation" ? `🔧 ${s.name}` : s.name,
+    cat:  s.kind === "preparation" ? "Preparo" : (s.item?.cat || "Sem categoria"),
+    unit: `${_rcBRL(s.cost)}/${s.unit}`,
+  }));
   const [sourceKey, setSourceKey] = useState("");
   const [qty, setQty] = useState("");
   // Unidade usada NESTA ficha — pode diferir da unidade do estoque (kg × un).
@@ -439,10 +546,13 @@ function IngredientSheet({ stockItems, preparations, excludeId, onClose, onConfi
       footer={<MPrimaryButton onClick={confirm} disabled={!valid}>Adicionar{valid ? ` · ${_rcBRL(cost)}` : ""}</MPrimaryButton>}
     >
       <MField label="Insumo / preparo">
-        <select value={sourceKey} onChange={(e) => pickSource(e.target.value)} style={mInput}>
-          <option value="">— Selecione —</option>
-          {sources.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
-        </select>
+        <MStockPicker
+          items={pickerItems}
+          value={sourceKey}
+          onChange={pickSource}
+          placeholder="Selecione um insumo ou preparo…"
+          emptyLabel="Nenhum insumo ou preparo encontrado"
+        />
       </MField>
       {measureUnits.length > 0 && (
         <MField label="Unidade na ficha"
@@ -459,7 +569,7 @@ function IngredientSheet({ stockItems, preparations, excludeId, onClose, onConfi
       </MField>
       {valid && (
         <div style={{ fontSize: 12.5, color: "var(--fg-2)", textAlign: "center" }}>
-          {_rcNum(qty).toLocaleString("pt-BR")} {lineUnit} × {_rcUnitBRL(unitCost)} = <strong style={{ color: "var(--fg-0)" }}>{_rcBRL(cost)}</strong>
+          {_rcNum(qty).toLocaleString("pt-BR")} {lineUnit} × {_rcBRL(unitCost)} = <strong style={{ color: "var(--fg-0)" }}>{_rcBRL(cost)}</strong>
         </div>
       )}
 
@@ -516,7 +626,7 @@ function StockWeightSheet({ item, targetUnit, saving, onClose, onSubmit }) {
 
       {preview != null && (
         <div style={{ fontSize: 12.5, color: "var(--fg-2)", textAlign: "center", marginTop: 10 }}>
-          1 un = {g.toLocaleString("pt-BR")} g → <strong style={{ color: "var(--fg-0)" }}>{_rcUnitBRL(preview)}/{targetUnit}</strong> na ficha
+          1 un = {g.toLocaleString("pt-BR")} g → <strong style={{ color: "var(--fg-0)" }}>{_rcBRL(preview)}/{targetUnit}</strong> na ficha
         </div>
       )}
     </BottomSheet>

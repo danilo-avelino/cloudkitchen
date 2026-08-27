@@ -549,9 +549,16 @@ function useItemConsumption(itemId) {
       const reqIds = outs30
         .filter((m) => m.referenceType === "kitchen_request" && m.referenceId)
         .map((m) => m.referenceId);
-      const splitsRes = await (window.dbListSharedSplits?.(tid, reqIds) || { data: {} });
+      const transferIds = outs30
+        .filter((m) => m.referenceType === "supply_transfer" && m.referenceId)
+        .map((m) => m.referenceId);
+      const [splitsRes, destRes] = await Promise.all([
+        window.dbListSharedSplits?.(tid, reqIds) || { data: {} },
+        window.dbSupplyTransferDestinations?.(transferIds) || { data: {} },
+      ]);
       if (cancelled) return;
       const splits30 = splitsRes.data || {};
+      const dests30 = destRes.data || {};
 
       // Agrupa saídas 30d por operação; compartilhado vai numa linha própria com legenda.
       const byOp = new Map();
@@ -562,8 +569,14 @@ function useItemConsumption(itemId) {
         // Saída de produção/rede não tem operation_id: sem isto tudo caía em
         // "Sem operação" e o insumo parecia ter sumido. Agrupa pelo destino.
         const origin = window.movementOrigin?.(m) || null;
-        const key   = sp ? "__shared__" : (m.operationId || (origin ? `__ref_${m.referenceType}` : "__none__"));
+        // Transferência da rede: uma linha por unidade de destino ("Loja 1", "Loja 2"),
+        // não um "Rede" somando todas — o que interessa é para onde o insumo foi.
+        const dest = m.referenceType === "supply_transfer" ? dests30[m.referenceId] : null;
+        const key   = sp ? "__shared__"
+                    : dest ? `__dest_${dest.tenantId || dest.name}`
+                    : (m.operationId || (origin ? `__ref_${m.referenceType}` : "__none__"));
         const label = sp ? "Compartilhado"
+                    : dest ? dest.name
                     : (m.operationName || (m.op && m.op !== "—" ? m.op : (origin ? origin.label : "Sem operação")));
         const color = sp ? "var(--fg-2)"
                     : (m.operationColor || (origin ? "var(--info)" : "var(--fg-3)"));

@@ -34,7 +34,7 @@ function Settings() {
   const [tab, setTab] = useState("operations");
   const sess = (typeof useSession === "function") ? useSession() : null;
   const headerParts = [
-    sess?.tenantName || "Tenant local",
+    sess?.tenantName || "Unidade local",
     sess?.tenantId ? `TEN-${sess.tenantId.slice(0, 4).toUpperCase()}` : null,
   ].filter(Boolean);
 
@@ -160,7 +160,7 @@ function OperationsTab() {
       } else {
         const id = (op.short || op.name || "op").toLowerCase().replace(/[^a-z0-9]+/g, "-");
         setOps([...ops, { ...op, id }]);
-        window.showToast(`Operação ${op.name} criada (mock · DB offline ou sem tenant)`, { tone: "warn" });
+        window.showToast(`Operação ${op.name} criada (mock · DB offline ou sem unidade)`, { tone: "warn" });
       }
     }
     setEditing(null);
@@ -583,7 +583,7 @@ function UsersTab() {
         if (res?.data) setUsers(res.data);
         if (data?.linkedExisting) {
           window.showToast(
-            `${u.name || u.email} já tinha conta na plataforma — vinculado a este tenant. A senha NÃO foi alterada; a pessoa entra com a senha atual dela.`,
+            `${u.name || u.email} já tinha conta na plataforma — vinculado a esta unidade. A senha NÃO foi alterada; a pessoa entra com a senha atual dela.`,
             { tone: "warn", ttl: 6000 },
           );
         } else {
@@ -1780,7 +1780,7 @@ function WhatsAppTab() {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <p style={{ margin: 0, color: "var(--fg-2)", fontSize: 13, maxWidth: 640 }}>
         Conecte a conta <b>WhatsApp Business</b> desta marca para usar o CRM (Conversas e Campanhas).
-        A conexão é feita pelo fluxo oficial da Meta — você autoriza e o número fica vinculado a este tenant.
+        A conexão é feita pelo fluxo oficial da Meta — você autoriza e o número fica vinculado a esta unidade.
       </p>
 
       <div className="card"><div className="card-body" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
@@ -1795,7 +1795,7 @@ function WhatsAppTab() {
             <div style={{ fontSize: 12, color: "var(--fg-3)", marginTop: 2 }}>
               {connected
                 ? `${status.display_phone || status.phone_number_id || "número vinculado"}${status.is_active ? " · ativo" : " · inativo"}${fmtExpiry ? ` · token expira ${fmtExpiry}` : ""}`
-                : "Nenhum número WhatsApp vinculado a este tenant."}
+                : "Nenhum número WhatsApp vinculado a esta unidade."}
             </div>
           </div>
         </div>

@@ -1020,7 +1020,7 @@ function CentralDistribuicao({ scope }) {
     return (
       <div style={{ padding: "24px 28px" }}>
         <div style={{ fontSize: 12.5, color: "var(--fg-2)", padding: "14px 16px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4, lineHeight: 1.6 }}>
-          Este módulo é exclusivo de tenants do tipo <strong>Central de Distribuição</strong>.
+          Este módulo é exclusivo de unidades do tipo <strong>Central de Distribuição</strong>.
           Para transformar esta conta em central, fale com o suporte da plataforma.
         </div>
       </div>
@@ -1043,7 +1043,7 @@ function CentralDistribuicao({ scope }) {
     try {
       const { data: found, error: lookErr } = await dbSupplyLookupByCode(tid, inviteCode);
       if (lookErr) throw lookErr;
-      if (!found) throw new Error("Nenhum tenant encontrado com esse código");
+      if (!found) throw new Error("Nenhuma unidade encontrada com esse código");
       const { error } = await dbSupplyInvite(tid, inviteCode);
       if (error) throw error;
       window.showToast?.(`Convite enviado para ${found.tenant_name}`, { tone: "ok" });
@@ -1162,7 +1162,7 @@ function CentralDistribuicao({ scope }) {
               display: "flex", gap: 10, alignItems: "flex-end", marginBottom: 18,
               padding: "14px 16px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 6,
             }}>
-              <FormRow label="Convidar tenant pelo código" hint="O código aparece em Configurações (e no módulo Cadeia de suprimentos) de cada tenant.">
+              <FormRow label="Convidar unidade pelo código" hint="O código aparece em Configurações (e no módulo Cadeia de suprimentos) de cada unidade.">
                 <input className="input mono" value={inviteCode} onChange={(e) => setInviteCode(e.target.value)}
                   placeholder="0000 0000" style={{ width: 180, letterSpacing: "0.1em" }}
                   onKeyDown={(e) => { if (e.key === "Enter") invite(); }} />
@@ -1175,7 +1175,7 @@ function CentralDistribuicao({ scope }) {
 
             {members.length === 0 ? (
               <div style={{ padding: "40px 20px", textAlign: "center", border: "1px dashed var(--line)", borderRadius: 6 }}>
-                <div style={{ fontSize: 13, color: "var(--fg-2)", marginBottom: 6 }}>Nenhum tenant na rede ainda.</div>
+                <div style={{ fontSize: 13, color: "var(--fg-2)", marginBottom: 6 }}>Nenhuma unidade na rede ainda.</div>
                 <div style={{ fontSize: 12, color: "var(--fg-3)" }}>
                   Peça o código de 8 dígitos de cada cozinha (Configurações → Conta) e convide acima.
                 </div>
@@ -1184,7 +1184,7 @@ function CentralDistribuicao({ scope }) {
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
-                    <th style={_distTh}>Tenant</th>
+                    <th style={_distTh}>Unidade</th>
                     <th style={_distTh}>Código</th>
                     <th style={_distTh}>Status</th>
                     <th style={{ ..._distTh, textAlign: "right" }}>Gasto acumulado</th>
@@ -1215,7 +1215,7 @@ function CentralDistribuicao({ scope }) {
             )}
             {invitedMembers.length > 0 && (
               <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 10 }}>
-                Convites pendentes aparecem para o tenant no módulo Cadeia de suprimentos, onde ele aceita ou recusa.
+                Convites pendentes aparecem para a unidade no módulo Cadeia de suprimentos, onde ela aceita ou recusa.
               </div>
             )}
           </div>
@@ -1236,7 +1236,7 @@ function CentralDistribuicao({ scope }) {
               myItems={stockItems}
               onChanged={() => reload()}
               emptyHint={activeMembers.length === 0
-                ? "Convide tenants na aba Rede para começar a transferir."
+                ? "Convide unidades na aba Rede para começar a transferir."
                 : "Nenhuma transferência na rede ainda."}
             />
           </div>
@@ -1248,7 +1248,7 @@ function CentralDistribuicao({ scope }) {
             requests={requests.filter((r) => r.supplierTenantId === tid)}
             onChanged={() => reload()}
             onFulfill={(r) => setTransferForm({ prefillRequest: r })}
-            emptyHint="Nenhuma solicitação recebida dos tenants."
+            emptyHint="Nenhuma solicitação recebida das unidades."
           />
         )}
 
@@ -1260,14 +1260,14 @@ function CentralDistribuicao({ scope }) {
           <div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 18 }}>
               <SummaryStat label="Gasto total da rede" value={_distFmtBRL(activeMembers.reduce((s, m) => s + (m.balance || 0), 0))} />
-              <SummaryStat label="Tenants ativos" value={String(activeMembers.length)} />
+              <SummaryStat label="Unidades ativas" value={String(activeMembers.length)} />
               <SummaryStat label="Lançamentos" value={String(ledger.length)} />
             </div>
 
             <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 22 }}>
               <thead>
                 <tr>
-                  <th style={_distTh}>Tenant</th>
+                  <th style={_distTh}>Unidade</th>
                   <th style={{ ..._distTh, textAlign: "right" }}>Gasto acumulado</th>
                   <th style={{ ..._distTh, width: 120 }}></th>
                 </tr>
@@ -1289,7 +1289,7 @@ function CentralDistribuicao({ scope }) {
               <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)" }}>Extrato</div>
               <select className="select" style={{ width: "auto", marginLeft: "auto" }} value={ledgerFilter}
                 onChange={(e) => setLedgerFilter(e.target.value)}>
-                <option value="all">Todos os tenants</option>
+                <option value="all">Todas as unidades</option>
                 {activeMembers.map((m) => <option key={m.tenantId} value={m.tenantId}>{m.name}</option>)}
               </select>
             </div>
@@ -1326,7 +1326,7 @@ function CentralDistribuicao({ scope }) {
       <ConfirmDialog
         open={!!removeFor}
         title="Remover da rede"
-        message={removeFor ? `Remover ${removeFor.name} da rede? O histórico de transferências e gastos é preservado; o tenant pode ser convidado de novo depois.` : ""}
+        message={removeFor ? `Remover ${removeFor.name} da rede? O histórico de transferências e gastos é preservado; a unidade pode ser convidada de novo depois.` : ""}
         confirmLabel="Remover"
         busy={busy}
         onConfirm={removeMember}

@@ -924,7 +924,7 @@ function DREView({ entries, categories, subcategories, period, stockSnapshot = {
             <div>
               <div className="h-eyebrow" style={{ marginBottom: 6 }}>Rede de suprimentos · visão gerencial</div>
               <div style={{ fontSize: 12.5, color: "var(--fg-2)", lineHeight: 1.5 }}>
-                Valor repassado (a custo) aos tenants da rede no mês. Não é receita — já está
+                Valor repassado (a custo) às unidades da rede no mês. Não é receita — já está
                 abatido das Compras acima, então o CMV real mede só o consumo próprio.
               </div>
             </div>

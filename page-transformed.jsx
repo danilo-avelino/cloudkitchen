@@ -256,16 +256,53 @@ function ProductionRecipeModal({ tid, stockItems, initial, onClose, onSaved }) {
 // ---------------------------------------------------------------------
 // Análises a partir das ordens concluídas
 // ---------------------------------------------------------------------
-const _TR_PERIODS = [
-  { id: "30",  label: "30 dias" },
-  { id: "90",  label: "90 dias" },
-  { id: "all", label: "Tudo" },
+// Balde das faltas de inventário na tabela de consumo — não é uma operação, mas
+// ocupa a mesma coluna. Prefixado para nunca colidir com um uuid de operação.
+const _TR_INVENTORY_KEY = "__inventory";
+
+// Filtro de período compartilhado pelas abas Análises e Consumo.
+const _TR_ANALYTICS_PERIODS = [
+  { id: "7",      label: "7 dias" },
+  { id: "30",     label: "30 dias" },
+  { id: "90",     label: "90 dias" },
+  { id: "all",    label: "Tudo" },
+  { id: "custom", label: "Personalizado" },
 ];
 
-function _trAnalytics(orders, periodDays, itemId = null) {
-  const cutoff = periodDays === "all" ? null : Date.now() - Number(periodDays) * 86400000;
-  const completedAll = (orders || []).filter((o) =>
-    o.status === "completed" && (!cutoff || (o.completedAt && new Date(o.completedAt).getTime() >= cutoff)));
+// Janela em ms (null nas duas pontas = sem limite). No personalizado as datas
+// são lidas no fuso local: 'de' abre às 00:00 e 'até' fecha às 23:59:59.999,
+// senão o próprio dia escolhido em 'até' ficaria de fora.
+function _trRange(period, from, to) {
+  if (period === "custom") {
+    return {
+      from: from ? new Date(`${from}T00:00:00`).getTime() : null,
+      to:   to   ? new Date(`${to}T23:59:59.999`).getTime() : null,
+    };
+  }
+  if (period === "all") return { from: null, to: null };
+  return { from: Date.now() - Number(period) * 86400000, to: null };
+}
+
+function _trPeriodLabel(period, from, to) {
+  if (period !== "custom") {
+    return (_TR_ANALYTICS_PERIODS.find((p) => p.id === period)?.label || "").toLowerCase();
+  }
+  const f = from ? new Date(`${from}T00:00:00`).toLocaleDateString("pt-BR") : null;
+  const t = to   ? new Date(`${to}T00:00:00`).toLocaleDateString("pt-BR")   : null;
+  if (f && t) return `${f} a ${t}`;
+  if (f) return `desde ${f}`;
+  if (t) return `até ${t}`;
+  return "sem limite de data";
+}
+
+function _trAnalytics(orders, range, itemId = null) {
+  const inRange = (iso) => {
+    if (range.from == null && range.to == null) return true;
+    if (!iso) return false;
+    const t = new Date(iso).getTime();
+    return (range.from == null || t >= range.from) && (range.to == null || t <= range.to);
+  };
+  const completedAll = (orders || []).filter((o) => o.status === "completed" && inRange(o.completedAt));
   // Filtro por transformado: considera só as ordens que devolveram o item escolhido.
   const completed = itemId
     ? completedAll.filter((o) => (o.outputs || []).some((out) => out.itemId === itemId && out.returnedQty > 0))
@@ -308,62 +345,75 @@ function _trAnalytics(orders, periodDays, itemId = null) {
   return { completedCount: completed.length, totalCost, totalWaste, wasteCostEst, avgYield, items };
 }
 
-// Chips de período no padrão do app (botão ativo com bg-3)
-function TrPeriodChips({ period, setPeriod }) {
-  return (
-    <div style={{ display: "flex", gap: 6 }}>
-      {_TR_PERIODS.map((p) => (
-        <button key={p.id} className="btn" data-size="sm" onClick={() => setPeriod(p.id)}
-          style={period === p.id ? { background: "var(--bg-3)", color: "var(--fg-0)", borderColor: "var(--line-strong)" } : undefined}>
-          {p.label}
-        </button>
-      ))}
-    </div>
-  );
+// Insumos que travam o cálculo de peso: cadastrados em unidade não-mássica e sem
+// peso por unidade. Uma linha assim zera aproveitamento e desperdício da ordem
+// inteira — as duas telas (desktop e mobile) mostram a mesma lista de culpados.
+function _trMissingWeightInputs(orders, stockItems) {
+  const byId = new Map((stockItems || []).map((i) => [i.id, i]));
+  const m = new Map();
+  for (const o of orders || []) {
+    if (o.status !== "completed" && o.status !== "issued") continue;
+    for (const l of o.inputs || []) {
+      const u = String(l.unit || "").toLowerCase();
+      if (u === "kg" || u === "g") continue;          // já é peso
+      const it = byId.get(l.itemId);
+      if (it && it.portionQty > 0) continue;          // peso unitário cadastrado
+      if (l.itemId) m.set(l.itemId, it?.name || l.name);
+    }
+  }
+  return [...m.values()];
+}
+
+// Transformados que já tiveram produção concluída — alimenta o seletor das
+// Análises. Independe do período, pra a lista não sumir ao trocar de janela.
+function _trProducedItems(orders) {
+  const m = new Map();
+  for (const o of orders || []) {
+    if (o.status !== "completed") continue;
+    for (const out of o.outputs || []) {
+      if (out.returnedQty > 0 && out.itemId && !m.has(out.itemId)) m.set(out.itemId, out.name);
+    }
+  }
+  return [...m.entries()].map(([id, name]) => ({ itemId: id, name })).sort((x, y) => x.name.localeCompare(y.name));
+}
+
+// Última produção concluída por transformado (itemId → timestamp)
+function _trLastProdByItem(orders) {
+  const out = {};
+  for (const o of orders || []) {
+    if (o.status !== "completed" || !o.completedAt) continue;
+    for (const l of o.outputs || []) {
+      // Saída esperada que não voltou fica gravada com returned 0 — não é produção
+      if (!(l.returnedQty > 0)) continue;
+      const at = new Date(o.completedAt).getTime();
+      if (!out[l.itemId] || at > out[l.itemId]) out[l.itemId] = at;
+    }
+  }
+  return out;
 }
 
 function TransformedAnalytics({ orders, stockItems }) {
+  const Tabs = window.Tabs;                 // lazy · page-stock.jsx carrega antes
   const [period, setPeriod] = useState("30");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
   const [itemId, setItemId] = useState(""); // "" = todos os transformados
-  // Lista de transformados que já tiveram produção concluída (independente do período,
-  // pra o seletor não sumir ao trocar de janela).
-  const allTransformados = useMemo(() => {
-    const m = new Map();
-    for (const o of orders || []) {
-      if (o.status !== "completed") continue;
-      for (const out of o.outputs || []) {
-        if (out.returnedQty > 0 && out.itemId && !m.has(out.itemId)) m.set(out.itemId, out.name);
-      }
-    }
-    return [...m.entries()].map(([id, name]) => ({ itemId: id, name })).sort((x, y) => x.name.localeCompare(y.name));
-  }, [orders]);
+  const allTransformados = useMemo(() => _trProducedItems(orders), [orders]);
   // Se o item selecionado sair da lista (troca de dados), volta pra "todos".
   const activeItemId = allTransformados.some((t) => t.itemId === itemId) ? itemId : "";
-  const a = _trAnalytics(orders, period, activeItemId || null);
+  const range = _trRange(period, customFrom, customTo);
+  const periodLabel = _trPeriodLabel(period, customFrom, customTo);
+  const a = _trAnalytics(orders, range, activeItemId || null);
   const selectedName = allTransformados.find((t) => t.itemId === activeItemId)?.name || null;
 
   // Insumo em unidade não-mássica e sem peso cadastrado não entra no peso do
   // lote — e uma única linha assim zera aproveitamento e desperdício da ordem
   // inteira. Aponta quais são, já que o KPI só mostra "—" e não explica.
-  const missingWeight = useMemo(() => {
-    const byId = new Map((stockItems || []).map((i) => [i.id, i]));
-    const m = new Map();
-    for (const o of orders || []) {
-      if (o.status !== "completed" && o.status !== "issued") continue;
-      for (const l of o.inputs || []) {
-        const u = String(l.unit || "").toLowerCase();
-        if (u === "kg" || u === "g") continue;          // já é peso
-        const it = byId.get(l.itemId);
-        if (it && it.portionQty > 0) continue;          // peso unitário cadastrado
-        if (l.itemId) m.set(l.itemId, it?.name || l.name);
-      }
-    }
-    return [...m.values()];
-  }, [orders, stockItems]);
+  const missingWeight = useMemo(() => _trMissingWeightInputs(orders, stockItems), [orders, stockItems]);
 
   return (
     <div className="stagger" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* Filtro por transformado — escopa KPIs e a tabela. */}
+      {/* Filtros de transformado e período — escopam KPIs e a tabela. */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
           Transformado
@@ -375,6 +425,23 @@ function TransformedAnalytics({ orders, stockItems }) {
             <option key={t.itemId} value={t.itemId}>{t.name}</option>
           ))}
         </select>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase", marginLeft: 6 }}>
+          Período
+        </span>
+        <Tabs value={period} onChange={setPeriod} options={_TR_ANALYTICS_PERIODS} />
+        {period === "custom" && (
+          <>
+            <span style={{ fontSize: 12, color: "var(--fg-2)" }}>de</span>
+            <input type="date" className="input" value={customFrom} max={customTo || undefined}
+              onChange={(e) => setCustomFrom(e.target.value)} />
+            <span style={{ fontSize: 12, color: "var(--fg-2)" }}>até</span>
+            <input type="date" className="input" value={customTo} min={customFrom || undefined}
+              onChange={(e) => setCustomTo(e.target.value)} />
+            {!customFrom && !customTo && (
+              <span style={{ fontSize: 11, color: "var(--fg-3)" }}>selecione as datas (vazio = sem limite)</span>
+            )}
+          </>
+        )}
         {activeItemId && (
           <button className="btn" data-size="sm" onClick={() => setItemId("")}>Limpar filtro</button>
         )}
@@ -405,7 +472,7 @@ function TransformedAnalytics({ orders, stockItems }) {
         <div className="kpi">
           <span className="label">Produções concluídas</span>
           <span className="value">{a.completedCount}</span>
-          <span className="delta">{_TR_PERIODS.find((p) => p.id === period)?.label?.toLowerCase()}</span>
+          <span className="delta">{periodLabel}</span>
         </div>
         <div className="kpi">
           <span className="label">Custo produzido</span>
@@ -435,10 +502,9 @@ function TransformedAnalytics({ orders, stockItems }) {
           <div>
             <h3 className="card-title">Por transformado</h3>
             <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
-              custo médio e último custo da porção · base: devoluções concluídas
+              custo médio e último custo da porção · base: devoluções concluídas · {periodLabel}
             </span>
           </div>
-          <TrPeriodChips period={period} setPeriod={setPeriod} />
         </div>
         {a.items.length === 0 ? (
           <div className="card-body" style={{ padding: "36px 20px", textAlign: "center", fontSize: 12.5, color: "var(--fg-3)" }}>
@@ -476,60 +542,206 @@ function TransformedAnalytics({ orders, stockItems }) {
 }
 
 // ---------------------------------------------------------------------
-// Consumo por tenant (só central): transferências recebidas pela rede,
-// agregadas por tenant × transformado. Fase D do PRD.
+// Consumo dos transformados: por operação (marca) e, na central, por unidade
+// da rede.
+//
+// Por operação — saídas de estoque dos transformados dentro da própria unidade,
+// com a mesma regra do CMV: uso compartilhado rateia pelos splits da requisição
+// e, sem split, o movimento vai inteiro para a operação nele. Produção e
+// transferência da rede ficam de fora: convertem valor, não são consumo (a rede
+// tem a tabela própria abaixo).
+//
+// Por unidade da rede (só central) — transferências recebidas, agregadas por
+// unidade × transformado. Fase D do PRD.
 // ---------------------------------------------------------------------
-function TransformedByTenant({ tid, transfers }) {
-  const [period, setPeriod] = useState("30");
-  const cutoff = period === "all" ? null : Date.now() - Number(period) * 86400000;
+// Consumo por operação a partir das saídas de estoque dos transformados.
+// Regra idêntica à do CMV: split rateia, sem split o movimento vai inteiro para
+// a operação nele. Pura de propósito — desktop e mobile leem daqui.
+function _trConsumptionRows(movements, splits, operations, stockItems) {
+  const isNonCmv = window.isNonCmvMovement;              // lazy · widgets.jsx
+  if (!movements) return null;
+  const transformedIds = new Set(
+    (stockItems || []).filter((i) => i.itemKind === "transformed").map((i) => i.id));
+  const opNameById = {};
+  for (const o of operations || []) opNameById[o.id] = o.name;
+  const rows = {};
+  const add = (opId, opName, itemId, itemName, qty, value, isInventory = false) => {
+    const k = `${opId || "none"}|${itemId || itemName}`;
+    if (!rows[k]) {
+      rows[k] = { op: opName || opNameById[opId] || "Sem operação", item: itemName, qty: 0, value: 0, isInventory };
+    }
+    rows[k].qty += qty;
+    rows[k].value += value;
+  };
+  for (const mv of movements) {
+    if (!transformedIds.has(mv.itemId)) continue;
+    const delta = Number(mv.delta) || 0;
+    const qty = Math.abs(delta);
+    if (qty <= 0) continue;
+    const value = qty * (Number(mv.unitCost) || 0);
 
+    // Falta apurada no inventário: sumiu do estoque sem passar por marca
+    // nenhuma. Entra como linha própria, senão o consumo do porcionado não
+    // fecha e a diferença parece não ter saído. Sobra (delta > 0) não é
+    // consumo e fica de fora.
+    if (mv.kind === "adjust") {
+      if (mv.referenceType !== "closing_count" || delta >= 0) continue;
+      add(_TR_INVENTORY_KEY, "Saída por inventário", mv.itemId, mv.item, qty, value, true);
+      continue;
+    }
+
+    if (mv.kind !== "out") continue;
+    if (isNonCmv(mv)) continue;
+    const sp = mv.referenceId ? splits[mv.referenceId] : null;
+    if (sp && sp.length > 0) {
+      const totalPct = sp.reduce((s, x) => s + (x.pct || 0), 0) || 1;
+      for (const s of sp) {
+        const frac = (s.pct || 0) / totalPct;
+        if (frac > 0) add(s.op, null, mv.itemId, mv.item, qty * frac, value * frac);
+      }
+    } else {
+      add(mv.operationId, mv.operationName, mv.itemId, mv.item, qty, value);
+    }
+  }
+  return Object.values(rows).sort((a, b) => b.value - a.value);
+}
+
+// Transferências de transformados recebidas pelas unidades da rede (só central),
+// agregadas por unidade × transformado dentro da janela.
+function _trNetworkRows(transfers, tid, range) {
   const rows = {};
   for (const t of transfers || []) {
     if (t.fromTenantId !== tid || t.status !== "received") continue;
-    if (cutoff && (!t.receivedAt || new Date(t.receivedAt).getTime() < cutoff)) continue;
+    const at = t.receivedAt ? new Date(t.receivedAt).getTime() : null;
+    if (range.from != null && (at == null || at < range.from)) continue;
+    if (range.to   != null && (at == null || at > range.to))   continue;
     for (const it of t.items || []) {
       if (it.itemKind !== "transformed") continue;
       const k = `${t.toTenantId}|${it.fromItemId || it.name}`;
-      if (!rows[k]) rows[k] = { tenant: t.toName || "—", item: it.name, unit: it.unit, qty: 0, value: 0 };
+      if (!rows[k]) rows[k] = { unidade: t.toName || "—", item: it.name, qty: 0, value: 0 };
       rows[k].qty += it.qty;
       rows[k].value += it.qty * it.unitCost;
     }
   }
-  const list = Object.values(rows).sort((a, b) => b.value - a.value);
-  const totalValue = list.reduce((s, r) => s + r.value, 0);
+  return Object.values(rows).sort((a, b) => b.value - a.value);
+}
+
+function TransformedConsumption({ tid, isCentral, transfers, stockItems }) {
+  const Tabs = window.Tabs;                              // lazy · page-stock.jsx carrega antes
+  const [period, setPeriod] = useState("30");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [movements, setMovements] = useState(null);      // null = carregando
+  const [splits, setSplits] = useState({});
+  const [operations, setOperations] = useState([]);
+  const [loadError, setLoadError] = useState(null);
+
+  const range = _trRange(period, customFrom, customTo);
+  const periodLabel = _trPeriodLabel(period, customFrom, customTo);
+
+  // As saídas vêm do banco por janela. A dependência é o filtro (period + datas)
+  // e nunca o range calculado: em período relativo ele muda a cada render e o
+  // efeito entraria em laço.
+  useEffect(() => {
+    if (!tid) return;
+    let cancelled = false;
+    setMovements(null);
+    setLoadError(null);
+    (async () => {
+      const r = _trRange(period, customFrom, customTo);
+      const fromIso = r.from != null ? new Date(r.from).toISOString() : null;
+      const toIso   = r.to   != null ? new Date(r.to).toISOString()   : null;
+      const [movRes, opRes] = await Promise.all([
+        dbListStockMovements(tid, fromIso, toIso, { limit: 10000 }),
+        dbListOperations(tid),
+      ]);
+      if (cancelled) return;
+      if (movRes?.error) { setLoadError(movRes.error.message || String(movRes.error)); setMovements([]); return; }
+      const movs = movRes?.data || [];
+      const reqIds = movs
+        .filter((m) => m.referenceType === "kitchen_request" && m.referenceId)
+        .map((m) => m.referenceId);
+      const spRes = await dbListSharedSplits(tid, reqIds);
+      if (cancelled) return;
+      setOperations(opRes?.data || []);
+      setSplits(spRes?.data || {});
+      setMovements(movs);
+    })();
+    return () => { cancelled = true; };
+  }, [tid, period, customFrom, customTo]);
+
+  const byOp = useMemo(
+    () => _trConsumptionRows(movements, splits, operations, stockItems),
+    [movements, splits, operations, stockItems]);
+
+  const opTotal = (byOp || []).reduce((s, r) => s + r.value, 0);
+
+  // Rede: as transferências já vêm carregadas na página (só na central).
+  const netList = useMemo(
+    () => (isCentral ? _trNetworkRows(transfers, tid, range) : []),
+    [isCentral, transfers, tid, range.from, range.to]);
+  const netTotal = netList.reduce((s, r) => s + r.value, 0);
+
+  const emptyBody = (text) => (
+    <div className="card-body" style={{ padding: "36px 20px", textAlign: "center", fontSize: 12.5, color: "var(--fg-3)" }}>
+      {text}
+    </div>
+  );
 
   return (
     <div className="stagger" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+          Período
+        </span>
+        <Tabs value={period} onChange={setPeriod} options={_TR_ANALYTICS_PERIODS} />
+        {period === "custom" && (
+          <>
+            <span style={{ fontSize: 12, color: "var(--fg-2)" }}>de</span>
+            <input type="date" className="input" value={customFrom} max={customTo || undefined}
+              onChange={(e) => setCustomFrom(e.target.value)} />
+            <span style={{ fontSize: 12, color: "var(--fg-2)" }}>até</span>
+            <input type="date" className="input" value={customTo} min={customFrom || undefined}
+              onChange={(e) => setCustomTo(e.target.value)} />
+            {!customFrom && !customTo && (
+              <span style={{ fontSize: 11, color: "var(--fg-3)" }}>selecione as datas (vazio = sem limite)</span>
+            )}
+          </>
+        )}
+      </div>
+
       <div className="card">
         <div className="card-header">
           <div>
-            <h3 className="card-title">Consumo por tenant</h3>
+            <h3 className="card-title">Por operação</h3>
             <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
-              transformados enviados pela rede (a custo) · {_trFmtBRL(totalValue)} no período
+              transformados baixados no consumo da própria unidade e faltas de inventário (a custo) · {_trFmtBRL(opTotal)} · {periodLabel}
             </span>
           </div>
-          <TrPeriodChips period={period} setPeriod={setPeriod} />
         </div>
-        {list.length === 0 ? (
-          <div className="card-body" style={{ padding: "36px 20px", textAlign: "center", fontSize: 12.5, color: "var(--fg-3)" }}>
-            Nenhum transformado transferido para a rede no período.
-          </div>
-        ) : (
+        {loadError ? emptyBody(`Erro ao carregar as saídas: ${loadError}`)
+          : byOp == null ? emptyBody("Carregando consumo…")
+          : byOp.length === 0 ? emptyBody("Nenhum transformado consumido no período — as baixas por requisição e os ajustes de inventário alimentam esta tabela.")
+          : (
           <table className="table" data-density="compact">
             <thead>
               <tr>
-                <th>Tenant</th>
+                <th>Operação</th>
                 <th>Transformado</th>
                 <th className="num">Porções</th>
                 <th className="num">Valor (a custo)</th>
               </tr>
             </thead>
             <tbody>
-              {list.map((r, i) => (
+              {byOp.map((r, i) => (
                 <tr key={i}>
-                  <td className="row-strong">{r.tenant}</td>
+                  <td className="row-strong">
+                    {r.isInventory
+                      ? <span className="badge" data-tone="warn" data-flat title="Falta apurada na contagem física — saiu do estoque sem marca">{r.op}</span>
+                      : r.op}
+                  </td>
                   <td className="dim">{r.item}</td>
-                  <td className="num">{r.qty.toLocaleString("pt-BR")}</td>
+                  <td className="num">{r.qty.toLocaleString("pt-BR", { maximumFractionDigits: 2 })}</td>
                   <td className="num">{_trFmtBRL(r.value)}</td>
                 </tr>
               ))}
@@ -537,6 +749,41 @@ function TransformedByTenant({ tid, transfers }) {
           </table>
         )}
       </div>
+
+      {isCentral && (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h3 className="card-title">Por unidade da rede</h3>
+              <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+                transformados enviados e recebidos pelas unidades (a custo) · {_trFmtBRL(netTotal)} · {periodLabel}
+              </span>
+            </div>
+          </div>
+          {netList.length === 0 ? emptyBody("Nenhum transformado transferido para a rede no período.") : (
+            <table className="table" data-density="compact">
+              <thead>
+                <tr>
+                  <th>Unidade</th>
+                  <th>Transformado</th>
+                  <th className="num">Porções</th>
+                  <th className="num">Valor (a custo)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {netList.map((r, i) => (
+                  <tr key={i}>
+                    <td className="row-strong">{r.unidade}</td>
+                    <td className="dim">{r.item}</td>
+                    <td className="num">{r.qty.toLocaleString("pt-BR")}</td>
+                    <td className="num">{_trFmtBRL(r.value)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -552,17 +799,7 @@ function TransformedCatalog({ tid, stockItems, categories, orders, onChanged }) 
 
   const transformedItems = (stockItems || []).filter((i) => i.itemKind === "transformed");
 
-  // Última produção concluída por transformado
-  const lastProdByItem = {};
-  for (const o of orders || []) {
-    if (o.status !== "completed" || !o.completedAt) continue;
-    for (const out of o.outputs || []) {
-      // Saída esperada que não voltou fica gravada com returned 0 — não é produção
-      if (!(out.returnedQty > 0)) continue;
-      const at = new Date(o.completedAt).getTime();
-      if (!lastProdByItem[out.itemId] || at > lastProdByItem[out.itemId]) lastProdByItem[out.itemId] = at;
-    }
-  }
+  const lastProdByItem = _trLastProdByItem(orders);
 
   const doConfirm = async () => {
     if (busy || !confirm) return;
@@ -761,7 +998,14 @@ function ProductionRecipesPanel({ tid, stockItems, recipes, onChanged }) {
 
 // Componentes consumidos pelo módulo Produção (page-production.jsx) — o
 // Transformados deixou de ser módulo próprio em 2026-07-12 e virou abas lá.
+// As funções puras vão junto: page-mobile-production.jsx monta as mesmas abas
+// no tablet e precisa das MESMAS regras (fork só de layout, nunca de lógica).
 Object.assign(window, {
-  TransformedCatalog, ProductionRecipesPanel, TransformedAnalytics, TransformedByTenant,
+  TransformedCatalog, ProductionRecipesPanel, TransformedAnalytics, TransformedConsumption,
   TransformedItemModal, ProductionRecipeModal,
+  trAnalytics: _trAnalytics, trRange: _trRange, trPeriodLabel: _trPeriodLabel,
+  TR_ANALYTICS_PERIODS: _TR_ANALYTICS_PERIODS,
+  trMissingWeightInputs: _trMissingWeightInputs, trLastProdByItem: _trLastProdByItem,
+  trProducedItems: _trProducedItems,
+  trConsumptionRows: _trConsumptionRows, trNetworkRows: _trNetworkRows,
 });
