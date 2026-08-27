@@ -280,29 +280,57 @@ function RecipeSheet({ item, isPrep, stockItems, preparations, onSaveItemWeight,
   const [adding, setAdding] = useState(false);
   const [printing, setPrinting] = useState(false);
 
-  // Mesma janela A4 do desktop — buildRecipePrintHtml vive em page-recipes.jsx e
+  // Mesmo documento A4 do desktop — buildRecipePrintHtml vive em page-recipes.jsx e
   // é lido do window (arquivos legados não compartilham escopo de módulo).
+  //
+  // No celular ele vai para um iframe oculto, não para uma aba nova: a aba ficava
+  // órfã atrás do app depois de imprimir e o bloqueador de pop-up matava a
+  // impressão antes de começar. O documento traz o próprio ajuste de zoom e chama
+  // window.print() sozinho — dentro do iframe isso imprime só a ficha, e o
+  // diálogo do sistema é quem oferece "Salvar/Compartilhar PDF".
   const printSheet = () => {
     if (printing) return;
-    setPrinting(true);
-    try {
-      const build = window.buildRecipePrintHtml;
-      if (typeof build !== "function") {
-        window.showToast?.("Impressão indisponível nesta tela", { tone: "warn" });
-        return;
-      }
-      const w = window.open("", "_blank");
-      if (!w) {
-        window.showToast?.("Pop-up bloqueado · permita pop-ups para imprimir", { tone: "warn", ttl: 4500 });
-        return;
-      }
-      const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
-      w.document.open();
-      w.document.write(build({ item, isPrep, opName: op?.name || null, tenantName }));
-      w.document.close();
-    } finally {
-      setTimeout(() => setPrinting(false), 800);
+    const build = window.buildRecipePrintHtml;
+    if (typeof build !== "function") {
+      window.showToast?.("Impressão indisponível nesta tela", { tone: "warn" });
+      return;
     }
+    setPrinting(true);
+    const tenantName = (typeof getSession === "function" && getSession()?.tenantName) || null;
+
+    const frame = document.createElement("iframe");
+    frame.setAttribute("aria-hidden", "true");
+    // Fora da tela, mas no tamanho de um A4: o script do documento mede
+    // scrollHeight pra decidir o zoom, e num iframe 0×0 a medida não vale nada.
+    frame.style.cssText = "position:fixed;left:-10000px;top:0;width:210mm;height:297mm;border:0;";
+
+    let done = false, fallback = null;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(fallback);
+      window.removeEventListener("afterprint", cleanup);
+      frame.remove();
+      setPrinting(false);
+    };
+
+    frame.onload = () => {
+      const w = frame.contentWindow;
+      if (!w) { cleanup(); return; }
+      // Safari só imprime o frame focado; sem isso pode sair o app inteiro.
+      w.focus();
+      // Onde o afterprint chega varia (frame no Chrome, topo no iOS): escuta os
+      // dois, e o guard 'done' garante que só o primeiro limpa.
+      w.addEventListener("afterprint", cleanup, { once: true });
+      window.addEventListener("afterprint", cleanup, { once: true });
+      // Rede: sem afterprint o iframe vazaria na página e o botão ficaria travado.
+      fallback = setTimeout(cleanup, 60000);
+    };
+
+    // srcdoc antes de inserir: iframe vazio já dispara um load de about:blank, e
+    // aí o handler rodaria duas vezes.
+    frame.srcdoc = build({ item, isPrep, opName: op?.name || null, tenantName });
+    document.body.appendChild(frame);
   };
 
   return (
@@ -313,7 +341,7 @@ function RecipeSheet({ item, isPrep, stockItems, preparations, onSaveItemWeight,
       footer={
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={onEdit} style={{ height: 50, padding: "0 16px", borderRadius: 10, background: "var(--bg-2)", border: "1px solid var(--line)", color: "var(--fg-1)", fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><I.Edit size={15} />Editar</button>
-          <button onClick={printSheet} disabled={printing} aria-label="Imprimir ficha" title="Imprimir ficha"
+          <button onClick={printSheet} disabled={printing} aria-label="Imprimir ou salvar PDF" title="Imprimir ou salvar PDF"
                   style={{ height: 50, width: 50, borderRadius: 10, background: "var(--bg-2)", border: "1px solid var(--line)", color: printing ? "var(--fg-3)" : "var(--fg-1)", display: "grid", placeItems: "center" }}><I.Print size={16} /></button>
           <div style={{ flex: 1 }}><MPrimaryButton onClick={() => setAdding(true)}><I.Plus size={16} />Adicionar insumo</MPrimaryButton></div>
         </div>
