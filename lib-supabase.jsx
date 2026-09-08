@@ -1364,10 +1364,13 @@ async function dbInsertGoodsReceipt(tenantId, draft) {
 
   let row = null;
   let lastErr = null;
+  const tried = [];
   for (let attempt = 0; attempt < 5; attempt++) {
     // `+ attempt` desempata quando o max lido está velho (outra pessoa recebendo
     // ao mesmo tempo); sem isso a retry repetiria exatamente o mesmo código.
-    const code = `REC-${String((await maxReceiptSeq()) + 1 + attempt).padStart(4, "0")}`;
+    const seq  = (await maxReceiptSeq()) + 1 + attempt;
+    const code = `REC-${String(seq).padStart(4, "0")}`;
+    tried.push(code);
     const { data, error } = await _client.from("goods_receipts").insert({
       tenant_id:         tenantId,
       purchase_order_id: header.list_id,
@@ -1382,7 +1385,12 @@ async function dbInsertGoodsReceipt(tenantId, draft) {
     // Retry apenas em colisão de unique key; outros erros propagam
     if (!/duplicate key|unique/i.test(error.message || "")) break;
   }
-  if (!row) return { data: null, error: lastErr || new Error("Falha ao gerar código do recebimento") };
+  if (!row) {
+    // O toast corta a mensagem: sem isto não dá pra saber qual constraint estourou
+    // nem com qual código. `details` do PostgREST traz a chave em conflito.
+    console.error("[recebimento] falhou. códigos tentados:", tried, "| erro:", lastErr);
+    return { data: null, error: lastErr || new Error("Falha ao gerar código do recebimento") };
+  }
 
   const itemRows = items.map((it) => ({
     goods_receipt_id:       row.id,
