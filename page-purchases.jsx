@@ -2342,7 +2342,7 @@ function SupplierPickerModal({ stockItems: initialStockItems, onCancel, onConfir
   };
 
   return (
-    <div onClick={onCancel} style={{
+    <div style={{
       position: "fixed", inset: 0, zIndex: 90,
       background: "rgba(0,0,0,0.55)", display: "grid", placeItems: "center",
     }}>

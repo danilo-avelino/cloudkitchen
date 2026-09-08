@@ -921,7 +921,7 @@ function ChecklistRow({ item, subcategories, period, onFill, onEdit, onDelete })
 // ---------- Drafts ----------
 function ModalShell({ title, subtitle, onClose, children, footer, width = 560 }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(7,8,10,0.6)", zIndex: 200, display: "grid", placeItems: "center", padding: 20 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(7,8,10,0.6)", zIndex: 200, display: "grid", placeItems: "center", padding: 20 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ width, maxWidth: "calc(100vw - 32px)", background: "var(--bg-1)", border: "1px solid var(--line-strong)", borderRadius: 6, display: "flex", flexDirection: "column", maxHeight: "92vh", boxShadow: "0 24px 60px -12px rgba(0,0,0,0.6)" }}>
         <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--line)", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>

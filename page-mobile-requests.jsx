@@ -430,7 +430,7 @@ function QtyModal({ it, initialQty, fav, favAvailable, onToggleFav, onClose, onC
   }, [onClose]);
 
   return (
-    <div onClick={onClose} style={{
+    <div style={{
       position: "fixed", inset: 0, zIndex: 210,
       background: "rgba(7,8,10,0.6)", display: "flex", flexDirection: "column", justifyContent: "flex-end",
       animation: "fadeUp 140ms ease both",

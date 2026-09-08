@@ -1,9 +1,53 @@
 # DEPLOY-PENDING — pendências de migration, deploy e commit
 
-> Atualizado em **2026-08-26**. **Backend 100% aplicado**: nenhuma migration
+> Atualizado em **2026-08-30**. **Backend 100% aplicado**: nenhuma migration
 > pendente e as 4 edge functions estão em produção. O que resta são os **smoke
 > tests** (seção 3) e os **commits** do front (seção 4) — este último só com
 > pedido explícito.
+
+## 0-quinquies. ✅ Aplicado em 2026-08-30 (via Supabase CLI) — Recalcular custos não chuta mais
+
+| # | Arquivo | O que faz |
+|---|---------|-----------|
+| 0 | `supabase/migrations/20260830120000_recipe_unit_cost_skip_unconvertible.sql` | **Bug:** "Recalcular custos" jogava 105 g de REQUEIJÃO para R$ 7.367,85. O insumo é `un` a R$ 70,17 **sem `portion_qty`**, então `app.stock_unit_cost_in('un'→'g')` caía no fallback "devolve o custo original" e o RPC gravava R$ 70,17 como **R$/g** (`line_cost` = 105 × 70,17). O fallback era inofensivo quando a cópia direta era o normal, mas um botão que reescreve todas as linhas transforma ele em sobrescrita do valor correto. Agora a função devolve **NULL** quando não sabe converter (igual a `stockItemCostIn()` no front) e os 4 chamadores pulam a linha (`IS NOT NULL` no WHERE) em vez de gravar chute. `recompute_all_costs` passa a devolver `unconvertible` e o front avisa no toast. De quebra, `und`/`unid`/`unidade` normalizam para `un`. |
+
+**Verificações pós-migration (CLAUDE.md §5) — feitas** (workdir isolado + probe com
+`RAISE EXCEPTION`, ver [[feedback_supabase_cli_isolated_push]]):
+- [x] `migration list --linked`: `20260830120000` com local **e** remoto preenchidos; o probe não deixou linha.
+- [x] Conversão em prod: `un→g` sem peso = **NULL** (era 70,17); `un→g` com peso 1,5 kg = **0,04678**;
+      `kg→g` = 0,0135217; `kg→kg` intacto; `und→un` = 4,50 (alias preservado); `kg→un` sem peso = NULL;
+      `kg→un` com 0,2 kg = 7,37958; `kg→L` = NULL.
+- [x] `recompute_all_costs` (rodado dentro de transação abortada): `{"unconvertible":1,...}` e a linha do
+      requeijão **não** foi reescrita.
+- [x] `prosecdef`/`proconfig`: `recompute_all_costs` DEFINER, as outras 4 INVOKER, todas com
+      `search_path=app, public, pg_temp`.
+- [ ] `get_advisors` — **não rodado** (precisa do MCP). Só `CREATE OR REPLACE` de funções existentes + GRANTs já vigentes.
+
+**Dado torto — 1 de 6 corrigido (decisão do usuário em 2026-08-30):**
+
+| Tenant | Ficha | Linha | Insumo | Situação |
+|---|---|---|---|---|
+| mobydick | Pizza Frango P | REQUEIJÃO VIGOR 1,5KG · 105 g | REQUEIJÃO CATUPIRY (1,5KG / BISNAGA) · un · R$ 70,17 | ✅ **corrigido** por `20260830150000` — peso 1,5 kg → R$ 0,0468/g → **R$ 4,91** |
+| terra-querida-dom-severino | Batata Gratinada | Queijo Mussalera [100g] · 2 un | Barra de Queijo Mussalera · kg · R$ 36,90 | ⏳ usuário resolve pela tela (com peso 0,1 kg vira R$ 7,38) |
+| terra-querida-dom-severino | Lasanha de Frango (M) | Queijo Mussalera [100g] · 3 un | idem | ⏳ R$ 110,69 |
+| terra-querida-dom-severino | Panqueca de Carne (15) | Queijo Mussalera [100g] · 1 un | idem | ⏳ R$ 36,90 |
+| terra-querida-dom-severino | Teste | Presunto [200g] · 1 un | Barra de Presunto · kg · R$ 19,90 | ⏳ R$ 19,90 |
+| terra-querida-dom-severino | Teste | Queijo Mussalera [100g] · 2 un | idem | ⏳ R$ 73,80 |
+
+## 0-sexies. ✅ Aplicado em 2026-08-30 (via Supabase CLI) — Bloqueio de linha sem peso
+
+| # | Arquivo | O que faz |
+|---|---------|-----------|
+| 0 | `supabase/migrations/20260830140000_recipe_unit_weight_guard.sql` | Fecha a porta de entrada do bug acima. `app.recipe_unit_needs_weight()` + 2 travas BEFORE: (1) `tech_sheet_items`/`preparation_items` recusam INSERT e UPDATE **de `unit`/`stock_item_id`** quando o par é contável × massa (`un` ↔ `kg`/`g`) e o insumo não tem `portion_qty`; (2) `stock_items` recusa UPDATE de `unit`/`portion_qty`/`portion_unit` que **tire** a conversão de linhas que hoje estão certas. Escopo restrito ao par corrigível de propósito: as 35 linhas de preparo em `L` (vindas de insumo em kg/un) nunca converteram — não há densidade no modelo — e seguem permitidas como custo manual. `UPDATE OF unit, stock_item_id` (e não UPDATE inteiro) para não travar a propagação de custo, que só escreve `unit_cost`, nem a edição das linhas hoje tortas. |
+| 1 | `supabase/migrations/20260830150000_mobydick_requeijao_portion_weight.sql` | Patch de dado one-off: `portion_qty = 1,5 kg` no REQUEIJÃO CATUPIRY do tenant `mobydick`. O trigger `trg_propagate_stock_item_cost` recalculou a linha sozinho. Idempotente (`portion_qty IS NULL` no WHERE) e no-op em qualquer outro ambiente. |
+
+**Verificações pós-migration (CLAUDE.md §5) — feitas** (probes em transação abortada):
+- [x] `migration list --linked`: `20260830140000` e `20260830150000` com local **e** remoto; nenhum probe registrado.
+- [x] Linha do requeijão em prod: `qty=105 g · unit_cost=0,0468 · line_cost=4,9140`.
+- [x] Trava 1 bloqueia linha em `un` de insumo em kg sem peso; **não** bloqueia linha em `g` do mesmo insumo (kg↔g não precisa de peso) nem linha de preparo em `L`.
+- [x] Trava 2 bloqueia apagar o peso do requeijão e trocar a unidade sem peso; **não** bloqueia mudar só o preço de um insumo já torto (recebimento continua funcionando) nem cadastrar o peso (o conserto).
+- [x] Assimetria conhecida e aceita: um insumo em `kg` sem peso pode virar `un` (as linhas em `un` passam a fechar), mas aí **não volta** para `kg` sem antes acertar as linhas — a mensagem de erro diz quais fichas travaram.
+- [ ] `get_advisors` — **não rodado** (precisa do MCP). 3 funções novas em `app` (todas INVOKER, com `search_path` fixado) + 3 triggers.
 
 ## 0-quater. ✅ Aplicado em 2026-08-26 (via Supabase CLI) — Modo de preparo
 

@@ -427,11 +427,17 @@ function Recipes({ scope }) {
       if (prepsRes.data) setAllPreparations(prepsRes.data);
       const r = data || {};
       const total = (r.prep_items_updated || 0) + (r.ts_items_from_stock || 0) + (r.ts_items_from_prep || 0);
+      // Linha medida numa unidade que não converte sem o peso por unidade do insumo:
+      // fica com o custo antigo em vez de receber o custo cru do estoque.
+      const skipped = r.unconvertible || 0;
+      const skipMsg = skipped > 0
+        ? ` · ${skipped} linha(s) sem peso por unidade cadastrado (custo mantido)`
+        : "";
       window.showToast(
-        total === 0
+        (total === 0
           ? "Custos já estão atualizados ✓"
-          : `${r.prep_items_updated || 0} preparo(s) · ${r.ts_items_from_stock || 0} ficha(s) do estoque · ${r.ts_items_from_prep || 0} ficha(s) de preparo`,
-        { tone: "ok", ttl: 5000 },
+          : `${r.prep_items_updated || 0} preparo(s) · ${r.ts_items_from_stock || 0} ficha(s) do estoque · ${r.ts_items_from_prep || 0} ficha(s) de preparo`) + skipMsg,
+        { tone: skipped > 0 ? "warn" : "ok", ttl: 5000 },
       );
     } finally {
       setRecomputing(false);
@@ -1396,7 +1402,7 @@ function RecipeModal({ mode, initial, defaultOp, defaultCat, onCancel, onSubmit 
   const titleEdit = isPrep ? "Editar preparo" : "Editar ficha técnica";
 
   return (
-    <div onClick={onCancel} style={{
+    <div style={{
       position: "fixed", inset: 0, zIndex: 80,
       background: "rgba(0,0,0,0.55)",
       display: "grid", placeItems: "center",

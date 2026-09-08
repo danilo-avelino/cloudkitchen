@@ -1343,10 +1343,15 @@ async function dbInsertGoodsReceipt(tenantId, draft) {
   // em caso de race condition na unique constraint (tenant_id, code).
   // Filtra códigos no formato REC-NNNN (1-9 dígitos) — códigos legados/maiores
   // perdem precisão em parseInt e geram loop infinito de duplicate key.
-  const nextReceiptCode = async () => {
+  // O PostgREST corta a resposta em 1000 linhas: sem order+limit o SELECT
+  // devolvia os 1000 recebimentos MAIS ANTIGOS e o max congelava, repetindo um
+  // código já usado em toda tentativa. Como o código cresce junto do created_at,
+  // a janela recente contém o maior.
+  const maxReceiptSeq = async () => {
     const { data: rows } = await _client.from("goods_receipts")
       .select("code").eq("tenant_id", tenantId)
-      .like("code", "REC-%");
+      .like("code", "REC-%")
+      .order("created_at", { ascending: false }).limit(1000);
     let max = 0;
     for (const r of rows || []) {
       const m = /^REC-(\d{1,9})$/.exec(r.code || "");
@@ -1354,13 +1359,15 @@ async function dbInsertGoodsReceipt(tenantId, draft) {
       const n = parseInt(m[1], 10);
       if (n > max) max = n;
     }
-    return `REC-${String(max + 1).padStart(4, "0")}`;
+    return max;
   };
 
   let row = null;
   let lastErr = null;
   for (let attempt = 0; attempt < 5; attempt++) {
-    const code = await nextReceiptCode();
+    // `+ attempt` desempata quando o max lido está velho (outra pessoa recebendo
+    // ao mesmo tempo); sem isso a retry repetiria exatamente o mesmo código.
+    const code = `REC-${String((await maxReceiptSeq()) + 1 + attempt).padStart(4, "0")}`;
     const { data, error } = await _client.from("goods_receipts").insert({
       tenant_id:         tenantId,
       purchase_order_id: header.list_id,

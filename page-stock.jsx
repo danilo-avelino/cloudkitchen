@@ -3131,7 +3131,7 @@ function SupplierModal({ initial, onClose, onSave, onDelete, itemsCount = 0, bus
       )}
 
       {confirming && (
-        <div onClick={() => setConfirming(false)} style={{
+        <div style={{
           position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.6)",
           display: "grid", placeItems: "center",
         }}>
@@ -3302,7 +3302,7 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
   // Tela inicial · explicação
   if (!started) {
     return (
-      <div onClick={onClose} style={{
+      <div style={{
         position: "fixed", inset: 0, zIndex: 90,
         background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center",
       }}>
@@ -3366,7 +3366,7 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
   };
 
   return (
-    <div onClick={onClose} style={{
+    <div style={{
       position: "fixed", inset: 0, zIndex: 90,
       background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center",
     }}>

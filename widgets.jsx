@@ -7,7 +7,7 @@ function Modal({ title, subtitle, onClose, children, footer, width = 480, minHei
   }, [onClose]);
 
   return (
-    <div onClick={onClose} style={{
+    <div style={{
       position: "fixed", inset: 0, zIndex: 200,
       background: "rgba(7,8,10,0.6)",
       display: "grid", placeItems: "center", padding: 20,
@@ -90,7 +90,6 @@ function ConfirmDialog({
 
   return (
     <div
-      onClick={busy ? undefined : onCancel}
       style={{
         position: "fixed", inset: 0, zIndex: 250,
         background: "rgba(7,8,10,0.72)",

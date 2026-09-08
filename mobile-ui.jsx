@@ -231,7 +231,7 @@ function BottomSheet({ title, subtitle, onClose, children, footer, maxHeight = "
   }, [onClose]);
 
   return (
-    <div onClick={onClose} style={{
+    <div style={{
       position: "fixed", inset: 0, zIndex: 300,
       background: "rgba(7,8,10,0.6)",
       display: "flex", flexDirection: "column", justifyContent: "center",
