@@ -42,8 +42,10 @@ function MobileDashboard({ scope = "all", setPage }) {
   const [pageLoading, setPageLoading] = useState(true);
   const [dbData, setDbData] = useState({
     revenue: [], revenuePrev: [], stock: [], inventories: [],
-    periodMovements: [], cmvDaily: [], sharedSplits: {}, requests: [], todayConsumption: [],
+    periodMovements: [], cmvDaily: [], sharedSplits: {},
+    dreCategories: [], dreSubcategories: [], financeEntries: [], fees: null,
   });
+  const [deliveryTimes, setDeliveryTimes] = useState(null);
 
   // Resolve o tenant uma vez.
   useEffect(() => {
@@ -68,20 +70,22 @@ function MobileDashboard({ scope = "all", setPage }) {
     setPageLoading(true);
 
     const load = async () => {
-      const { fromISO, toISO, prevFromISO, prevToISO, toDate } = dashPeriodRange(period);
+      const { fromDate, fromISO, toISO, prevFromISO, prevToISO, toDate } = dashPeriodRange(period);
       const cmvFrom = fromISO.slice(0, 10), cmvTo = toISO.slice(0, 10);
-      const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(); endOfDay.setHours(23, 59, 59, 999);
+      // Compras do mês: competência do mês inicial do período (mesmo critério do desktop).
+      const financePeriod = `${fromDate.getFullYear()}-${String(fromDate.getMonth() + 1).padStart(2, "0")}`;
 
-      const [revRes, revPrevRes, stockRes, invRes, movRes, cmvRes, reqRes, consRes] = await Promise.all([
+      const [revRes, revPrevRes, stockRes, invRes, movRes, cmvRes, dreCatRes, dreSubRes, finRes, feesRes] = await Promise.all([
         dbListRevenueEntries(tid, fromISO, toDate ? toISO : null),
         dbListRevenueEntries(tid, prevFromISO, prevToISO),
         dbListStockItems(tid),
         dbListInventories(tid),
         dbListStockMovements(tid, fromISO, toISO, { limit: 5000 }),
         dbListCmvDaily(tid, cmvFrom, cmvTo),
-        dbListKitchenRequests(tid, { limit: 8 }),
-        dbTopConsumedItems(tid, startOfDay.toISOString(), endOfDay.toISOString(), 8),
+        dbListDreCategories?.(tid) || { data: null },
+        dbListDreSubcategories?.(tid) || { data: null },
+        dbListFinanceEntries?.(tid, financePeriod) || { data: null },
+        dbDeliveryFees?.(tid, cmvFrom, cmvTo) || { data: null },
       ]);
       if (cancelled) return;
 
@@ -101,8 +105,10 @@ function MobileDashboard({ scope = "all", setPage }) {
         periodMovements: movs,
         cmvDaily: cmvRes.data || [],
         sharedSplits: splitsRes.data || {},
-        requests: reqRes.data || [],
-        todayConsumption: consRes.data || [],
+        dreCategories: dreCatRes.data || [],
+        dreSubcategories: dreSubRes.data || [],
+        financeEntries: finRes.data || [],
+        fees: feesRes.data || null,
       });
       setPageLoading(false);
     };
@@ -118,6 +124,7 @@ function MobileDashboard({ scope = "all", setPage }) {
       dbSubscribeTable?.("revenue_entries", tid, scheduleReload),
       dbSubscribeTable?.("stock_movements", tid, scheduleReload),
       dbSubscribeTable?.("goods_receipts", tid, scheduleReload),
+      dbSubscribeTable?.("finance_entries", tid, scheduleReload),
     ].filter(Boolean);
 
     return () => {
@@ -127,6 +134,18 @@ function MobileDashboard({ scope = "all", setPage }) {
     };
   }, [dbStatus.isOnline, tenantId, period]);
 
+  // Tempos gerais de delivery (Agilizone) · período + operação do header, como no desktop.
+  useEffect(() => {
+    if (!dbStatus.isOnline || !tenantId) { setDeliveryTimes(null); return; }
+    let cancelled = false;
+    (async () => {
+      const [fromYMD, toYMD] = window.dashRangeYMD(period);
+      const res = (await dbDeliveryTimeseries?.(tenantId, fromYMD, toYMD, scope === "all" ? null : scope, null, null)) || { data: null };
+      if (!cancelled) setDeliveryTimes(res.data?.summary || null);
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline, tenantId, period, scope]);
+
   const dbOnline = !!dbStatus.isOnline;
   const periodLabel = _M_PERIOD_LABEL[period] || period;
 
@@ -134,11 +153,32 @@ function MobileDashboard({ scope = "all", setPage }) {
   const kk = k[scope] || k.all;
   const metrics = useMemo(() => window.computeDashboardMetrics(scope, period, dbData, dbOnline), [scope, period, dbData, dbOnline]);
   const flows = useMemo(() => _mDashFlows(dbData.periodMovements), [dbData.periodMovements]);
+  const comprasMes = useMemo(() => window.computeComprasMes(dbData), [dbData.dreCategories, dbData.dreSubcategories, dbData.financeEntries]);
+  const financeMonthLabel = new Date(`${window.dashRangeYMD(period)[0].slice(0, 7)}-01T00:00:00`).toLocaleDateString("pt-BR", { month: "long" });
+
+  // Taxas/descontos de entrega · consolidado usa o total; operação usa a quebra por op.
+  const isConsolidated = scope === "all";
+  const feesData = dbData.fees;
+  const feesForScope = !feesData ? null
+    : (isConsolidated ? feesData.total : (feesData.byOperation?.[scope] || { clientCollected: 0, deliverymanPaid: 0, storeDiscount: 0, ifoodDiscount: 0 }));
+  const hasFees = !!feesData && ((Number(feesData.total?.clientCollected) || 0) + (Number(feesData.total?.deliverymanPaid) || 0)) > 0;
+  const hasDiscounts = !!feesData && ((Number(feesData.total?.storeDiscount) || 0) + (Number(feesData.total?.ifoodDiscount) || 0)) > 0;
+
+  const dt = deliveryTimes;
+  const hasDeliveryTimes = !!dt && (Number(dt.orders) || 0) > 0;
+  const fmtDur = window.fmtDeliverDur;
+  const timeStats = hasDeliveryTimes ? [
+    { label: "Tempo de preparo", value: fmtDur(dt.avgPrep),    sub: periodLabel.toLowerCase(), onClick: () => setPage?.("delivery") },
+    { label: "Tempo de coleta",  value: fmtDur(dt.avgCollect), sub: periodLabel.toLowerCase(), onClick: () => setPage?.("delivery") },
+    { label: "Tempo de entrega", value: fmtDur(dt.avgDeliver), sub: periodLabel.toLowerCase(), onClick: () => setPage?.("delivery") },
+    { label: "Tempo total",      value: fmtDur(dt.avgTotal),   sub: `${(Number(dt.orders) || 0).toLocaleString("pt-BR")} pedidos`, onClick: () => setPage?.("delivery") },
+  ] : [];
 
   const stats = [
     { label: `Faturamento`, value: kk.revenue.v, sub: periodLabel.toLowerCase(), onClick: () => setPage?.("revenue") },
     { label: "CMV do estoque", value: kk.cmv.v, sub: kk.cmv.sub, onClick: () => setPage?.("cmv") },
     { label: "Valor em estoque", value: kk.stockValue.v, sub: kk.stockValue.d, onClick: () => setPage?.("stock") },
+    { label: "Compras do mês", value: `R$ ${(comprasMes / 1000).toFixed(1)}k`, sub: financeMonthLabel, onClick: () => setPage?.("finance") },
     { label: "Entradas", value: _dBRL(flows.entradas), tone: "in", sub: periodLabel.toLowerCase() },
     { label: "Saídas", value: _dBRL(flows.saidas), tone: "out", sub: periodLabel.toLowerCase() },
     { label: "Precisão de estoque", value: metrics.inv.accuracy != null ? `${metrics.inv.accuracy.toFixed(0)}%` : "—", sub: metrics.inv.lastDate ? `últ. ${metrics.inv.lastDate}` : "sem inventários", onClick: () => setPage?.("stock") },
@@ -154,13 +194,16 @@ function MobileDashboard({ scope = "all", setPage }) {
           <>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: "10px 14px 4px" }}>
               {stats.map((s, i) => <_DashTile key={i} stat={s} />)}
+              {timeStats.map((s, i) => <_DashTile key={`t${i}`} stat={s} />)}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "8px 14px 0", minWidth: 0 }}>
+              <window.RevenueMonthlyCard compact />
+              {hasFees && window.DeliveryFeesBox && <window.DeliveryFeesBox fees={feesForScope} />}
+              {hasDiscounts && window.DeliveryDiscountsBox && <window.DeliveryDiscountsBox fees={feesForScope} />}
               <window.CmvByOpCard setPage={setPage} cmvDaily={dbData.cmvDaily} movements={dbData.periodMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbOnline} periodLabel={periodLabel} />
               <window.RankingCard cmvDaily={dbData.cmvDaily} movements={dbData.periodMovements} sharedSplits={dbData.sharedSplits} dbOnline={dbOnline} />
-              <window.ConsolidatedAlertsCard setPage={setPage} stock={dbData.stock} dbOnline={dbOnline} />
-              <window.RecentRequestsCard setPage={setPage} requests={dbData.requests} dbOnline={dbOnline} />
-              <window.TodayConsumptionCard consumption={dbData.todayConsumption} dbOnline={dbOnline} />
+              <window.StockByCategoryCard compact stock={dbData.stock} onClick={() => setPage?.("stock")} />
+              <window.MonthlyConsumptionCard compact />
             </div>
           </>
         )}

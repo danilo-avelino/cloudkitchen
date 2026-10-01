@@ -29,6 +29,20 @@ function _dashRangeYMD(period) {
   return [from.toISOString().slice(0, 10), (to || new Date()).toISOString().slice(0, 10)];
 }
 
+// Compras do mês do filtro · soma das subcategorias do grupo CMV (exclui autofeed
+// "Ajuste de estoque"). Mesma fórmula do `comprasTotal` da DRE em page-finance.
+function computeComprasMes({ dreCategories = [], dreSubcategories = [], financeEntries = [] }) {
+  const cmvCatIds = new Set(
+    dreCategories.filter((c) => c.kind === "cogs" || c.groupSlug === "cmv" || c.id === "cmv").map((c) => c.id),
+  );
+  const cmvSubIds = new Set(
+    dreSubcategories.filter((s) => cmvCatIds.has(s.category) && !s.autofeed).map((s) => s.id),
+  );
+  return financeEntries
+    .filter((e) => cmvSubIds.has(e.cat))
+    .reduce((acc, e) => acc + (Number(e.value) || 0), 0);
+}
+
 // Range ISO do período do header (from/to) + período anterior de mesmo tamanho.
 // Função pura extraída do useEffect do Dashboard para ser reaproveitada pela
 // versão mobile (MobileDashboard) — mesma semântica de dia civil.
@@ -111,9 +125,7 @@ function Dashboard({ scope, setPage }) {
     revenuePrev: [],        // mesmo length de período, deslocado para o anterior
     stock: [],
     inventories: [],
-    todayConsumption: [],
     cmvDaily: [],
-    requests: [],
     sharedSplits: {}, // { [requestId]: [{op, pct}] } · rateio das requisições de uso compartilhado
     periodMovements: [], // movimentações dentro do range do filtro de período (entradas/saídas KPIs)
     dreCategories: [],
@@ -145,25 +157,20 @@ function Dashboard({ scope, setPage }) {
       // com a versão mobile (MobileDashboard).
       const { fromDate, toDate, fromISO, toISO, prevFromISO, prevToISO } = dashPeriodRange(period);
 
-      const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay   = new Date(); endOfDay.setHours(23, 59, 59, 999);
-
       // Compras do mês (DRE) segue o filtro: usa a competência do mês inicial do período.
       const financePeriod = `${fromDate.getFullYear()}-${String(fromDate.getMonth() + 1).padStart(2, "0")}`;
       // Taxas de entrega: o RPC filtra por business_date (data civil) no período do header.
       const feesFromYMD = fromDate.toISOString().slice(0, 10);
       const feesToYMD   = (toDate || new Date()).toISOString().slice(0, 10);
 
-      const [, revRes, revPrevRes, stockRes, invRes, consRes, cmvRes, reqRes, periodMovRes, dreCatRes, dreSubRes, finRes, feesRes] = await Promise.all([
+      const [, revRes, revPrevRes, stockRes, invRes, cmvRes, periodMovRes, dreCatRes, dreSubRes, finRes, feesRes] = await Promise.all([
         dbGetCurrentContext?.(),
         dbListRevenueEntries(tid, fromISO, toDate ? toISO : null),
         dbListRevenueEntries(tid, prevFromISO, prevToISO),
         dbListStockItems(tid),
         dbListInventories(tid),
-        dbTopConsumedItems(tid, startOfDay.toISOString(), endOfDay.toISOString(), 8),
         // cmvDaily (faturamento por operação dos cards CMV/Ranking): respeita o filtro do header.
         dbListCmvDaily(tid, feesFromYMD, feesToYMD),
-        dbListKitchenRequests(tid, { limit: 8 }),
         // periodMovements: respeita o filtro de período do header (KPIs de fluxo + cards CMV/Ranking).
         dbListStockMovements(tid, fromISO, toISO, { limit: 5000 }),
         dbListDreCategories?.(tid) || { data: null },
@@ -185,9 +192,7 @@ function Dashboard({ scope, setPage }) {
         revenuePrev:      revPrevRes.data || [],
         stock:            stockRes.data || [],
         inventories:      invRes.data || [],
-        todayConsumption: consRes.data || [],
         cmvDaily:         cmvRes.data || [],
-        requests:         reqRes.data || [],
         sharedSplits:     splitsRes.data || {},
         periodMovements:  periodMovRes.data || [],
         dreCategories:    dreCatRes.data || [],
@@ -257,22 +262,7 @@ function Dashboard({ scope, setPage }) {
     [period],
   );
 
-  // Compras do mês do filtro · soma das subcategorias do grupo CMV (exclui autofeed
-  // "Ajuste de estoque"). Mesma fórmula do `comprasTotal` da DRE em page-finance.
-  const comprasMes = useMemo(() => {
-    const cats = dbData.dreCategories || [];
-    const subs = dbData.dreSubcategories || [];
-    const entries = dbData.financeEntries || [];
-    const cmvCatIds = new Set(
-      cats.filter((c) => c.kind === "cogs" || c.groupSlug === "cmv" || c.id === "cmv").map((c) => c.id),
-    );
-    const cmvSubIds = new Set(
-      subs.filter((s) => cmvCatIds.has(s.category) && !s.autofeed).map((s) => s.id),
-    );
-    return entries
-      .filter((e) => cmvSubIds.has(e.cat))
-      .reduce((acc, e) => acc + (Number(e.value) || 0), 0);
-  }, [dbData.dreCategories, dbData.dreSubcategories, dbData.financeEntries]);
+  const comprasMes = useMemo(() => computeComprasMes(dbData), [dbData.dreCategories, dbData.dreSubcategories, dbData.financeEntries]);
 
   // Totais de entradas e saídas de estoque no período selecionado (R$) · |qty| × custo unit.
   const stockFlows = useMemo(() => {
@@ -338,6 +328,9 @@ function Dashboard({ scope, setPage }) {
         }} onClick={() => setPage("finance")} />
       </div>
 
+      {/* Faturamento mês a mês do ano corrente · filtro próprio de operações */}
+      <RevenueMonthlyCard />
+
       {/* Fluxos de estoque + KPIs operacionais — linha única compacta */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
         <FlowKpi label="Entradas de estoque" value={stockFlows.entradas} tone="in"  sub={periodLabel.toLowerCase()} onClick={() => setFlowDetail("in")} loading={periodLoading} />
@@ -378,15 +371,9 @@ function Dashboard({ scope, setPage }) {
         <StockByCategoryCard stock={dbData.stock} onClick={() => setPage("stock")} />
       </div>
 
-      {/* Pendências consolidadas + Requisições */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 12 }}>
-        <ConsolidatedAlertsCard setPage={setPage} stock={dbData.stock} dbOnline={dbStatus.isOnline} />
-        <RecentRequestsCard setPage={setPage} requests={dbData.requests} dbOnline={dbStatus.isOnline} />
-      </div>
-
-      {/* Operação em tempo real */}
+      {/* Consumo do mês vs mesmo período do mês anterior */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
-        <TodayConsumptionCard consumption={dbData.todayConsumption} dbOnline={dbStatus.isOnline} />
+        <MonthlyConsumptionCard />
       </div>
 
       {flowDetail && (
@@ -976,6 +963,340 @@ function CmvByOpCard({ setPage, cmvDaily = [], movements = [], sharedSplits = {}
   );
 }
 
+// ============= RevenueMonthlyCard · faturamento mês a mês do ano corrente =============
+// Filtro próprio de operações (multi-seleção; vazio = todas). Hover/toque num mês mostra
+// o crescimento vs mês anterior e vs mesmo mês do ano anterior. Carrega os dados sozinho
+// (ano corrente + ano anterior) p/ ser reaproveitado no desktop e no mobile.
+const _RM_MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+const _RM_MONTHS_LONG = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+const _rmBRL = (v) => "R$ " + (Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const _rmShort = (v) => v >= 1e6 ? `${(v / 1e6).toFixed(1).replace(".", ",")}M` : v >= 1000 ? `${Math.round(v / 1000)}k` : `${Math.round(v)}`;
+const _rmAxis = (v) => v >= 1e6 ? `R$ ${(v / 1e6).toFixed(1).replace(".", ",")}M` : v >= 1000 ? `R$ ${Math.round(v / 1000)}k` : `R$ ${Math.round(v)}`;
+
+function _rmGrowth(cur, prev) {
+  if (!(prev > 0)) return null;
+  return ((cur - prev) / prev) * 100;
+}
+
+// Data local → "YYYY-MM-DD" (meio-dia evita escorregar de dia em fuso/horário de verão).
+const _rmIso = (y, m, d) => {
+  const dt = new Date(y, m, d, 12);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+};
+const _RM_PROJ_WEEKS = 8;
+
+// Projeção por dia da semana: média de cada dia da semana nas últimas 8 semanas fechadas
+// (até ontem; janela não recua antes do 1º dia com faturamento). Mês corrente = realizado
+// até ontem + média dos dias restantes; próximo mês = soma das médias dos seus dias.
+function _rmProjection(byDay, year, curMonth, today) {
+  const dates = Object.keys(byDay).filter((k) => byDay[k] > 0).sort();
+  if (!dates.length) return null;
+  const first = dates[0];
+  const sums = Array(7).fill(0), counts = Array(7).fill(0);
+  for (let k = 1; k <= _RM_PROJ_WEEKS * 7; k++) {
+    const iso = _rmIso(year, curMonth, today - k);
+    if (iso < first) break;
+    const wd = new Date(year, curMonth, today - k, 12).getDay();
+    sums[wd] += byDay[iso] || 0;
+    counts[wd] += 1;
+  }
+  const n = counts.reduce((s, c) => s + c, 0);
+  if (n < 7) return null; // menos de uma semana de histórico
+  const avgAll = sums.reduce((s, v) => s + v, 0) / n;
+  const perWd = sums.map((s, i) => counts[i] ? s / counts[i] : avgAll);
+  const sumFrom = (y, m, fromDay) => {
+    const dim = new Date(y, m + 1, 0).getDate();
+    let s = 0;
+    for (let d = fromDay; d <= dim; d++) s += perWd[new Date(y, m, d, 12).getDay()];
+    return s;
+  };
+  let doneCur = 0;
+  for (let d = 1; d < today; d++) doneCur += byDay[_rmIso(year, curMonth, d)] || 0;
+  const nextY = curMonth === 11 ? year + 1 : year;
+  const nextM = (curMonth + 1) % 12;
+  return { cur: doneCur + sumFrom(year, curMonth, today), next: sumFrom(nextY, nextM, 1), nextY, nextM, days: n };
+}
+
+function RevenueMonthlyCard({ compact = false }) {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const now = new Date();
+  const year = now.getFullYear();
+  const curMonth = now.getMonth(); // 0-11
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState([]); // [] = todas
+  const [hover, setHover] = useState(null);     // índice do mês (0-11)
+  const [width, setWidth] = useState(640);
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setLoading(false); return; }
+    const sess = (() => { try { return JSON.parse(localStorage.getItem("stockkitchen.session.v1")); } catch { return null; } })();
+    const tid = sess?.tenantId;
+    if (!tid) { setLoading(false); return; }
+    let cancelled = false, reloadTimer = null;
+    const load = async () => {
+      const res = await dbRevenueMonthly(tid, `${year - 1}-01-01`, `${year}-12-31`);
+      if (cancelled) return;
+      setRows(res.data || []);
+      setLoading(false);
+    };
+    load();
+    const unsub = dbSubscribeTable?.("revenue_entries", tid, () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => { if (!cancelled) load(); }, 400);
+    });
+    return () => {
+      cancelled = true;
+      if (reloadTimer) clearTimeout(reloadTimer);
+      try { unsub?.(); } catch {}
+    };
+  }, [dbStatus.state, dbStatus.isOnline, year]);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([entry]) => setWidth(Math.max(260, Math.floor(entry.contentRect.width))));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [loading]);
+
+  const ops = (MOCK.OPERATIONS || []).filter((o) => o.id !== "all");
+
+  // { "YYYY-MM-DD": total } e { "YYYY-MM": total } das operações selecionadas.
+  const { byDay, byMonth } = useMemo(() => {
+    const sel = new Set(selected);
+    const d = {}, m = {};
+    for (const r of rows) {
+      if (sel.size > 0 && !sel.has(r.operationId)) continue;
+      d[r.date] = (d[r.date] || 0) + (r.revenue || 0);
+      m[r.month] = (m[r.month] || 0) + (r.revenue || 0);
+    }
+    return { byDay: d, byMonth: m };
+  }, [rows, selected]);
+
+  const today = now.getDate();
+  const proj = useMemo(() => _rmProjection(byDay, year, curMonth, today), [byDay, year, curMonth, today]);
+  // Mesmo período (dia 1 até ontem) no mês corrente e no anterior — comparativo justo do mês parcial.
+  const mtd = useMemo(() => {
+    const pY = curMonth === 0 ? year - 1 : year, pM = (curMonth + 11) % 12;
+    const pDim = new Date(pY, pM + 1, 0).getDate();
+    let cur = 0, prev = 0;
+    for (let d = 1; d < today; d++) {
+      cur += byDay[_rmIso(year, curMonth, d)] || 0;
+      if (d <= pDim) prev += byDay[_rmIso(pY, pM, d)] || 0;
+    }
+    return { cur, prev: prev > 0 ? prev : null };
+  }, [byDay, year, curMonth, today]);
+
+  const key = (y, mi) => `${y}-${String(mi + 1).padStart(2, "0")}`;
+  const months = _RM_MONTHS.map((label, i) => {
+    const prevY = i === 0 ? year - 1 : year;
+    const prevM = i === 0 ? 11 : i - 1;
+    const has = (k) => Object.prototype.hasOwnProperty.call(byMonth, k);
+    const value = byMonth[key(year, i)] || 0;
+    const projected = !proj ? null
+      : i === curMonth ? Math.max(proj.cur, value)
+      : (proj.nextY === year && i === proj.nextM) ? proj.next
+      : null;
+    return {
+      i, label, projected,
+      future: i > curMonth,
+      partial: i === curMonth,
+      value,
+      prev: has(key(prevY, prevM)) ? byMonth[key(prevY, prevM)] : null,
+      prevLabel: `${_RM_MONTHS_LONG[prevM]}${i === 0 ? `/${prevY}` : ""}`,
+      yoy: has(key(year - 1, i)) ? byMonth[key(year - 1, i)] : null,
+    };
+  });
+  const ytd = months.filter((m) => !m.future).reduce((s, m) => s + m.value, 0);
+
+  const toggleOp = (id) => setSelected((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
+
+  // Geometria
+  const H = compact ? 200 : 240;
+  const pad = { top: 22, right: 8, bottom: 24, left: compact ? 44 : 56 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+  const maxV = Math.max(1, ...months.map((m) => Math.max(m.value, m.projected || 0)));
+  const step = (() => {
+    const raw = maxV / 4;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n = raw / mag;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
+  })();
+  const yMax = step * Math.ceil(maxV / step);
+  const ticks = [];
+  for (let v = 0; v <= yMax + 1e-6; v += step) ticks.push(v);
+  const colW = plotW / 12;
+  const barW = Math.max(6, Math.min(36, colW * 0.6));
+  const y = (v) => pad.top + plotH - (v / yMax) * plotH;
+
+  const hm = hover != null ? months[hover] : null;
+  const tipLeft = hm ? Math.min(Math.max(pad.left + colW * hm.i + colW / 2, 110), width - 110) : 0;
+  const barPath = (cx, h) => {
+    const x0 = cx - barW / 2, x1 = cx + barW / 2, yb = y(0), yt = yb - h, r = Math.min(4, h, barW / 2);
+    return `M${x0},${yb} L${x0},${yt + r} Q${x0},${yt} ${x0 + r},${yt} L${x1 - r},${yt} Q${x1},${yt} ${x1},${yt + r} L${x1},${yb} Z`;
+  };
+  const barH = (v) => v > 0 ? Math.max(2, plotH - (y(v) - pad.top)) : 0;
+  const curProj = months[curMonth].projected;
+  const nextProj = proj ? (proj.nextY === year ? months[proj.nextM].projected : proj.next) : null;
+
+  const chipStyle = (active) => ({
+    display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0,
+    padding: "4px 10px", borderRadius: 999, fontSize: 11.5, cursor: "pointer",
+    border: `1px solid ${active ? "var(--accent-line)" : "var(--line)"}`,
+    background: active ? "var(--accent-soft, rgba(45,140,102,0.12))" : "transparent",
+    color: active ? "var(--fg-0)" : "var(--fg-2)",
+  });
+
+  const GrowthLine = ({ label, cur, base }) => {
+    const g = _rmGrowth(cur, base);
+    return (
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11.5 }}>
+        <span style={{ color: "var(--fg-3)" }}>{label}</span>
+        {g == null ? (
+          <span style={{ color: "var(--fg-3)" }}>sem dados</span>
+        ) : (
+          <span className="mono" style={{ color: g >= 0 ? "var(--ok)" : "var(--crit)", fontWeight: 600 }}>
+            {g >= 0 ? "▲ +" : "▼ −"}{Math.abs(g).toFixed(1).replace(".", ",")}%
+            <span style={{ color: "var(--fg-3)", fontWeight: 400 }}> · {_rmBRL(base)}</span>
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="card">
+      <div className="card-header" style={{ flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <h3 className="card-title">Faturamento mês a mês · {year}</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+            Acumulado no ano: <b style={{ color: "var(--fg-0)" }}>{_rmBRL(ytd)}</b> · passe o mouse num mês para ver o crescimento
+          </span>
+          {proj && (
+            <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+              Projeção {_RM_MONTHS[curMonth].toLowerCase()}: <b style={{ color: "var(--fg-0)" }}>≈ {_rmBRL(curProj)}</b>
+              {" · "}{_RM_MONTHS[proj.nextM].toLowerCase()}{proj.nextY !== year ? `/${proj.nextY}` : ""}: <b style={{ color: "var(--fg-0)" }}>≈ {_rmBRL(nextProj)}</b>
+            </span>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: compact ? "nowrap" : "wrap", overflowX: compact ? "auto" : "visible", maxWidth: "100%" }}>
+          <button type="button" style={chipStyle(selected.length === 0)} onClick={() => setSelected([])}>Todas</button>
+          {ops.map((o) => (
+            <button type="button" key={o.id} style={chipStyle(selected.includes(o.id))} onClick={() => toggleOp(o.id)}>
+              <span style={{ width: 6, height: 6, borderRadius: 50, background: o.color }} />{o.name}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="card-body">
+        {loading ? (
+          <div className="skel" style={{ height: H, width: "100%" }} />
+        ) : !dbStatus.isOnline ? (
+          <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>DB offline</div>
+        ) : (
+          <div ref={wrapRef} style={{ position: "relative", width: "100%" }} onMouseLeave={() => setHover(null)}>
+            <svg width={width} height={H} style={{ display: "block" }} role="img" aria-label={`Faturamento mensal de ${year}`}>
+              {ticks.map((t) => (
+                <g key={t}>
+                  <line x1={pad.left} x2={width - pad.right} y1={y(t)} y2={y(t)} stroke="var(--line)" strokeWidth="1" strokeDasharray={t === 0 ? undefined : "2 4"} />
+                  <text x={pad.left - 6} y={y(t) + 3} textAnchor="end" fontSize="10" fill="var(--fg-3)" fontFamily="var(--mono)">{_rmAxis(t)}</text>
+                </g>
+              ))}
+              {months.map((m) => {
+                const cx = pad.left + colW * m.i + colW / 2;
+                const h = barH(m.value);
+                const ph = m.projected != null ? barH(m.projected) : 0;
+                const dim = hover != null && hover !== m.i;
+                // Rótulo do realizado some quando colado no rótulo da projeção.
+                const showValueLabel = m.value > 0 && !(ph > 0 && ph - h < 14);
+                return (
+                  <g key={m.i}>
+                    {ph > 0 && (
+                      <path d={barPath(cx, ph)} fill="var(--accent-bright)" fillOpacity="0.1"
+                        stroke="var(--accent-bright)" strokeWidth="1" strokeDasharray="3 3" opacity={dim ? 0.35 : 0.9} />
+                    )}
+                    {h > 0 && (
+                      <path
+                        d={barPath(cx, h)}
+                        fill="var(--accent-bright)"
+                        opacity={dim ? 0.35 : m.partial ? 0.7 : 1}
+                      />
+                    )}
+                    {ph > 0 && (
+                      <text x={cx} y={y(m.projected) - 5} textAnchor="middle" fontSize={compact ? 9 : 10.5} fontWeight="600"
+                        fill="var(--fg-3)" fontFamily="var(--mono)" opacity={dim ? 0.4 : 1}>≈{_rmShort(m.projected)}</text>
+                    )}
+                    {showValueLabel && (
+                      <text x={cx} y={y(m.value) - 5} textAnchor="middle" fontSize={compact ? 9 : 10.5} fontWeight="600"
+                        fill="var(--fg-1)" fontFamily="var(--mono)" opacity={dim ? 0.4 : 1}>{_rmShort(m.value)}</text>
+                    )}
+                    <text x={cx} y={H - 8} textAnchor="middle" fontSize="10.5" fill={m.future ? "var(--fg-3)" : "var(--fg-2)"} opacity={m.future && m.projected == null ? 0.5 : 1}>{m.label}</text>
+                    {(!m.future || m.projected != null) && (
+                      <rect x={pad.left + colW * m.i} y={pad.top} width={colW} height={plotH + pad.bottom} fill="transparent"
+                        style={{ cursor: "pointer" }}
+                        onMouseEnter={() => setHover(m.i)}
+                        onClick={() => setHover((h0) => h0 === m.i ? null : m.i)} />
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+            {hm && (
+              <div style={{
+                position: "absolute", left: tipLeft, top: Math.max(0, y(Math.max(hm.value, hm.projected || 0)) - 22), transform: "translate(-50%, -100%)",
+                width: 240, padding: "10px 12px", borderRadius: 8, pointerEvents: "none", zIndex: 5,
+                background: "var(--bg-1)", border: "1px solid var(--line)", boxShadow: "0 6px 20px rgba(0,0,0,0.25)",
+                display: "flex", flexDirection: "column", gap: 6,
+              }}>
+                <div style={{ fontSize: 11, color: "var(--fg-3)", textTransform: "capitalize" }}>
+                  {_RM_MONTHS_LONG[hm.i]} {year}{hm.partial ? " · em andamento" : hm.future ? " · projeção" : ""}
+                </div>
+                {hm.future ? (
+                  <>
+                    <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-0)" }}>≈ {_rmBRL(hm.projected)}</div>
+                    <GrowthLine label={`vs projeção ${hm.prevLabel}`} cur={hm.projected} base={curProj} />
+                    <GrowthLine label={`vs ${_RM_MONTHS[hm.i].toLowerCase()}/${year - 1}`} cur={hm.projected} base={hm.yoy} />
+                  </>
+                ) : hm.partial ? (
+                  <>
+                    <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-0)" }}>{_rmBRL(hm.value)}</div>
+                    <GrowthLine label={`até ontem vs mesmo período de ${hm.prevLabel}`} cur={mtd.cur} base={mtd.prev} />
+                    {hm.projected != null && (
+                      <>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11.5 }}>
+                          <span style={{ color: "var(--fg-3)" }}>Projeção do mês</span>
+                          <span className="mono" style={{ color: "var(--fg-0)", fontWeight: 600 }}>≈ {_rmBRL(hm.projected)}</span>
+                        </div>
+                        <GrowthLine label={`projeção vs ${hm.prevLabel}`} cur={hm.projected} base={hm.prev} />
+                        <GrowthLine label={`projeção vs ${_RM_MONTHS[hm.i].toLowerCase()}/${year - 1}`} cur={hm.projected} base={hm.yoy} />
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div className="mono" style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-0)" }}>{_rmBRL(hm.value)}</div>
+                    <GrowthLine label={`vs ${hm.prevLabel}`} cur={hm.value} base={hm.prev} />
+                    <GrowthLine label={`vs ${_RM_MONTHS[hm.i].toLowerCase()}/${year - 1}`} cur={hm.value} base={hm.yoy} />
+                  </>
+                )}
+                {hm.projected != null && (
+                  <div style={{ fontSize: 10.5, color: "var(--fg-3)", borderTop: "1px solid var(--line)", paddingTop: 6 }}>
+                    Projeção: média de cada dia da semana nos últimos {proj.days} dias
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RankingCard({ cmvDaily = [], movements = [], sharedSplits = {}, dbOnline = false }) {
   const ranking = useMemo(() => {
     // Margem de contribuição (R$) = faturamento − COGS real das saídas de estoque.
@@ -1070,40 +1391,288 @@ function RankingCard({ cmvDaily = [], movements = [], sharedSplits = {}, dbOnlin
   );
 }
 
-function TodayConsumptionCard({ consumption = [], dbOnline = false }) {
-  const totalCost = consumption.reduce((s, it) => s + (it.totalCost || 0), 0);
-  const fmtBRL = (v) => `R$ ${v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const fmtQty = (qty, unit) => {
-    const n = Number(qty) || 0;
-    const intLike = unit === "un" || unit === "pc" || Number.isInteger(n);
-    return `${n.toLocaleString("pt-BR", { minimumFractionDigits: intLike ? 0 : 1, maximumFractionDigits: intLike ? 0 : 2 })} ${unit || ""}`.trim();
-  };
+// ============= MonthlyConsumptionCard · consumo do mês até hoje vs mesmo período do mês anterior =============
+// Ex.: dia 10 → 01–10 deste mês vs 01–10 do mês anterior (até o mesmo horário). Também traz
+// a média mensal dos 3 meses fechados anteriores e a projeção do mês no ritmo atual.
+// Carrega os próprios dados (baixas 'out' dos últimos ~4 meses) p/ servir desktop e mobile.
+const _MC_MONTHS = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+const _mcBRL = (v) => `R$ ${(Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const _mcQty = (qty, unit) => {
+  const n = Number(qty) || 0;
+  const intLike = unit === "un" || unit === "pc" || Number.isInteger(n);
+  return `${n.toLocaleString("pt-BR", { minimumFractionDigits: intLike ? 0 : 1, maximumFractionDigits: intLike ? 0 : 1 })} ${unit || ""}`.trim();
+};
+const _mcPct = (cur, base) => (base > 0 ? ((cur - base) / base) * 100 : null);
+
+// Δ% com seta · consumo/custo subindo = vermelho, caindo = verde.
+function _McDelta({ pct, isNew, size = 11.5 }) {
+  if (isNew) return <span className="mono" style={{ fontSize: size, color: "var(--info)" }}>novo</span>;
+  if (pct == null) return <span className="mono" style={{ fontSize: size, color: "var(--fg-3)" }}>—</span>;
+  const flat = Math.abs(pct) < 0.5;
+  const color = flat ? "var(--fg-2)" : pct > 0 ? "var(--crit)" : "var(--ok)";
+  return (
+    <span className="mono" style={{ fontSize: size, color, fontWeight: 600, whiteSpace: "nowrap" }}>
+      {flat ? "= " : pct > 0 ? "▲ +" : "▼ −"}{Math.abs(pct).toFixed(flat ? 0 : 1).replace(".", ",")}%
+    </span>
+  );
+}
+
+function _mcWindows() {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+  const curStart = new Date(y, m, 1);
+  const prevStart = new Date(y, m - 1, 1);
+  const prevDays = new Date(y, m, 0).getDate();
+  // Mesmo dia (limitado ao tamanho do mês anterior) e mesmo horário de agora.
+  const prevEnd = new Date(y, m - 1, Math.min(d, prevDays), now.getHours(), now.getMinutes(), now.getSeconds(), 999);
+  const histStart = new Date(y, m - 3, 1); // 3 meses fechados: m-3, m-2, m-1
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const elapsedDays = (now - curStart) / 86400000;
+  return { now, d, m, curStart, prevStart, prevEnd, histStart, daysInMonth, elapsedDays };
+}
+
+function MonthlyConsumptionCard({ compact = false }) {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };
+  const [rows, setRows] = useState([]);
+  const [win, setWin] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [sort, setSort] = useState("cost"); // cost | up | down
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    if (dbStatus.state === "checking") return;
+    if (!dbStatus.isOnline) { setLoading(false); return; }
+    const sess = (() => { try { return JSON.parse(localStorage.getItem("stockkitchen.session.v1")); } catch { return null; } })();
+    const tid = sess?.tenantId;
+    if (!tid) { setLoading(false); return; }
+    let cancelled = false, reloadTimer = null;
+    const load = async () => {
+      const w = _mcWindows(); // recalculado a cada carga — o "agora" anda
+      const res = await dbListConsumptionMovements(tid, w.histStart.toISOString(), w.now.toISOString());
+      if (cancelled) return;
+      setWin(w);
+      setRows(res.data || []);
+      setLoading(false);
+    };
+    load();
+    const unsub = dbSubscribeTable?.("stock_movements", tid, () => {
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => { if (!cancelled) load(); }, 400);
+    });
+    return () => {
+      cancelled = true;
+      if (reloadTimer) clearTimeout(reloadTimer);
+      try { unsub?.(); } catch {}
+    };
+  }, [dbStatus.state, dbStatus.isOnline]);
+
+  const data = useMemo(() => {
+    if (!win) return null;
+    const curStartMs = win.curStart.getTime(), prevStartMs = win.prevStart.getTime(), prevEndMs = win.prevEnd.getTime();
+    const items = {};
+    const tot = { cur: 0, prev: 0, hist: 0 };
+    for (const mv of rows) {
+      const t = new Date(mv.at).getTime();
+      const it = items[mv.itemId] || (items[mv.itemId] = {
+        id: mv.itemId, name: mv.name, unit: mv.unit,
+        curQty: 0, curCost: 0, prevQty: 0, prevCost: 0, histQty: 0, histCost: 0,
+      });
+      if (t >= curStartMs) {
+        it.curQty += mv.qty; it.curCost += mv.cost; tot.cur += mv.cost;
+      } else {
+        // Antes do mês corrente = histórico dos 3 meses fechados
+        it.histQty += mv.qty; it.histCost += mv.cost; tot.hist += mv.cost;
+        if (t >= prevStartMs && t <= prevEndMs) { it.prevQty += mv.qty; it.prevCost += mv.cost; tot.prev += mv.cost; }
+      }
+    }
+    const pace = win.elapsedDays > 0 ? win.daysInMonth / win.elapsedDays : 1;
+    const list = Object.values(items)
+      .filter((it) => it.curQty > 0 || it.prevQty > 0)
+      .map((it) => {
+        const curUnit = it.curQty > 0 ? it.curCost / it.curQty : null;
+        const prevUnit = it.prevQty > 0 ? it.prevCost / it.prevQty : null;
+        return {
+          ...it,
+          qtyPct: _mcPct(it.curQty, it.prevQty),
+          isNew: it.prevQty === 0 && it.curQty > 0,
+          pricePct: curUnit != null && prevUnit != null ? _mcPct(curUnit, prevUnit) : null,
+          share: tot.cur > 0 ? (it.curCost / tot.cur) * 100 : 0,
+          projQty: it.curQty * pace,
+          avgQty: it.histQty / 3,
+        };
+      });
+    return {
+      list,
+      total: {
+        cur: tot.cur, prev: tot.prev, pct: _mcPct(tot.cur, tot.prev),
+        proj: tot.cur * pace, avg: tot.hist / 3,
+        projPct: _mcPct(tot.cur * pace, tot.hist / 3),
+      },
+      ups: list.filter((x) => x.isNew || (x.qtyPct != null && x.qtyPct >= 0.5)).length,
+      downs: list.filter((x) => x.qtyPct != null && x.qtyPct <= -0.5).length,
+    };
+  }, [rows, win]);
+
+  const sorted = useMemo(() => {
+    if (!data) return [];
+    const l = [...data.list];
+    // Altas/quedas ordenadas pelo impacto em R$ (variação de custo), não só pelo %.
+    const diff = (x) => x.curCost - x.prevCost;
+    if (sort === "up") return l.filter((x) => diff(x) > 0).sort((a, b) => diff(b) - diff(a));
+    if (sort === "down") return l.filter((x) => diff(x) < 0).sort((a, b) => diff(a) - diff(b));
+    return l.filter((x) => x.curCost > 0).sort((a, b) => b.curCost - a.curCost);
+  }, [data, sort]);
+  const LIMIT = 10;
+  const visible = showAll ? sorted : sorted.slice(0, LIMIT);
+
+  const curLabel = win ? `01–${String(win.d).padStart(2, "0")} de ${_MC_MONTHS[win.m]}` : "";
+  const prevLabel = win ? `01–${String(win.prevEnd.getDate()).padStart(2, "0")} de ${_MC_MONTHS[win.prevStart.getMonth()]}` : "";
+
+  const segBtn = (id, label) => (
+    <button type="button" key={id} onClick={() => { setSort(id); setShowAll(false); }} style={{
+      padding: "4px 10px", borderRadius: 999, fontSize: 11.5, cursor: "pointer", flexShrink: 0,
+      border: `1px solid ${sort === id ? "var(--accent-line)" : "var(--line)"}`,
+      background: sort === id ? "var(--accent-soft)" : "transparent",
+      color: sort === id ? "var(--fg-0)" : "var(--fg-2)",
+    }}>{label}</button>
+  );
+
+  const stat = (label, value, extra) => (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</div>
+      <div className="mono" style={{ fontSize: compact ? 14 : 16, fontWeight: 700, color: "var(--fg-0)", marginTop: 3, whiteSpace: "nowrap" }}>{value}</div>
+      {extra && <div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 2, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>{extra}</div>}
+    </div>
+  );
+
+  const priceTxt = (it) => it.pricePct == null || Math.abs(it.pricePct) < 0.5 ? null
+    : `preço ${it.pricePct > 0 ? "+" : "−"}${Math.abs(it.pricePct).toFixed(0)}%`;
+
+  const COLS = "minmax(0,1fr) 120px 120px 90px 170px";
+
   return (
     <div className="card">
-      <div className="card-header">
-        <h3 className="card-title">Consumo hoje</h3>
-        <span className="card-sub">{fmtBRL(totalCost)} · {consumption.length} SKUs</span>
+      <div className="card-header" style={{ flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <h3 className="card-title">Consumo do mês</h3>
+          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
+            {curLabel} vs {prevLabel} · até o mesmo horário
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", maxWidth: "100%" }}>
+          {segBtn("cost", "Maior custo")}
+          {segBtn("up", "Maiores altas")}
+          {segBtn("down", "Maiores quedas")}
+        </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column" }}>
-        {consumption.length === 0 ? (
-          <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
-            {dbOnline ? "Sem consumo registrado hoje" : "DB offline"}
+
+      {loading ? (
+        <div className="card-body"><div className="skel" style={{ height: 220, width: "100%" }} /></div>
+      ) : !dbStatus.isOnline || !data ? (
+        <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>DB offline</div>
+      ) : (
+        <>
+          {/* Resumo */}
+          <div style={{
+            display: "grid", gridTemplateColumns: compact ? "1fr 1fr" : "repeat(4, 1fr)", gap: compact ? 12 : 16,
+            padding: compact ? "12px 14px" : "14px 16px", borderBottom: "1px solid var(--line-soft)",
+          }}>
+            {stat("Consumido no mês", _mcBRL(data.total.cur),
+              <><_McDelta pct={data.total.pct} size={11} /><span>vs {_mcBRL(data.total.prev)}</span></>)}
+            {stat("Projeção do mês", _mcBRL(data.total.proj),
+              <span>ritmo de {win.elapsedDays.toFixed(1).replace(".", ",")} de {win.daysInMonth} dias</span>)}
+            {stat("Média 3 meses", _mcBRL(data.total.avg),
+              <><span>projeção</span><_McDelta pct={data.total.projPct} size={11} /></>)}
+            {stat("Itens", `${data.ups} ▲ · ${data.downs} ▼`,
+              <span>subiram · caíram em consumo</span>)}
           </div>
-        ) : consumption.map((it, i) => (
-          <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 90px 100px", gap: 8, alignItems: "center", padding: "9px 16px", borderBottom: i < consumption.length - 1 ? "1px solid var(--line-soft)" : "none" }}>
-            <div style={{ minWidth: 0, fontSize: 12, color: "var(--fg-0)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {it.name || "—"}
+
+          {/* Cabeçalho da tabela (desktop) */}
+          {!compact && (
+            <div style={{
+              display: "grid", gridTemplateColumns: COLS, gap: 12,
+              padding: "8px 16px", fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)",
+              letterSpacing: "0.06em", textTransform: "uppercase", borderBottom: "1px solid var(--line-soft)",
+            }}>
+              <span>Item</span>
+              <span style={{ textAlign: "right" }}>Este mês</span>
+              <span style={{ textAlign: "right" }}>Mês anterior</span>
+              <span style={{ textAlign: "right" }}>Consumo</span>
+              <span style={{ textAlign: "right" }}>Projeção · média 3m</span>
             </div>
-            <span className="mono" style={{ fontSize: 11, color: "var(--fg-2)", textAlign: "right" }}>{fmtQty(it.totalQty, it.unit)}</span>
-            <span className="mono" style={{ fontSize: 11.5, color: "var(--fg-0)", textAlign: "right" }}>{fmtBRL(it.totalCost || 0)}</span>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {visible.length === 0 ? (
+              <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
+                {sort === "up" ? "Nenhum item com consumo maior que no mês anterior"
+                  : sort === "down" ? "Nenhum item com consumo menor que no mês anterior"
+                  : "Sem consumo registrado no mês"}
+              </div>
+            ) : visible.map((it, i) => {
+              const border = i < visible.length - 1 ? "1px solid var(--line-soft)" : "none";
+              const price = priceTxt(it);
+              const projVsAvg = _mcPct(it.projQty, it.avgQty);
+              if (compact) {
+                return (
+                  <div key={it.id} style={{ padding: "10px 14px", borderBottom: border, display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                      <span style={{ minWidth: 0, fontSize: 12, color: "var(--fg-0)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.name || "—"}</span>
+                      <_McDelta pct={it.qtyPct} isNew={it.isNew} />
+                    </div>
+                    <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)", display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <span>{_mcQty(it.curQty, it.unit)} · {_mcBRL(it.curCost)}</span>
+                      <span style={{ color: "var(--fg-3)" }}>ant. {_mcQty(it.prevQty, it.unit)}</span>
+                    </div>
+                    <div style={{ fontSize: 10.5, color: "var(--fg-3)" }}>
+                      proj. {_mcQty(it.projQty, it.unit)} · média {_mcQty(it.avgQty, it.unit)}{price ? ` · ${price}` : ""}
+                    </div>
+                  </div>
+                );
+              }
+              return (
+                <div key={it.id} style={{ display: "grid", gridTemplateColumns: COLS, gap: 12, alignItems: "center", padding: "9px 16px", borderBottom: border }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: "var(--fg-0)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.name || "—"}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 2 }}>
+                      {it.share.toFixed(1).replace(".", ",")}% do consumo do mês{price ? ` · ${price}` : ""}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="mono" style={{ fontSize: 11.5, color: "var(--fg-0)" }}>{_mcBRL(it.curCost)}</div>
+                    <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)" }}>{_mcQty(it.curQty, it.unit)}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>{_mcBRL(it.prevCost)}</div>
+                    <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{_mcQty(it.prevQty, it.unit)}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}><_McDelta pct={it.qtyPct} isNew={it.isNew} /></div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="mono" style={{ fontSize: 11, color: "var(--fg-1)" }}>{_mcQty(it.projQty, it.unit)}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--fg-3)", display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      <span className="mono">média {_mcQty(it.avgQty, it.unit)}</span>
+                      {projVsAvg != null && <_McDelta pct={projVsAvg} size={10} />}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        ))}
-      </div>
+
+          {sorted.length > LIMIT && (
+            <button type="button" className="btn" data-variant="ghost" data-size="sm"
+              style={{ margin: "6px auto 10px", display: "flex" }}
+              onClick={() => setShowAll((v) => !v)}>
+              {showAll ? "Mostrar menos" : `Ver todos (${sorted.length})`}
+            </button>
+          )}
+        </>
+      )}
     </div>
   );
 }
 
-function StockByCategoryCard({ stock = [], onClick }) {
+function StockByCategoryCard({ stock = [], onClick, compact = false }) {
   const data = useMemo(() => {
     const byCat = {};
     let totalValue = 0;
@@ -1143,7 +1712,7 @@ function StockByCategoryCard({ stock = [], onClick }) {
           <div className="h-eyebrow" style={{ marginBottom: 4 }}>Valor em estoque total</div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
             <span style={{ fontSize: 16, color: "var(--fg-2)", fontFamily: "var(--mono)" }}>R$</span>
-            <span className="mono" style={{ fontSize: 38, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.025em", lineHeight: 1 }}>
+            <span className="mono" style={{ fontSize: compact ? 26 : 38, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.025em", lineHeight: 1 }}>
               {intPart}
             </span>
             <span className="mono" style={{ fontSize: 18, color: "var(--fg-2)" }}>,{decPart}</span>
@@ -1151,7 +1720,7 @@ function StockByCategoryCard({ stock = [], onClick }) {
         </div>
         <div style={{ textAlign: "right" }}>
           <div className="h-eyebrow" style={{ marginBottom: 4 }}>Produtos cadastrados</div>
-          <div className="mono" style={{ fontSize: 28, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em" }}>
+          <div className="mono" style={{ fontSize: compact ? 20 : 28, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.02em" }}>
             {data.totalItems}
           </div>
         </div>
@@ -1162,6 +1731,24 @@ function StockByCategoryCard({ stock = [], onClick }) {
         Valor em estoque por categoria (Top 10)
       </div>
 
+      {compact ? (
+        // Celular: barras horizontais — 10 colunas com R$ por extenso não cabem em 360px.
+        <div style={{ padding: "6px 16px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {top10.length === 0 ? (
+            <div style={{ textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>Sem itens cadastrados.</div>
+          ) : top10.map((g, i) => (
+            <div key={g.cat} style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11.5 }}>
+                <span style={{ color: "var(--fg-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{g.cat}</span>
+                <span className="mono" style={{ color: "var(--fg-1)", whiteSpace: "nowrap" }}>{fmtBRL(g.val)}</span>
+              </div>
+              <div style={{ height: 6, borderRadius: 3, background: "var(--bg-3, var(--line))" }}>
+                <div style={{ width: `${max > 0 ? Math.max(2, (g.val / max) * 100) : 2}%`, height: "100%", borderRadius: 3, background: palette[i % palette.length] }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
       <div style={{ padding: "8px 16px 18px", display: "grid", gridTemplateColumns: `repeat(${Math.max(top10.length, 1)}, 1fr)`, gap: 10, alignItems: "end", minHeight: 200 }}>
         {top10.length === 0 ? (
           <div style={{ textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>Sem itens cadastrados.</div>
@@ -1183,77 +1770,7 @@ function StockByCategoryCard({ stock = [], onClick }) {
           );
         })}
       </div>
-    </div>
-  );
-}
-
-function RecentRequestsCard({ setPage, requests = [], dbOnline = false }) {
-  const recent = (dbOnline ? requests : MOCK.REQUESTS).slice(0, 5);
-  const statusMap = {
-    pending:   ["Pendente",  "warn"],
-    approved:  ["Aprovada",  "info"],
-    separated: ["Separada",  "info"],
-    delivered: ["Entregue",  "ok"],
-    rejected:  ["Recusada",  "crit"],
-    cancelled: ["Cancelada", "crit"],
-  };
-  const fmtBRL = (v) => `R$ ${Number(v || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  return (
-    <div className="card">
-      <div className="card-header">
-        <h3 className="card-title">Requisições recentes</h3>
-        <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setPage("requests")}>Ver todas <I.ChevronR size={11} /></button>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column" }}>
-        {recent.length === 0 ? (
-          <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
-            {dbOnline ? "Sem requisições recentes" : "DB offline"}
-          </div>
-        ) : recent.map((r, i) => {
-          const opSlug = r.op || r.operationId || r.operation?.slug;
-          const op = MOCK.opById(opSlug);
-          const isShared = !!(r.isShared || (r.splits && r.splits.length > 1));
-          const status = r.status || "pending";
-          const [lbl, tone] = statusMap[status] || [status, "info"];
-          const code = r.code || r.id;
-          const itemsCount = r.itemsCount ?? (r.items?.length || 0);
-          // `r.total` vem do mapping como string já formatada ("R$ 12,34") — não use em fmtBRL (vira NaN).
-          // Tenta totalNum (numérico) ou somaria line_cost dos itens; fallback pro próprio r.total.
-          const rawTotal = typeof r.totalNum === "number"
-            ? r.totalNum
-            : (r.items || []).reduce((s, it) => {
-                if (typeof it === "object" && it !== null) return s + (Number(it.line_cost) || 0);
-                return s;
-              }, 0);
-          const total = rawTotal > 0 ? fmtBRL(rawTotal) : (typeof r.total === "string" ? r.total : fmtBRL(0));
-          // Horário: data + hora · sempre visível
-          let timeLabel = "";
-          if (r.requestedAt) {
-            try {
-              const d = new Date(r.requestedAt);
-              const dd = String(d.getDate()).padStart(2, "0");
-              const mm = String(d.getMonth() + 1).padStart(2, "0");
-              const hhmm = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-              timeLabel = `${dd}/${mm} · ${hhmm}`;
-            } catch {}
-          }
-          if (!timeLabel && r.at) timeLabel = r.at;
-          return (
-            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: i < recent.length - 1 ? "1px solid var(--line-soft)" : "none" }}>
-              <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em", width: 72, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(code).slice(0, 8)}</span>
-              <span style={{ width: 6, height: 6, borderRadius: 50, background: isShared ? "#94a3b8" : (op?.color || "var(--fg-3)"), flexShrink: 0 }} />
-              <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                <span style={{ fontSize: 12, color: "var(--fg-0)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isShared ? "🔗 Uso compartilhado" : (op?.name || "Operação")}</span>
-                <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.04em" }}>
-                  {itemsCount} {itemsCount === 1 ? "item" : "itens"}{timeLabel ? ` · ${timeLabel}` : ""}
-                </span>
-              </div>
-              <span className="mono" style={{ fontSize: 11, color: "var(--fg-0)" }}>{total}</span>
-              <span className="badge" data-tone={tone}>{lbl}</span>
-            </div>
-          );
-        })}
-      </div>
+      )}
     </div>
   );
 }
@@ -1329,71 +1846,6 @@ function ModuleKpi({ label, value, sub, tone, icon, onClick }) {
   );
 }
 
-// ============= ConsolidatedAlertsCard · alertas de estoque =============
-function ConsolidatedAlertsCard({ setPage, stock = [], dbOnline = false }) {
-  const alerts = useMemo(() => {
-    const source = dbOnline ? stock : (MOCK.STOCK_ITEMS || []);
-    return source
-      // Respeita flag de categoria · esconde itens cuja categoria tem alertas desligados
-      .filter((i) => i.catAlertsEnabled !== false)
-      .filter((i) => (i.qty || 0) < (i.reorder || 0))
-      .sort((a, b) => {
-        // rupturas (qty=0) primeiro, depois mais críticos por % do reorder
-        const aRatio = (a.reorder || 1) > 0 ? (a.qty || 0) / (a.reorder || 1) : 1;
-        const bRatio = (b.reorder || 1) > 0 ? (b.qty || 0) / (b.reorder || 1) : 1;
-        return aRatio - bRatio;
-      })
-      .slice(0, 8)
-      .map((i) => ({
-        id: `stk-${i.id}`,
-        severity: (i.qty || 0) <= 0 ? "critical" : "high",
-        source: "Estoque",
-        title: (i.qty || 0) <= 0 ? `${i.name} · ruptura` : `${i.name} · ${i.qty} ${i.unit || ""} restantes`,
-        op: null,
-        page: "stock",
-      }));
-  }, [stock, dbOnline]);
-
-  const sevColor = (s) => s === "critical" ? "var(--crit)" : s === "high" ? "var(--warn)" : "var(--info)";
-
-  return (
-    <div className="card">
-      <div className="card-header">
-        <div>
-          <h3 className="card-title">Alertas consolidados</h3>
-          <span className="card-sub" style={{ display: "block", marginTop: 4 }}>Estoque · clique pra ir ao módulo</span>
-        </div>
-        {alerts.length > 0 && <span className="badge" data-tone="warn">{alerts.length}</span>}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column" }}>
-        {alerts.length === 0 ? (
-          <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
-            Nenhum alerta crítico aberto. ✨
-          </div>
-        ) : alerts.map((a, i) => (
-          <button key={a.id} onClick={() => setPage(a.page)} style={{
-            display: "grid", gridTemplateColumns: "8px 1fr auto", gap: 10, alignItems: "center",
-            padding: "10px 16px", textAlign: "left",
-            background: "transparent", border: "none", cursor: "pointer",
-            borderBottom: i < alerts.length - 1 ? "1px solid var(--line-soft)" : "none",
-          }}>
-            <span style={{ width: 6, height: 6, borderRadius: 50, background: sevColor(a.severity) }} />
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, color: "var(--fg-0)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                {a.title}
-              </div>
-              <div style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 2 }}>
-                {a.source}{a.op ? ` · ${a.op.short}` : ""}
-              </div>
-            </div>
-            <I.ChevronR size={11} style={{ color: "var(--fg-3)" }} />
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 
 // FlowKpi · card minimalista com rótulo e valor total em R$ (sem delta nem sparkline)
 function FlowKpi({ label, value, tone, sub, onClick, loading }) {
@@ -1452,9 +1904,11 @@ window.computeDashboardMetrics = computeDashboardMetrics;
 // Expostos p/ a versão mobile (MobileDashboard) — mesma lógica de negócio, layout próprio.
 window.computeKpi              = computeKpi;
 window.dashPeriodRange         = dashPeriodRange;
+window.dashRangeYMD            = _dashRangeYMD;
+window.computeComprasMes       = computeComprasMes;
+window.fmtDeliverDur           = _fmtDeliverDur;
 window.CmvByOpCard             = CmvByOpCard;
 window.RankingCard             = RankingCard;
-window.TodayConsumptionCard    = TodayConsumptionCard;
+window.RevenueMonthlyCard      = RevenueMonthlyCard;
+window.MonthlyConsumptionCard  = MonthlyConsumptionCard;
 window.StockByCategoryCard     = StockByCategoryCard;
-window.ConsolidatedAlertsCard  = ConsolidatedAlertsCard;
-window.RecentRequestsCard      = RecentRequestsCard;

@@ -2951,6 +2951,35 @@ async function dbListCmvDaily(tenantId, fromDate, toDate) {
   return { data: Object.values(grouped), source: "db", error: null };
 }
 
+// Faturamento agregado por dia × operação · [{ date: "YYYY-MM-DD", month: "YYYY-MM", operationId, revenue }].
+// Granularidade diária p/ a projeção por dia da semana e comparativos do mês parcial.
+// Paginado via .range() — a janela de 2 anos passa fácil do max-rows (1000) do PostgREST.
+async function dbRevenueMonthly(tenantId, fromDate, toDate) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const PAGE = 1000;
+  const grouped = {};
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await _client
+      .from("revenue_entries")
+      .select("id, business_date, operation_id, revenue_payment_breakdown(amount)")
+      .eq("tenant_id", tenantId)
+      .gte("business_date", fromDate)
+      .lte("business_date", toDate)
+      .order("business_date", { ascending: true })
+      .order("id", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+    if (error) return { data: null, source: "mock", error };
+    for (const row of data || []) {
+      const date = String(row.business_date).slice(0, 10);
+      const key = `${date}|${row.operation_id}`;
+      if (!grouped[key]) grouped[key] = { date, month: date.slice(0, 7), operationId: row.operation_id, revenue: 0 };
+      grouped[key].revenue += (row.revenue_payment_breakdown || []).reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    }
+    if (!data || data.length < PAGE) break;
+  }
+  return { data: Object.values(grouped), source: "db", error: null };
+}
+
 async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   // PostgREST corta a resposta em 1000 linhas (max-rows) mesmo sem .limit().
@@ -2997,6 +3026,46 @@ async function dbTopConsumedItems(tenantId, fromDate, toDate, limit = 10) {
   }
   const sorted = Object.values(agg).sort((a, b) => b.totalCost - a.totalCost);
   return { data: sorted.slice(0, limit), source: "db", error: null };
+}
+
+// Baixas de consumo (kind='out') cruas no intervalo · [{ itemId, name, unit, qty, cost, at }].
+// Mesmos filtros do dbTopConsumedItems (exclui produção/transferência; datado por
+// performed_at; custo do próprio movimento), mas sem agregar — o card de consumo
+// mensal fatia por período no cliente. Paginado: 4 meses passam fácil de 1000 linhas.
+async function dbListConsumptionMovements(tenantId, fromDate, toDate) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const PAGE = 1000;
+  const rows = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await _client
+      .from("stock_movements")
+      .select("id, stock_item_id, qty, unit_cost, performed_at, stock_item:stock_items(name, unit)")
+      .eq("tenant_id", tenantId)
+      .eq("kind", "out")
+      .or("reference_type.is.null,reference_type.not.in.(production_order,supply_transfer)")
+      .gte("performed_at", fromDate)
+      .lte("performed_at", toDate)
+      .order("performed_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+    if (error) return { data: null, source: "mock", error };
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
+  return {
+    data: rows.map((mv) => {
+      const qty = Math.abs(Number(mv.qty) || 0);
+      return {
+        itemId: mv.stock_item_id,
+        name:   mv.stock_item?.name,
+        unit:   mv.stock_item?.unit,
+        qty,
+        cost:   qty * (Number(mv.unit_cost) || 0),
+        at:     mv.performed_at,
+      };
+    }),
+    source: "db", error: null,
+  };
 }
 
 // Splits de rateio das requisições "Uso compartilhado" para os referenceIds dados.
@@ -4437,7 +4506,7 @@ Object.assign(window, {
   dbListClosedPeriods, dbClosePeriod, dbReopenPeriod,
   dbInsertDreCategory, dbUpdateDreCategory, dbDeleteDreCategory,
   dbInsertDreSubcategory, dbUpdateDreSubcategory, dbDeleteDreSubcategory,
-  dbListCmvDaily, dbTopConsumedItems, dbListSharedSplits,
+  dbListCmvDaily, dbRevenueMonthly, dbTopConsumedItems, dbListConsumptionMovements, dbListSharedSplits,
   dbUploadEvidence, dbGetSignedUrl,
   dbCrmListContacts, dbCrmInsertContact, dbCrmUpdateContact, dbCrmDeleteContact,
   dbCrmGetOrCreateDefaultPipeline, dbCrmListDeals, dbCrmInsertDeal, dbCrmUpdateDeal, dbCrmDeleteDeal,
