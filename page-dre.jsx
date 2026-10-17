@@ -129,12 +129,11 @@ function computeDreSummary({ entries, categories, subcategories, period, stockSn
   const cmvCatIds = categories
     .filter((c) => c.kind === "cogs" || c.groupSlug === "cmv" || c.id === "cmv")
     .map((c) => c.id);
+  // Cada sub é lida no bucket da PRÓPRIA categoria — antes lia sempre o da 1ª
+  // categoria CMV, e compras de uma 2ª categoria CMV ficavam fora do CMV real.
   const comprasTotal = subcategories
     .filter((s) => cmvCatIds.includes(s.category) && !s.autofeed)
-    .reduce((acc, sub) => {
-      const catBucket = cmvCatIds.map((cid) => byCat[cid]).find(Boolean);
-      return acc + ((catBucket?.bySub?.[sub.id]) || 0);
-    }, 0);
+    .reduce((acc, sub) => acc + (byCat[sub.category]?.bySub?.[sub.id] || 0), 0);
   const cmvReal = ei + comprasTotal - ef;
 
   // Linha autofeed "Ajuste de estoque" = variação do estoque (EI − EF).
@@ -353,7 +352,7 @@ function Dre() {
 
   const [tab, setTab] = useState("dre");
   const [period, setPeriod] = useState(() => window.currentPeriod());
-  const periodOptions = useMemo(() => window.buildPeriodOptions(12), []);
+  const periodOptions = useMemo(() => window.buildPeriodOptions(), []);
   const [entries, setEntries] = useState(MOCK.ENTRIES);
   const [categories,    setCategories]    = useState(MOCK.DRE_CATEGORIES);
   const [subcategories, setSubcategories] = useState(MOCK.DRE_SUBCATEGORIES);
@@ -447,7 +446,7 @@ function Dre() {
       const refreshed = await dbListFinanceEntries?.(tenantId, period);
       if (refreshed?.data) setEntries(refreshed.data);
       setEditingEntry(null);
-      window.showToast?.("Lançamento atualizado", { tone: "ok" });
+      window.toastSavedEntry("Lançamento atualizado", patch.comp, period);
       return true;
     }
     setEntries(entries.map((x) => x.id === id ? { ...x, ...patch } : x));

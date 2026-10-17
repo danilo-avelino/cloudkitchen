@@ -8,7 +8,8 @@ const _drPct = (v, base) => base > 0 ? `${((v / base) * 100).toFixed(1)}%` : "�
 const _DR_MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const _drPeriodLabel = (p) => { const [y, m] = p.split("-"); return `${_DR_MONTHS[Number(m) - 1]}/${y}`; };
 const _drCurPeriod = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
-const _drPeriodOptions = () => { const out = []; const d = new Date(); d.setDate(1); for (let i = 0; i < 12; i++) { out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`); d.setMonth(d.getMonth() - 1); } return out; };
+// 3 meses à frente + corrente + 23 anteriores (mesma janela do desktop; eram só 12 para trás).
+const _drPeriodOptions = () => { const out = []; const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + 3); for (let i = 0; i < 27; i++) { out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`); d.setMonth(d.getMonth() - 1); } return out; };
 
 function MobileDre() {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false, state: "offline" };

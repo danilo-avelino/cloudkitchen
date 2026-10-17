@@ -8,6 +8,8 @@ const _fParse = (raw) => {
   if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
   let s = String(raw).trim().replace(/\s+/g, "");
   if (!s) return 0;
+  // "4.600" / "1.234.567" (só pontos em grupos de 3) = milhar BR, não R$ 4,60 — igual ao desktop.
+  if (/^[1-9]\d{0,2}(\.\d{3})+$/.test(s)) return Number(s.replace(/\./g, ""));
   const dp = Math.max(s.lastIndexOf(","), s.lastIndexOf("."));
   if (dp >= 0) s = s.slice(0, dp).replace(/[.,]/g, "") + "." + s.slice(dp + 1);
   const n = parseFloat(s);
@@ -18,10 +20,26 @@ const _fMonthOf = (comp) => String(comp || "").slice(0, 7);
 const _fCurPeriod = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
 const _F_MONTHS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 const _fPeriodLabel = (p) => { const [y, m] = p.split("-"); return `${_F_MONTHS[Number(m) - 1]}/${y}`; };
+// 3 meses à frente + corrente + 23 anteriores (mesma janela do desktop). Eram só 12
+// para trás: lançamento com competência fora disso não tinha mês selecionável.
 const _fPeriodOptions = () => {
-  const out = []; const d = new Date(); d.setDate(1);
-  for (let i = 0; i < 12; i++) { const p = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; out.push(p); d.setMonth(d.getMonth() - 1); }
+  const out = []; const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + 3);
+  for (let i = 0; i < 27; i++) { const p = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; out.push(p); d.setMonth(d.getMonth() - 1); }
   return out;
+};
+// Data dentro do período com o dia limitado ao fim do mês (vencimento dia 31 em
+// setembro → 30/09; antes "2026-09-31", que o banco recusa).
+const _fDateIn = (period, day) => {
+  const [y, m] = period.split("-").map(Number);
+  const d = Math.min(Math.max(1, Number(day) || 15), new Date(y, m, 0).getDate());
+  return `${period}-${String(d).padStart(2, "0")}`;
+};
+// Toast pós-salvar: avisa quando a competência caiu fora do mês exibido — o lançamento
+// sai da lista e, sem aviso, parecia perdido e era relançado (duplicado na DRE).
+const _fToastSaved = (msg, comp, period) => {
+  const ym = _fMonthOf(comp);
+  if (ym && ym !== period) window.showToast?.(`${msg} com competência ${_fPeriodLabel(ym)} — entra na DRE e na lista desse mês, não de ${_fPeriodLabel(period)}`, { tone: "warn", ttl: 7000 });
+  else window.showToast?.(msg, { tone: "ok" });
 };
 
 function MobileFinance() {
@@ -65,20 +83,42 @@ function MobileFinance() {
     return () => { cancelled = true; };
   }, [dbStatus.state, dbStatus.isOnline, period]);
 
-  const refetchEntries = async () => { const r = await dbListFinanceEntries?.(tenantId, period); if (r?.data) setEntries(r.data); };
+  // Lista por mês de PAGAMENTO (conferir extrato/fatura) — igual ao desktop. DRE e
+  // checklist seguem por competência (`inPeriod`).
+  const [dateBasis, setDateBasis] = useState("comp");
+  const [paidEntries, setPaidEntries] = useState([]);
+  useEffect(() => {
+    if (dateBasis !== "paid" || !tenantId) return;
+    let cancelled = false;
+    dbListFinanceEntriesByPayment?.(tenantId, period).then((r) => { if (!cancelled && r?.data) setPaidEntries(r.data); });
+    return () => { cancelled = true; };
+  }, [dateBasis, tenantId, period]);
+
+  const refetchEntries = async () => {
+    const [r, p] = await Promise.all([
+      dbListFinanceEntries?.(tenantId, period),
+      dateBasis === "paid" ? dbListFinanceEntriesByPayment?.(tenantId, period) : null,
+    ]);
+    if (r?.data) setEntries(r.data);
+    if (p?.data) setPaidEntries(p.data);
+  };
   const refetchChecklist = async () => { const r = await dbListClosingChecklist?.(tenantId, period); if (r?.data) setChecklist(r.data); };
 
   const findSub = (id) => subcategories.find((s) => s.id === id);
   const findCat = (id) => categories.find((c) => c.id === id);
 
   const inPeriod = useMemo(() => entries.filter((e) => _fMonthOf(e.comp) === period), [entries, period]);
+  const dateKey = dateBasis === "paid" ? "paid" : "comp";
+  const listEntries = useMemo(() => dateBasis === "paid"
+    ? (tenantId ? paidEntries : entries).filter((e) => _fMonthOf(e.paid) === period)
+    : inPeriod, [dateBasis, tenantId, paidEntries, entries, inPeriod, period]);
 
-  const expenseEntries = useMemo(() => inPeriod.filter((e) => {
+  const expenseEntries = useMemo(() => listEntries.filter((e) => {
     const sub = findSub(e.cat); if (!sub) return false;
     const cat = findCat(sub.category); if (!cat || cat.kind === "revenue") return false;
     if (e.auto || sub.autofeed) return false;
     return true;
-  }).sort((a, b) => String(b.comp).localeCompare(String(a.comp))), [inPeriod, subcategories, categories]);
+  }).sort((a, b) => String(b[dateKey] || "").localeCompare(String(a[dateKey] || ""))), [listEntries, subcategories, categories, dateKey]);
 
   const totalExpense = expenseEntries.reduce((s, e) => s + (Number(e.value) || 0), 0);
 
@@ -99,7 +139,7 @@ function MobileFinance() {
     if (source === "db" && tenantId) {
       const { error } = await dbInsertFinanceEntry(tenantId, e);
       if (error) { window.showToast?.(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
-      await refetchEntries(); window.showToast?.("Lançamento salvo", { tone: "ok" }); return true;
+      await refetchEntries(); _fToastSaved("Lançamento salvo", e.comp, period); return true;
     }
     setEntries((p) => [{ ...e, id: "LAN-" + Date.now() }, ...p]); window.showToast?.("Salvo (offline)", { tone: "warn" }); return true;
   };
@@ -107,7 +147,7 @@ function MobileFinance() {
     if (source === "db" && tenantId) {
       const { error } = await dbUpdateFinanceEntry(id, patch);
       if (error) { window.showToast?.(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
-      await refetchEntries(); window.showToast?.("Lançamento atualizado", { tone: "ok" }); return true;
+      await refetchEntries(); _fToastSaved("Lançamento atualizado", patch.comp, period); return true;
     }
     setEntries((p) => p.map((x) => x.id === id ? { ...x, ...patch } : x)); return true;
   };
@@ -125,10 +165,28 @@ function MobileFinance() {
     const draft = { cat: item.cat, desc, value, comp, paid, status, checklistItemId };
     if (source === "db" && tenantId) {
       const { error } = await dbInsertFinanceEntry(tenantId, draft);
-      if (error) { window.showToast?.(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return; }
+      // Retorna false p/ o form NÃO fechar — antes fechava mesmo com erro e o
+      // lançamento parecia salvo.
+      if (error) { window.showToast?.(`Erro: ${error.message}`, { tone: "crit", ttl: 4500 }); return false; }
       await refetchEntries();
     } else setEntries((p) => [{ ...draft, id: "LAN-" + Date.now() }, ...p]);
-    window.showToast?.("Lançamento salvo", { tone: "ok" });
+    _fToastSaved("Lançamento salvo", comp, period);
+    return true;
+  };
+  // Preenche o item vinculando lançamentos que já existem no mês (mesma subcategoria),
+  // sem criar outra despesa — igual ao desktop.
+  const linkChecklistItem = async ({ item, entryIds }) => {
+    if (source === "db" && tenantId) {
+      let failed = null;
+      for (const id of entryIds) {
+        const { error } = await dbUpdateFinanceEntry(id, { checklistItemId: item.id });
+        if (error) { failed = error; break; }
+      }
+      await refetchEntries();
+      if (failed) { window.showToast?.(`Erro ao vincular: ${failed.message}`, { tone: "crit", ttl: 4500 }); return false; }
+    } else setEntries((p) => p.map((x) => entryIds.includes(x.id) ? { ...x, checklistItemId: item.id } : x));
+    window.showToast?.(`${item.label} preenchido com ${entryIds.length} lançamento(s) existente(s)`, { tone: "ok" });
+    return true;
   };
 
   if (pageLoading) return <PageLoading label="Carregando financeiro…" variant="table" />;
@@ -148,6 +206,25 @@ function MobileFinance() {
 
       {tab === "entries" ? (
         <>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 14px 0" }}>
+            <span style={{ fontSize: 11.5, color: "var(--fg-3)", marginRight: 2 }}>Mês por</span>
+            {[["comp", "Competência"], ["paid", "Pagamento"]].map(([id, label]) => {
+              const active = dateBasis === id;
+              return (
+                <button key={id} onClick={() => setDateBasis(id)} style={{
+                  height: 32, padding: "0 12px", borderRadius: 999, fontSize: 12.5, fontWeight: active ? 600 : 400,
+                  background: active ? "var(--accent-bright)" : "var(--bg-2)",
+                  color: active ? "var(--accent-fg, #07080a)" : "var(--fg-1)",
+                  border: `1px solid ${active ? "var(--accent-bright)" : "var(--line)"}`,
+                }}>{label}</button>
+              );
+            })}
+          </div>
+          {dateBasis === "paid" && (
+            <div style={{ padding: "6px 14px 0", fontSize: 11.5, color: "var(--fg-3)" }}>
+              O que foi pago neste mês, de qualquer competência. A DRE segue pela competência.
+            </div>
+          )}
           <StatStrip stats={[
             { label: "Despesas", value: _fBRL(totalExpense).replace(",00", ""), tone: "out" },
             { label: "Lançamentos", value: expenseEntries.length },
@@ -232,8 +309,10 @@ function MobileFinance() {
       {fillItem && (
         <FinanceFillForm
           item={fillItem} categories={categories} subcategories={subcategories} period={period}
+          candidates={inPeriod.filter((e) => !e.checklistItemId && !e.auto && e.cat === fillItem.cat)}
           onClose={() => setFillItem(null)}
-          onSave={async (d) => { await fillChecklistItem(d); setFillItem(null); }}
+          onSave={async (d) => { if (await fillChecklistItem(d)) setFillItem(null); }}
+          onLink={async (d) => { if (await linkChecklistItem(d)) setFillItem(null); }}
         />
       )}
       {confirmDel && (
@@ -274,11 +353,13 @@ function FinanceEntryForm({ initial, categories, subcategories, period, onClose,
   const revenueCatIds = new Set(categories.filter((c) => c.kind === "revenue").map((c) => c.id));
   const pickable = subcategories.filter((s) => !revenueCatIds.has(s.category) && !s.autofeed);
   const defaultCat = pickable.find((s) => /fornecedor/i.test(s.name || ""))?.id || pickable[0]?.id;
+  // Hoje se o mês exibido é o corrente; senão dia 15 do mês exibido (igual ao desktop).
+  const defaultDate = _fMonthOf(todayStr) === period ? todayStr : _fDateIn(period, 15);
   const [cat, setCat] = useState(initial?.cat || defaultCat);
   const [desc, setDesc] = useState(initial?.desc || "");
   const [value, setValue] = useState(initial?.value != null ? Number(initial.value).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "");
-  const [comp, setComp] = useState(initial?.comp || `${period}-15`);
-  const [paid, setPaid] = useState(initial?.paid || `${period}-15`);
+  const [comp, setComp] = useState(initial?.comp || defaultDate);
+  const [paid, setPaid] = useState(initial?.paid || defaultDate);
   const [status, setStatus] = useState(initial?.status || "paid");
   const [saving, setSaving] = useState(false);
 
@@ -304,7 +385,7 @@ function FinanceEntryForm({ initial, categories, subcategories, period, onClose,
       </div>
       <MField label="Subcategoria"><_FinSubSelect categories={categories} subcategories={subcategories} value={cat} onChange={setCat} /></MField>
       <div style={{ display: "flex", gap: 10 }}>
-        <div style={{ flex: 1 }}><MField label="Competência" hint="Mês contábil (DRE)"><input type="date" value={comp} onChange={(e) => setComp(e.target.value)} style={mInput} /></MField></div>
+        <div style={{ flex: 1 }}><MField label="Competência" hint={comp && _fMonthOf(comp) !== period ? <_FinOutOfPeriod comp={comp} period={period} /> : "Mês contábil (DRE)"}><input type="date" value={comp} onChange={(e) => setComp(e.target.value)} style={mInput} /></MField></div>
         <div style={{ flex: 1 }}><MField label="Pagamento"><input type="date" value={paid} onChange={(e) => setPaid(e.target.value)} style={mInput} /></MField></div>
       </div>
       {isEdit && onDelete && (
@@ -316,37 +397,109 @@ function FinanceEntryForm({ initial, categories, subcategories, period, onClose,
   );
 }
 
-function FinanceFillForm({ item, categories, subcategories, period, onClose, onSave }) {
+// Aviso de competência fora do mês exibido (o lançamento sai da lista deste mês).
+function _FinOutOfPeriod({ comp, period, children }) {
+  const ym = _fMonthOf(comp);
+  if (!ym || ym === period) return null;
+  return <span style={{ color: "var(--warn)" }}>Vai para a DRE de {_fPeriodLabel(ym)} — não aparece em {_fPeriodLabel(period)}.{children}</span>;
+}
+
+// `candidates`: lançamentos do mês na mesma subcategoria e sem vínculo com o checklist
+// — permitem preencher o item vinculando o que já foi lançado (modo "link").
+function FinanceFillForm({ item, categories, subcategories, period, candidates = [], onClose, onSave, onLink }) {
   const sub = subcategories.find((s) => s.id === item.cat);
   const parent = sub ? categories.find((c) => c.id === sub.category) : null;
-  const dueDay = item.due ? String(item.due).padStart(2, "0") : "15";
+  const dueDate = _fDateIn(period, item.due || 15);
   const [value, setValue] = useState(item.expected ? Number(item.expected).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "");
-  const [comp, setComp] = useState(`${period}-${dueDay}`);
-  const [paid, setPaid] = useState(`${period}-${dueDay}`);
+  const [comp, setComp] = useState(dueDate);
+  const [paid, setPaid] = useState(dueDate);
   const [status, setStatus] = useState("paid");
+  const [mode, setMode] = useState("new"); // "new" cria lançamento · "link" vincula existentes
+  const [linkIds, setLinkIds] = useState([]);
   const [saving, setSaving] = useState(false);
   const parsed = _fParse(value);
-  const submit = async () => { if (saving || parsed <= 0) return; setSaving(true); try { await onSave({ item, value: parsed, comp, paid, status }); } finally { setSaving(false); } };
+  const linkedTotal = candidates.filter((e) => linkIds.includes(e.id)).reduce((s, e) => s + (Number(e.value) || 0), 0);
+  const canSubmit = mode === "link" ? linkIds.length > 0 : parsed > 0;
+  const submit = async () => {
+    if (saving || !canSubmit) return;
+    setSaving(true);
+    try {
+      if (mode === "link") await onLink({ item, entryIds: linkIds });
+      else await onSave({ item, value: parsed, comp, paid, status });
+    } finally { setSaving(false); }
+  };
   return (
     <FullSheet
       title={item.label}
       subtitle={`${parent?.name || ""}${sub ? " → " + sub.name : ""}`}
       onBack={saving ? undefined : onClose}
-      footer={<MPrimaryButton onClick={submit} disabled={parsed <= 0} loading={saving}>Confirmar e adicionar à DRE</MPrimaryButton>}
+      footer={<MPrimaryButton onClick={submit} disabled={!canSubmit} loading={saving}>{mode === "link" ? "Vincular e marcar preenchido" : "Confirmar e adicionar à DRE"}</MPrimaryButton>}
     >
       {item.expected > 0 && <div style={{ fontSize: 12, color: "var(--fg-3)", marginBottom: 12 }}>Esperado: {_fBRL(item.expected)}</div>}
-      <div style={{ display: "flex", gap: 10 }}>
-        <div style={{ flex: 1 }}><MField label="Valor real (R$)"><input value={value} inputMode="decimal" onChange={(e) => setValue(e.target.value)} placeholder="0,00" autoFocus style={mInput} /></MField></div>
-        <div style={{ flex: 1 }}><MField label="Status">
-          <select value={status} onChange={(e) => setStatus(e.target.value)} style={mInput}>
-            <option value="paid">Pago</option><option value="scheduled">Agendado</option><option value="pending">Pendente</option>
-          </select>
-        </MField></div>
-      </div>
-      <div style={{ display: "flex", gap: 10 }}>
-        <div style={{ flex: 1 }}><MField label="Competência"><input type="date" value={comp} onChange={(e) => setComp(e.target.value)} style={mInput} /></MField></div>
-        <div style={{ flex: 1 }}><MField label="Pagamento"><input type="date" value={paid} onChange={(e) => setPaid(e.target.value)} style={mInput} /></MField></div>
-      </div>
+      {candidates.length > 0 && (
+        <>
+          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+            {[["new", "Criar lançamento"], ["link", `Vincular existente · ${candidates.length}`]].map(([id, label]) => {
+              const active = mode === id;
+              return (
+                <button key={id} onClick={() => setMode(id)} disabled={saving} style={{
+                  flex: 1, height: 40, borderRadius: 999, fontSize: 13, fontWeight: active ? 600 : 400,
+                  background: active ? "var(--accent-bright)" : "var(--bg-2)",
+                  color: active ? "var(--accent-fg, #07080a)" : "var(--fg-1)",
+                  border: `1px solid ${active ? "var(--accent-bright)" : "var(--line)"}`,
+                }}>{label}</button>
+              );
+            })}
+          </div>
+          {mode === "new" && (
+            <div style={{ fontSize: 12, color: "var(--warn)", marginBottom: 12 }}>
+              Há {candidates.length} lançamento(s) de {sub?.name || "esta subcategoria"} neste mês sem vínculo. Se a conta já foi lançada, vincule para não duplicar a despesa.
+            </div>
+          )}
+        </>
+      )}
+      {mode === "link" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {candidates.map((e) => {
+            const on = linkIds.includes(e.id);
+            return (
+              <MobileCard key={e.id} tone={on ? "accent" : undefined}
+                onClick={saving ? undefined : () => setLinkIds((cur) => on ? cur.filter((x) => x !== e.id) : [...cur, e.id])}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{
+                    width: 20, height: 20, borderRadius: 5, flexShrink: 0, display: "grid", placeItems: "center", fontSize: 12,
+                    border: `1.5px solid ${on ? "var(--accent-bright)" : "var(--line-strong)"}`,
+                    background: on ? "var(--accent-bright)" : "transparent", color: "var(--accent-fg, #07080a)",
+                  }}>{on ? "✓" : ""}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, color: "var(--fg-0)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{e.desc}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 2 }}>{window.fmtDate(e.comp)}</div>
+                  </div>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 13.5, color: "var(--fg-0)", fontWeight: 600 }}>{_fBRL(e.value)}</span>
+                </div>
+              </MobileCard>
+            );
+          })}
+          <div style={{ fontSize: 12, color: "var(--fg-3)", marginTop: 4 }}>
+            Selecionado: {_fBRL(linkedTotal)}{item.expected > 0 ? ` · esperado ${_fBRL(item.expected)}` : ""}
+          </div>
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}><MField label="Valor real (R$)"><input value={value} inputMode="decimal" onChange={(e) => setValue(e.target.value)} placeholder="0,00" autoFocus style={mInput} /></MField></div>
+            <div style={{ flex: 1 }}><MField label="Status">
+              <select value={status} onChange={(e) => setStatus(e.target.value)} style={mInput}>
+                <option value="paid">Pago</option><option value="scheduled">Agendado</option><option value="pending">Pendente</option>
+              </select>
+            </MField></div>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}><MField label="Competência" hint={comp && _fMonthOf(comp) !== period ? <_FinOutOfPeriod comp={comp} period={period}> O item continua pendente em {_fPeriodLabel(period)}.</_FinOutOfPeriod> : null}><input type="date" value={comp} onChange={(e) => setComp(e.target.value)} style={mInput} /></MField></div>
+            <div style={{ flex: 1 }}><MField label="Pagamento"><input type="date" value={paid} onChange={(e) => setPaid(e.target.value)} style={mInput} /></MField></div>
+          </div>
+        </>
+      )}
     </FullSheet>
   );
 }

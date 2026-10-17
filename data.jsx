@@ -695,7 +695,7 @@ const INVENTORY_HISTORY = [
 // Roles: superadmin (vê todos os tenants) · owner/admin/manager (do tenant) ·
 // kitchen/stock/accountant/viewer (operacionais)
 const SYSTEM_USERS = [
-  { email: "danilocaioavelino@gmail.com", password: "Danilo1542@@", name: "Danilo Avelino",   role: "superadmin", tenantId: null,  avatar: "DA" },
+  { email: "danilocaioavelino@gmail.com", name: "Danilo Avelino",   role: "superadmin", tenantId: null,  avatar: "DA" },
   { email: "rafa@cozinhacentral.com.br",  password: "rafa123",      name: "Rafa Medeiros",    role: "owner",      tenantId: "ten-1", avatar: "RM" },
   { email: "stefano@cozinhacentral.com.br",password:"stefano123",   name: "Stefano Bianchi",  role: "manager",    tenantId: "ten-1", avatar: "SB" },
   { email: "marina@cozinhacentral.com.br", password:"marina123",    name: "Marina Costa",     role: "kitchen",    tenantId: "ten-1", avatar: "MC" },

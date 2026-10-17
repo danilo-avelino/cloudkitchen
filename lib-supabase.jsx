@@ -2433,21 +2433,45 @@ async function dbListDreSubcategories(tenantId) {
   return { data: mapped, source: "db", error: null };
 }
 
+// Lançamentos com `column` (competence_date ou payment_date) entre `start` e `end`
+// (YYYY-MM-DD, inclusivos). PostgREST corta a resposta em 1000 linhas (max-rows) sem
+// erro; com a ordem DESC o corte sumia com os lançamentos mais antigos da janela —
+// então pagina via .range() com desempate por id (paginação estável).
+async function _listFinanceEntriesBetween(tenantId, start, end, column = "competence_date") {
+  const PAGE = 1000;
+  const rows = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await _client
+      .from("finance_entries")
+      .select("*, subcategory:dre_subcategories(id, name, category_id)")
+      .eq("tenant_id", tenantId)
+      .gte(column, start)
+      .lte(column, end)
+      .order(column, { ascending: false })
+      .order("id", { ascending: true })
+      .range(offset, offset + PAGE - 1);
+    if (error) return { data: null, source: "mock", error };
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
+  return { data: rows.map(mapFinanceEntryFromDb), source: "db", error: null };
+}
+
 async function dbListFinanceEntries(tenantId, period) {
   if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
   const range = financePeriodRange(period);
   if (!range) return { data: [], source: "db", error: null };
+  return _listFinanceEntriesBetween(tenantId, range.start, range.end);
+}
 
-  const { data, error } = await _client
-    .from("finance_entries")
-    .select("*, subcategory:dre_subcategories(id, name, category_id)")
-    .eq("tenant_id", tenantId)
-    .gte("competence_date", range.start)
-    .lte("competence_date", range.end)
-    .order("competence_date", { ascending: false });
-
-  if (error) return { data: null, source: "mock", error };
-  return { data: (data || []).map(mapFinanceEntryFromDb), source: "db", error: null };
+// Lançamentos PAGOS no período (payment_date), de qualquer competência — visão de caixa
+// da lista de Lançamentos (conferir extrato/fatura do mês). DRE e checklist seguem por
+// competência; sem esta visão, o que foi pago em out. com competência set. "sumia" de out.
+async function dbListFinanceEntriesByPayment(tenantId, period) {
+  if (!isDbOnline() || !_client) return { data: null, source: "mock", error: null };
+  const range = financePeriodRange(period);
+  if (!range) return { data: [], source: "db", error: null };
+  return _listFinanceEntriesBetween(tenantId, range.start, range.end, "payment_date");
 }
 
 // Lançamentos numa faixa de competências [startPeriod .. endPeriod] (YYYY-MM).
@@ -2458,15 +2482,7 @@ async function dbListFinanceEntriesRange(tenantId, startPeriod, endPeriod) {
   const startRange = financePeriodRange(startPeriod);
   const endRange = financePeriodRange(endPeriod);
   if (!startRange || !endRange) return { data: [], source: "db", error: null };
-  const { data, error } = await _client
-    .from("finance_entries")
-    .select("*, subcategory:dre_subcategories(id, name, category_id)")
-    .eq("tenant_id", tenantId)
-    .gte("competence_date", startRange.start)
-    .lte("competence_date", endRange.end)
-    .order("competence_date", { ascending: false });
-  if (error) return { data: null, source: "mock", error };
-  return { data: (data || []).map(mapFinanceEntryFromDb), source: "db", error: null };
+  return _listFinanceEntriesBetween(tenantId, startRange.start, endRange.end);
 }
 
 // Ids de lançamentos já vinculados (conciliação confirmada) — pra não oferecer
@@ -2502,12 +2518,17 @@ async function dbUpdateFinanceEntry(id, patch) {
   if (patch.desc !== undefined) update.description = patch.desc;
   if (patch.value !== undefined) update.value = Number(patch.value);
   if (patch.comp !== undefined) update.competence_date = patch.comp;
-  if (patch.paid !== undefined) update.payment_date = patch.paid;
+  // Data de pagamento apagada no form chega como "" — o banco recusa "" como date
+  // (o insert já gravava null), e a edição falhava.
+  if (patch.paid !== undefined) update.payment_date = patch.paid || null;
   if (patch.status !== undefined) update.status = patch.status;
   // `cat` no front é o subcategory_id — o update precisa mapeá-lo (o insert já fazia),
   // senão trocar a subcategoria não persiste.
   if (patch.cat !== undefined && patch.cat) update.subcategory_id = patch.cat;
   if (patch.counterpartyId !== undefined) update.counterparty_id = patch.counterpartyId || null;
+  // Vincular um lançamento já existente a um item do checklist (preenche o item
+  // sem criar outro lançamento — evita a despesa em dobro na DRE).
+  if (patch.checklistItemId !== undefined) update.checklist_item_id = patch.checklistItemId || null;
   const { data, error } = await _client
     .from("finance_entries")
     .update(update)
@@ -4496,7 +4517,7 @@ Object.assign(window, {
   dbNeighborhoodStats, dbRadiusStats,
   dbDeliveryTimeseries, dbListDeliveryShifts, dbInsertDeliveryShift, dbUpdateDeliveryShift, dbDeleteDeliveryShift,
   dbListTenantsAdmin, dbProvisionTenant, dbUpdateTenantAdmin, dbDeleteTenantAdmin, dbPlatformDiagnostics,
-  dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbListFinanceEntriesRange, dbListReconciledEntryIds, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
+  dbListDreCategories, dbListDreSubcategories, dbListFinanceEntries, dbListFinanceEntriesRange, dbListFinanceEntriesByPayment, dbListReconciledEntryIds, dbInsertFinanceEntry, dbUpdateFinanceEntry, dbDeleteFinanceEntry,
   dbListBankAccounts, dbUpsertBankAccount, dbUpsertBankTransactions, dbListBankTransactions, dbUpdateBankTransactionState,
   dbInsertReconciliationLink, dbDeleteReconciliationLinksForTx, dbDeleteBankTransactions,
   dbListReconciliationMemory, dbUpsertReconciliationMemory,

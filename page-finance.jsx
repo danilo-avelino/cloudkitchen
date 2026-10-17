@@ -22,11 +22,14 @@ const fmtShort = (v) => "R$ " + (v || 0).toLocaleString("pt-BR", { minimumFracti
 // o ÚLTIMO `.` ou `,` é o decimal; o resto são milhares. Substitui o antigo
 // parseFloat(...replace(/\./g, "")) que destruía decimais com ponto
 // (ex.: "68.31" do teclado físico virava 6831). Ver feedback_brl_number_parse.
+// Exceção: só pontos em grupos de 3 dígitos ("4.600", "1.234.567") é milhar BR —
+// antes "4.600" virava R$ 4,60 (Diárias e Folgas de ago/2026 gravada assim).
 const _parseBR = (raw) => {
   if (raw === "" || raw === null || raw === undefined) return 0;
   if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
   let s = String(raw).trim().replace(/\s+/g, "");
   if (!s) return 0;
+  if (/^[1-9]\d{0,2}(\.\d{3})+$/.test(s)) return Number(s.replace(/\./g, ""));
   const decPos = Math.max(s.lastIndexOf(","), s.lastIndexOf("."));
   if (decPos >= 0) {
     s = s.slice(0, decPos).replace(/[.,]/g, "") + "." + s.slice(decPos + 1);
@@ -41,22 +44,68 @@ const fmtDate = (iso) => {
 };
 const monthOf = (iso) => iso ? iso.slice(0, 7) : "";
 
-// Competência: mês corrente + N meses anteriores (rótulo pt-BR). Default da página
-// é sempre o mês atual — sem datas fixas que "travam" no passado.
+// Competência: `ahead` meses à frente + mês corrente + meses anteriores (rótulo pt-BR).
+// Default da página é sempre o mês atual — sem datas fixas que "travam" no passado.
+// A janela era só 12 meses para trás: lançamento com competência mais antiga (ex.:
+// parcela 12/12 datada pela compra) ou futura ficava sem mês selecionável — sumia.
 const _MONTHS_PT = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
 const currentPeriod = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
-function buildPeriodOptions(count = 12) {
+function buildPeriodOptions(count = 24, ahead = 3) {
   const now = new Date();
   const opts = [];
-  for (let i = 0; i < count; i++) {
+  for (let i = -ahead; i < count; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
     opts.push({ value: ym, label: `${_MONTHS_PT[d.getMonth()]} / ${d.getFullYear()}` });
   }
   return opts;
+}
+const periodLabel = (ym) => {
+  const [y, m] = String(ym || "").split("-").map(Number);
+  return y && m ? `${_MONTHS_PT[m - 1]}/${y}` : String(ym || "");
+};
+
+// Data "YYYY-MM-DD" dentro do período, com o dia limitado ao último dia do mês
+// (vencimento dia 31 em setembro → 30/09; antes saía "2026-09-31", que o banco recusa).
+function dateInPeriod(period, day) {
+  const [y, m] = String(period || "").split("-").map(Number);
+  const last = new Date(y, m, 0).getDate();
+  const d = Math.min(Math.max(1, Number(day) || 15), last);
+  return `${period}-${String(d).padStart(2, "0")}`;
+}
+
+// Data padrão de um lançamento novo: hoje se o mês exibido é o corrente; senão dia 15
+// do mês exibido (igual ao mobile). Era sempre "hoje": quem lançava despesas de um
+// mês passado gravava no mês atual e o lançamento não aparecia na lista daquele mês.
+function defaultDateInPeriod(period) {
+  const t = new Date();
+  const today = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+  return !period || monthOf(today) === period ? today : dateInPeriod(period, 15);
+}
+
+// Toast pós-salvar. Quando a competência cai fora do mês exibido, o lançamento sai
+// da lista atual — sem aviso parecia perdido e era relançado (duplicado na DRE).
+function toastSavedEntry(msg, comp, period) {
+  const ym = monthOf(comp || "");
+  if (ym && period && ym !== period) {
+    window.showToast?.(`${msg} com competência ${periodLabel(ym)} — entra na DRE e na lista desse mês, não de ${periodLabel(period)}`, { tone: "warn", ttl: 7000 });
+  } else {
+    window.showToast?.(msg, { tone: "ok" });
+  }
+}
+
+// Aviso inline (formulários) quando a data de competência sai do mês exibido.
+function OutOfPeriodHint({ comp, period, children }) {
+  const ym = monthOf(comp || "");
+  if (!ym || !period || ym === period) return null;
+  return (
+    <span style={{ color: "var(--warn)" }}>
+      Vai para a DRE de <strong>{periodLabel(ym)}</strong> — não aparece em {periodLabel(period)}.{children}
+    </span>
+  );
 }
 
 // Urgência de um item do checklist em relação ao vencimento no período selecionado.
@@ -89,7 +138,7 @@ const DRE_SUB_COLORS = [
 function Finance() {
   const [tab, setTab] = useState("entries");
   const [period, setPeriod] = useState(() => currentPeriod());
-  const periodOptions = useMemo(() => buildPeriodOptions(12), []);
+  const periodOptions = useMemo(() => buildPeriodOptions(), []);
   const [entries, setEntries] = useState(MOCK.ENTRIES);
   const [categories,    setCategories]    = useState(MOCK.DRE_CATEGORIES);
   const [subcategories, setSubcategories] = useState(MOCK.DRE_SUBCATEGORIES);
@@ -143,6 +192,31 @@ function Finance() {
     entries.filter((e) => monthOf(e.comp) === period),
   [entries, period]);
 
+  // A lista de Lançamentos pode ser vista pelo mês de PAGAMENTO (conferir extrato/fatura):
+  // o que foi pago em out. com competência set. não aparece na visão por competência e
+  // parecia "sumido". DRE e checklist seguem sempre por competência (`inPeriod`).
+  const [dateBasis, setDateBasis] = useState("comp");
+  const [paidEntries, setPaidEntries] = useState([]);
+  useEffect(() => {
+    if (dateBasis !== "paid" || !tenantId) return;
+    let cancelled = false;
+    dbListFinanceEntriesByPayment?.(tenantId, period).then((r) => { if (!cancelled && r?.data) setPaidEntries(r.data); });
+    return () => { cancelled = true; };
+  }, [dateBasis, tenantId, period]);
+  const listEntries = dateBasis === "paid"
+    ? (tenantId ? paidEntries : entries).filter((e) => monthOf(e.paid || "") === period)
+    : inPeriod;
+
+  // Recarrega o mês (e a visão por pagamento, se ativa) depois de gravar.
+  const refreshEntries = async () => {
+    const [byComp, byPaid] = await Promise.all([
+      dbListFinanceEntries?.(tenantId, period),
+      dateBasis === "paid" ? dbListFinanceEntriesByPayment?.(tenantId, period) : null,
+    ]);
+    if (byComp?.data) setEntries(byComp.data);
+    if (byPaid?.data) setPaidEntries(byPaid.data);
+  };
+
   // Status do checklist é DERIVADO por competência: cada item-template é
   // re-avaliado com base nos lançamentos do período (linkados via checklistItemId).
   // Assim "Taxas iFood" preenchida em Maio volta a aparecer "Pendente" em Junho.
@@ -172,10 +246,9 @@ function Finance() {
         window.showToast?.(`Erro ao salvar lançamento: ${error.message}`, { tone: "crit", ttl: 4500 });
         return null;
       }
-      const refreshed = await dbListFinanceEntries?.(tenantId, period);
-      if (refreshed?.data) setEntries(refreshed.data);
+      await refreshEntries();
       setDraftOpen(false);
-      window.showToast?.("Lançamento salvo", { tone: "ok" });
+      toastSavedEntry("Lançamento salvo", e.comp, period);
       return data?.id || null;
     }
     // Fallback local
@@ -193,10 +266,9 @@ function Finance() {
         window.showToast?.(`Erro ao atualizar: ${error.message}`, { tone: "crit", ttl: 4500 });
         return false;
       }
-      const refreshed = await dbListFinanceEntries?.(tenantId, period);
-      if (refreshed?.data) setEntries(refreshed.data);
+      await refreshEntries();
       setEditingEntry(null);
-      window.showToast?.("Lançamento atualizado", { tone: "ok" });
+      toastSavedEntry("Lançamento atualizado", patch.comp, period);
       return true;
     }
     setEntries(entries.map((x) => x.id === id ? { ...x, ...patch } : x));
@@ -212,8 +284,7 @@ function Finance() {
         window.showToast?.(`Erro ao excluir: ${error.message}`, { tone: "crit", ttl: 4500 });
         return false;
       }
-      const refreshed = await dbListFinanceEntries?.(tenantId, period);
-      if (refreshed?.data) setEntries(refreshed.data);
+      await refreshEntries();
       setConfirmDeleteEntry(null);
       setEditingEntry(null);
       window.showToast?.("Lançamento excluído", { tone: "warn" });
@@ -237,15 +308,38 @@ function Finance() {
         window.showToast?.(`Erro ao salvar: ${error.message}`, { tone: "crit", ttl: 4500 });
         return;
       }
-      const refreshed = await dbListFinanceEntries?.(tenantId, period);
-      if (refreshed?.data) setEntries(refreshed.data);
+      await refreshEntries();
       // Status do item é derivado por checklistForPeriod — não setamos manualmente.
       setFillItem(null);
-      window.showToast?.("Lançamento salvo", { tone: "ok" });
+      toastSavedEntry("Lançamento salvo", comp, period);
       return;
     }
     const id = "LAN-" + (1100 + entries.length);
     setEntries([{ id, ...draft, checklistItemId: item.id }, ...entries]);
+    setFillItem(null);
+  };
+
+  // Preenche o item vinculando lançamentos que JÁ existem no mês (mesma subcategoria),
+  // sem criar outra despesa. "Preencher" só sabia criar lançamento novo: quem já tinha
+  // lançado a conta (importação, Novo lançamento, item excluído e recriado) duplicava
+  // a despesa na DRE ou marcava o item com R$ 0,01.
+  const linkChecklistItem = async ({ item, entryIds }) => {
+    if (dbStatus.isOnline && tenantId && typeof dbUpdateFinanceEntry === "function") {
+      let failed = null;
+      for (const id of entryIds) {
+        const { error } = await dbUpdateFinanceEntry(id, { checklistItemId: item.id });
+        if (error) { failed = error; break; }
+      }
+      await refreshEntries();
+      if (failed) {
+        window.showToast?.(`Erro ao vincular: ${failed.message}`, { tone: "crit", ttl: 4500 });
+        return;
+      }
+      setFillItem(null);
+      window.showToast?.(`${item.label} preenchido com ${entryIds.length} lançamento(s) existente(s)`, { tone: "ok" });
+      return;
+    }
+    setEntries(entries.map((x) => entryIds.includes(x.id) ? { ...x, checklistItemId: item.id } : x));
     setFillItem(null);
   };
 
@@ -269,7 +363,7 @@ function Finance() {
       </div>
 
       <div style={{ flex: 1, overflow: "auto" }}>
-        {tab === "entries"   && <EntriesView entries={inPeriod} subcategories={subcategories} categories={categories} onEdit={setEditingEntry} onDelete={setConfirmDeleteEntry} />}
+        {tab === "entries"   && <EntriesView entries={listEntries} subcategories={subcategories} categories={categories} onEdit={setEditingEntry} onDelete={setConfirmDeleteEntry} dateBasis={dateBasis} onDateBasisChange={setDateBasis} />}
         {tab === "checklist" && <ChecklistView checklist={checklistForPeriod} subcategories={subcategories} onFill={setFillItem} onEdit={setEditingChecklistItem} onDelete={setConfirmDeleteChecklist} period={period} />}
         {tab === "reconcile" && window.Conciliacao && <window.Conciliacao period={period} />}
       </div>
@@ -304,7 +398,11 @@ function Finance() {
           onConfirm={() => deleteEntry(confirmDeleteEntry.id)}
         />
       )}
-      {fillItem   && <FillDraft   item={fillItem} categories={categories} subcategories={subcategories} period={period} onClose={() => setFillItem(null)} onSave={fillChecklistItem} />}
+      {fillItem   && (
+        <FillDraft item={fillItem} categories={categories} subcategories={subcategories} period={period}
+                   candidates={inPeriod.filter((e) => !e.checklistItemId && !e.auto && e.cat === fillItem.cat)}
+                   onClose={() => setFillItem(null)} onSave={fillChecklistItem} onLink={linkChecklistItem} />
+      )}
       {addingChecklist && (
         <ChecklistItemDraft
           categories={categories}
@@ -563,8 +661,9 @@ function FinanceTabs({ tab, setTab, checklist, period }) {
 }
 
 // ---------- Lançamentos ----------
-function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
+function EntriesView({ entries, subcategories, categories, onEdit, onDelete, dateBasis = "comp", onDateBasisChange }) {
   const [search, setSearch] = useState("");
+  const dateKey = dateBasis === "paid" ? "paid" : "comp";
   // Filtra despesas (não-receita) e remove auto-feeds (que são exibidos apenas na DRE)
   const expenseOnly = entries.filter((e) => {
     const sub = findSubcategory(subcategories, e.cat);
@@ -574,7 +673,7 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
     if (e.auto || sub.autofeed) return false;
     return true;
   });
-  const sorted = [...expenseOnly].sort((a, b) => b.comp.localeCompare(a.comp));
+  const sorted = [...expenseOnly].sort((a, b) => (b[dateKey] || "").localeCompare(a[dateKey] || ""));
   const total = sorted.reduce((s, e) => s + e.value, 0);
   // Busca tolerante por descrição, subcategoria ou categoria DRE (aceita typos).
   // Os indicadores acima permanecem como visão do mês; só as linhas filtram.
@@ -596,14 +695,31 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
         <span style={{ flex: 1 }} />
         <SummaryStat label="Total despesas" value={fmt(total)} tone="crit" />
       </div>
-      <div style={{ padding: "12px 28px", borderBottom: "1px solid var(--line)" }}>
-        <div style={{ position: "relative", maxWidth: 340 }}>
+      <div style={{ padding: "12px 28px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: "1 1 260px", maxWidth: 340 }}>
           <I.Search size={12} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--fg-3)", pointerEvents: "none" }} />
           <input className="input" value={search} onChange={(e) => setSearch(e.target.value)}
                  placeholder="Buscar por descrição, subcategoria ou categoria…"
                  style={{ width: "100%", paddingLeft: 28, fontSize: 12 }} />
         </div>
+        <span style={{ flex: 1 }} />
+        {onDateBasisChange && (
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+               title="Competência = mês da DRE. Pagamento = mês em que saiu do caixa (bate com extrato/fatura).">
+            <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>Mês por</span>
+            {[["comp", "Competência"], ["paid", "Pagamento"]].map(([id, label]) => (
+              <button key={id} type="button" className="btn" data-size="sm"
+                      data-variant={dateBasis === id ? "primary" : undefined}
+                      onClick={() => onDateBasisChange(id)}>{label}</button>
+            ))}
+          </div>
+        )}
       </div>
+      {dateBasis === "paid" && (
+        <div style={{ padding: "8px 28px", borderBottom: "1px solid var(--line)", fontSize: 11.5, color: "var(--fg-2)" }}>
+          Mostrando o que foi <strong style={{ color: "var(--fg-1)" }}>pago</strong> neste mês, de qualquer competência. A DRE e o checklist continuam pela data de competência.
+        </div>
+      )}
       <table className="table">
         <thead>
           <tr>
@@ -620,7 +736,7 @@ function EntriesView({ entries, subcategories, categories, onEdit, onDelete }) {
         <tbody>
           {sorted.length === 0 && (
             <tr><td colSpan="8" style={{ padding: "32px", textAlign: "center", color: "var(--fg-3)", fontSize: 12 }}>
-              Sem lançamentos de despesa neste período. Receitas são consolidadas em <span style={{ color: "var(--accent-bright)" }}>Faturamento</span>.
+              {dateBasis === "paid" ? "Nenhuma despesa paga neste mês." : "Sem lançamentos de despesa neste período."} Receitas são consolidadas em <span style={{ color: "var(--accent-bright)" }}>Faturamento</span>.
             </td></tr>
           )}
           {sorted.length > 0 && visible.length === 0 && (
@@ -960,13 +1076,12 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
   const initialValueStr = initial?.value != null
     ? Number(initial.value).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : "";
-  const today = new Date();
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const defaultDate = defaultDateInPeriod(period);
   const [cat, setCat] = useState(initial?.cat || defaultCat);
   const [desc, setDesc] = useState(initial?.desc || "");
   const [value, setValue] = useState(initialValueStr);
-  const [comp, setComp] = useState(initial?.comp || todayStr);
-  const [paid, setPaid] = useState(initial?.paid || todayStr);
+  const [comp, setComp] = useState(initial?.comp || defaultDate);
+  const [paid, setPaid] = useState(initial?.paid || defaultDate);
   const [status, setStatus] = useState(initial?.status || "paid");
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1080,7 +1195,10 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
             <option value="pending">Pendente</option>
           </select>
         </FormField>
-        <FormField label="Data de competência" hint={show("comp") ? "Obrigatório" : "Mês contábil — usado na DRE"}>
+        <FormField label="Data de competência"
+                   hint={show("comp") ? "Obrigatório"
+                     : comp && monthOf(comp) !== period ? <OutOfPeriodHint comp={comp} period={period} />
+                     : "Mês contábil — usado na DRE"}>
           <input className="input mono" type="date" value={comp} onChange={(e) => setComp(e.target.value)}
                  style={show("comp") ? errBorder : null} />
         </FormField>
@@ -1092,28 +1210,40 @@ function EntryDraft({ categories, subcategories, onClose, onSave, onDelete, peri
   );
 }
 
-function FillDraft({ item, categories, subcategories, period, onClose, onSave }) {
+// `candidates`: lançamentos do mês na mesma subcategoria e sem vínculo com o checklist
+// — permitem preencher o item vinculando o que já foi lançado (modo "link").
+function FillDraft({ item, categories, subcategories, period, candidates = [], onClose, onSave, onLink }) {
   const DreStat = window.DreStat;
   const sub = findSubcategory(subcategories, item.cat);
   const parent = sub ? findCategory(categories, sub.category) : null;
   const expectedStr = (item.expected || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const [value, setValue] = useState(expectedStr);
-  const dueDay = item.due ? String(item.due).padStart(2, "0") : "15";
-  const [comp, setComp] = useState(`${period}-${dueDay}`);
-  const [paid, setPaid] = useState(`${period}-${dueDay}`);
+  const dueDate = dateInPeriod(period, item.due || 15);
+  const [comp, setComp] = useState(dueDate);
+  const [paid, setPaid] = useState(dueDate);
   const [status, setStatus] = useState("paid");
-  // Guard contra duplo clique — onSave (fillChecklistItem) é async e insere lançamento.
+  const [mode, setMode] = useState("new"); // "new" cria lançamento · "link" vincula existentes
+  const [linkIds, setLinkIds] = useState([]);
+  // Guard contra duplo clique — onSave/onLink são async e gravam no banco.
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
+
+  const linkedTotal = candidates.filter((e) => linkIds.includes(e.id)).reduce((s, e) => s + (Number(e.value) || 0), 0);
+  const toggleLink = (id) => setLinkIds((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
 
   const save = async () => {
     if (savingRef.current) return;
     const v = _parseBR(value);
-    if (!v) return;
+    // Antes o clique com valor vazio/zero não fazia nada, sem aviso.
+    if (mode === "link" ? linkIds.length === 0 : !v) {
+      window.showToast?.(mode === "link" ? "Selecione ao menos um lançamento" : "Informe o valor real (maior que zero)", { tone: "warn" });
+      return;
+    }
     savingRef.current = true;
     setSaving(true);
     try {
-      await onSave({ item, value: v, comp, paid, status });
+      if (mode === "link") await onLink({ item, entryIds: linkIds });
+      else await onSave({ item, value: v, comp, paid, status });
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -1127,7 +1257,10 @@ function FillDraft({ item, categories, subcategories, period, onClose, onSave })
       onClose={onClose}
       footer={<>
         <button className="btn" data-size="sm" onClick={onClose} disabled={saving}>Cancelar</button>
-        <button className="btn" data-variant="primary" data-size="sm" onClick={save} disabled={saving}>{saving ? "Salvando…" : "Confirmar e adicionar à DRE"}</button>
+        <button className="btn" data-variant="primary" data-size="sm" onClick={save} disabled={saving}>
+          {saving ? (mode === "link" ? "Vinculando…" : "Salvando…")
+            : mode === "link" ? "Vincular e marcar preenchido" : "Confirmar e adicionar à DRE"}
+        </button>
       </>}
     >
       <div style={{ background: "var(--bg-2)", border: "1px solid var(--line)", padding: 14, borderRadius: 4, marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
@@ -1135,24 +1268,68 @@ function FillDraft({ item, categories, subcategories, period, onClose, onSave })
         <DreStat label="Recorrência" value={({ monthly: "Mensal", biweekly: "Quinzenal", weekly: "Semanal", variable: "Variável" })[item.recurrence]} />
         <DreStat label="Fonte" value={item.source} />
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-        <FormField label="Valor real (R$)" hint={item.formula ? `Cálculo: ${item.formula}` : "Você pode ajustar para o valor da NF/extrato"}>
-          <input className="input mono" autoFocus value={value} onChange={(e) => setValue(e.target.value)} />
-        </FormField>
-        <FormField label="Status">
-          <select className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="paid">Pago</option>
-            <option value="scheduled">Agendado</option>
-            <option value="pending">Pendente</option>
-          </select>
-        </FormField>
-        <FormField label="Data de competência" hint="Mês contábil — usado na DRE">
-          <input className="input mono" type="date" value={comp} onChange={(e) => setComp(e.target.value)} />
-        </FormField>
-        <FormField label="Data de pagamento">
-          <input className="input mono" type="date" value={paid} onChange={(e) => setPaid(e.target.value)} />
-        </FormField>
-      </div>
+      {candidates.length > 0 && (
+        <>
+          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+            {[["new", "Criar lançamento"], ["link", `Vincular existente · ${candidates.length}`]].map(([id, label]) => (
+              <button key={id} type="button" className="btn" data-size="sm"
+                      data-variant={mode === id ? "primary" : undefined}
+                      onClick={() => setMode(id)} disabled={saving}>{label}</button>
+            ))}
+          </div>
+          {mode === "new" && (
+            <div style={{ fontSize: 11.5, color: "var(--warn)", marginBottom: 14 }}>
+              Há {candidates.length} lançamento(s) de {sub?.name || "esta subcategoria"} neste mês sem vínculo com o checklist.
+              Se esta conta já foi lançada, use “Vincular existente” para não duplicar a despesa.
+            </div>
+          )}
+        </>
+      )}
+      {mode === "link" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {candidates.map((e) => {
+            const on = linkIds.includes(e.id);
+            return (
+              <label key={e.id} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 4, cursor: "pointer",
+                border: `1px solid ${on ? "var(--accent-line)" : "var(--line)"}`,
+                background: on ? "var(--accent-soft)" : "var(--bg-2)",
+              }}>
+                <input type="checkbox" checked={on} onChange={() => toggleLink(e.id)} disabled={saving} />
+                <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "var(--fg-0)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.desc}</span>
+                <span className="mono" style={{ fontSize: 11, color: "var(--fg-2)" }}>{fmtDate(e.comp)}</span>
+                <span className="mono" style={{ fontSize: 12, color: "var(--fg-0)", minWidth: 96, textAlign: "right" }}>{fmt(e.value)}</span>
+              </label>
+            );
+          })}
+          <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 4 }}>
+            Selecionado: <span className="mono" style={{ color: "var(--fg-1)" }}>{fmt(linkedTotal)}</span>
+            {item.expected > 0 && <> · esperado {fmt(item.expected)}</>}
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <FormField label="Valor real (R$)" hint={item.formula ? `Cálculo: ${item.formula}` : "Você pode ajustar para o valor da NF/extrato"}>
+            <input className="input mono" autoFocus value={value} onChange={(e) => setValue(e.target.value)} />
+          </FormField>
+          <FormField label="Status">
+            <select className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="paid">Pago</option>
+              <option value="scheduled">Agendado</option>
+              <option value="pending">Pendente</option>
+            </select>
+          </FormField>
+          <FormField label="Data de competência"
+                     hint={comp && monthOf(comp) !== period
+                       ? <OutOfPeriodHint comp={comp} period={period}> O item continua pendente em {periodLabel(period)}.</OutOfPeriodHint>
+                       : "Mês contábil — usado na DRE"}>
+            <input className="input mono" type="date" value={comp} onChange={(e) => setComp(e.target.value)} />
+          </FormField>
+          <FormField label="Data de pagamento">
+            <input className="input mono" type="date" value={paid} onChange={(e) => setPaid(e.target.value)} />
+          </FormField>
+        </div>
+      )}
     </ModalShell>
   );
 }
@@ -1170,6 +1347,7 @@ window.fmtDate          = fmtDate;
 window.monthOf          = monthOf;
 window.currentPeriod      = currentPeriod;
 window.buildPeriodOptions = buildPeriodOptions;
+window.toastSavedEntry    = toastSavedEntry;
 window.findCategory     = findCategory;
 window.findSubcategory  = findSubcategory;
 window.subsByCategory   = subsByCategory;
