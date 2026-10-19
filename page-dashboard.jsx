@@ -1391,9 +1391,10 @@ function RankingCard({ cmvDaily = [], movements = [], sharedSplits = {}, dbOnlin
   );
 }
 
-// ============= MonthlyConsumptionCard · consumo do mês até hoje vs mesmo período do mês anterior =============
-// Ex.: dia 10 → 01–10 deste mês vs 01–10 do mês anterior (até o mesmo horário). Também traz
-// a média mensal dos 3 meses fechados anteriores e a projeção do mês no ritmo atual.
+// ============= MonthlyConsumptionCard · consumo do mês até hoje vs média diária dos 3 meses =============
+// Ex.: dia 10 → 01–10 deste mês vs (média diária dos 3 meses fechados com dados × 10 dias).
+// Projeção = realizado + média diária × dias restantes (não extrapola o ritmo do mês, que
+// no início é um punhado de requisições).
 // Carrega os próprios dados (baixas 'out' dos últimos ~4 meses) p/ servir desktop e mobile.
 const _MC_MONTHS = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
 const _mcBRL = (v) => `R$ ${(Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -1421,14 +1422,25 @@ function _mcWindows() {
   const now = new Date();
   const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
   const curStart = new Date(y, m, 1);
-  const prevStart = new Date(y, m - 1, 1);
-  const prevDays = new Date(y, m, 0).getDate();
-  // Mesmo dia (limitado ao tamanho do mês anterior) e mesmo horário de agora.
-  const prevEnd = new Date(y, m - 1, Math.min(d, prevDays), now.getHours(), now.getMinutes(), now.getSeconds(), 999);
   const histStart = new Date(y, m - 3, 1); // 3 meses fechados: m-3, m-2, m-1
   const daysInMonth = new Date(y, m + 1, 0).getDate();
   const elapsedDays = (now - curStart) / 86400000;
-  return { now, d, m, curStart, prevStart, prevEnd, histStart, daysInMonth, elapsedDays };
+  return { now, d, y, m, curStart, histStart, daysInMonth, elapsedDays };
+}
+
+// Dias com dados válidos nos 3 meses fechados: só meses com alguma baixa entram; o mais
+// antigo deles conta a partir da 1ª baixa (sistema que começou no meio do mês não dilui a média).
+function _mcHistDays(win, monthFirstMs) {
+  let days = 0, first = true;
+  for (let k = 3; k >= 1; k--) {
+    const ms = new Date(win.y, win.m - k, 1);
+    const firstMs = monthFirstMs[`${ms.getFullYear()}-${ms.getMonth()}`];
+    if (firstMs == null) continue;
+    const dim = new Date(ms.getFullYear(), ms.getMonth() + 1, 0).getDate();
+    days += first ? dim - new Date(firstMs).getDate() + 1 : dim;
+    first = false;
+  }
+  return days;
 }
 
 function MonthlyConsumptionCard({ compact = false }) {
@@ -1468,45 +1480,60 @@ function MonthlyConsumptionCard({ compact = false }) {
 
   const data = useMemo(() => {
     if (!win) return null;
-    const curStartMs = win.curStart.getTime(), prevStartMs = win.prevStart.getTime(), prevEndMs = win.prevEnd.getTime();
+    const curStartMs = win.curStart.getTime();
     const items = {};
-    const tot = { cur: 0, prev: 0, hist: 0 };
+    const tot = { cur: 0, hist: 0 };
+    const monthFirstMs = {}; // { "YYYY-M": 1ª baixa do mês } — define os meses com dados
     for (const mv of rows) {
       const t = new Date(mv.at).getTime();
       const it = items[mv.itemId] || (items[mv.itemId] = {
         id: mv.itemId, name: mv.name, unit: mv.unit,
-        curQty: 0, curCost: 0, prevQty: 0, prevCost: 0, histQty: 0, histCost: 0,
+        curQty: 0, curCost: 0, histQty: 0, histCost: 0,
       });
       if (t >= curStartMs) {
         it.curQty += mv.qty; it.curCost += mv.cost; tot.cur += mv.cost;
       } else {
         // Antes do mês corrente = histórico dos 3 meses fechados
         it.histQty += mv.qty; it.histCost += mv.cost; tot.hist += mv.cost;
-        if (t >= prevStartMs && t <= prevEndMs) { it.prevQty += mv.qty; it.prevCost += mv.cost; tot.prev += mv.cost; }
+        const dt = new Date(t), mk = `${dt.getFullYear()}-${dt.getMonth()}`;
+        if (monthFirstMs[mk] == null || t < monthFirstMs[mk]) monthFirstMs[mk] = t;
       }
     }
-    const pace = win.elapsedDays > 0 ? win.daysInMonth / win.elapsedDays : 1;
+    // Base de comparação = média diária × dias do mês até hoje (o dia de hoje conta inteiro:
+    // as requisições são entregues de manhã). Estável desde o dia 1, ao contrário de comparar
+    // com o mesmo trecho do mês anterior, que no início do mês é um punhado de horas.
+    const histDays = _mcHistDays(win, monthFirstMs);
+    const days = win.d, remaining = win.daysInMonth - win.d;
+    const pace = win.elapsedDays > 0 ? win.daysInMonth / win.elapsedDays : 1; // fallback sem histórico
     const list = Object.values(items)
-      .filter((it) => it.curQty > 0 || it.prevQty > 0)
+      .filter((it) => it.curQty > 0 || it.histQty > 0)
       .map((it) => {
+        const dailyQty = histDays > 0 ? it.histQty / histDays : null;
+        const expQty = dailyQty != null ? dailyQty * days : null;
+        const expCost = histDays > 0 ? (it.histCost / histDays) * days : 0;
         const curUnit = it.curQty > 0 ? it.curCost / it.curQty : null;
-        const prevUnit = it.prevQty > 0 ? it.prevCost / it.prevQty : null;
+        const histUnit = it.histQty > 0 ? it.histCost / it.histQty : null;
         return {
           ...it,
-          qtyPct: _mcPct(it.curQty, it.prevQty),
-          isNew: it.prevQty === 0 && it.curQty > 0,
-          pricePct: curUnit != null && prevUnit != null ? _mcPct(curUnit, prevUnit) : null,
+          dailyQty, expQty, expCost,
+          qtyPct: expQty != null ? _mcPct(it.curQty, expQty) : null,
+          isNew: it.histQty === 0 && it.curQty > 0,
+          pricePct: curUnit != null && histUnit != null ? _mcPct(curUnit, histUnit) : null,
           share: tot.cur > 0 ? (it.curCost / tot.cur) * 100 : 0,
-          projQty: it.curQty * pace,
-          avgQty: it.histQty / 3,
+          projQty: dailyQty != null ? it.curQty + dailyQty * remaining : it.curQty * pace,
+          avgQty: dailyQty != null ? dailyQty * win.daysInMonth : null,
         };
       });
+    const daily = histDays > 0 ? tot.hist / histDays : null;
+    const exp = daily != null ? daily * days : null;
+    const proj = daily != null ? tot.cur + daily * remaining : tot.cur * pace;
+    const avgMonth = daily != null ? daily * win.daysInMonth : null;
     return {
-      list,
+      list, histDays,
       total: {
-        cur: tot.cur, prev: tot.prev, pct: _mcPct(tot.cur, tot.prev),
-        proj: tot.cur * pace, avg: tot.hist / 3,
-        projPct: _mcPct(tot.cur * pace, tot.hist / 3),
+        cur: tot.cur, exp, pct: exp != null ? _mcPct(tot.cur, exp) : null,
+        daily, proj, avgMonth,
+        projPct: avgMonth != null ? _mcPct(proj, avgMonth) : null,
       },
       ups: list.filter((x) => x.isNew || (x.qtyPct != null && x.qtyPct >= 0.5)).length,
       downs: list.filter((x) => x.qtyPct != null && x.qtyPct <= -0.5).length,
@@ -1517,7 +1544,7 @@ function MonthlyConsumptionCard({ compact = false }) {
     if (!data) return [];
     const l = [...data.list];
     // Altas/quedas ordenadas pelo impacto em R$ (variação de custo), não só pelo %.
-    const diff = (x) => x.curCost - x.prevCost;
+    const diff = (x) => x.curCost - x.expCost;
     if (sort === "up") return l.filter((x) => diff(x) > 0).sort((a, b) => diff(b) - diff(a));
     if (sort === "down") return l.filter((x) => diff(x) < 0).sort((a, b) => diff(a) - diff(b));
     return l.filter((x) => x.curCost > 0).sort((a, b) => b.curCost - a.curCost);
@@ -1526,7 +1553,9 @@ function MonthlyConsumptionCard({ compact = false }) {
   const visible = showAll ? sorted : sorted.slice(0, LIMIT);
 
   const curLabel = win ? `01–${String(win.d).padStart(2, "0")} de ${_MC_MONTHS[win.m]}` : "";
-  const prevLabel = win ? `01–${String(win.prevEnd.getDate()).padStart(2, "0")} de ${_MC_MONTHS[win.prevStart.getMonth()]}` : "";
+  const baseLabel = data?.histDays > 0
+    ? `vs média diária dos últimos 3 meses (${data.histDays} dias com dados) × ${win.d} ${win.d === 1 ? "dia" : "dias"}`
+    : "sem histórico nos últimos 3 meses p/ comparar";
 
   const segBtn = (id, label) => (
     <button type="button" key={id} onClick={() => { setSort(id); setShowAll(false); }} style={{
@@ -1556,7 +1585,7 @@ function MonthlyConsumptionCard({ compact = false }) {
         <div>
           <h3 className="card-title">Consumo do mês</h3>
           <span className="card-sub" style={{ display: "block", marginTop: 4 }}>
-            {curLabel} vs {prevLabel} · até o mesmo horário
+            {curLabel} {baseLabel}
           </span>
         </div>
         <div style={{ display: "flex", gap: 6, overflowX: "auto", maxWidth: "100%" }}>
@@ -1578,13 +1607,17 @@ function MonthlyConsumptionCard({ compact = false }) {
             padding: compact ? "12px 14px" : "14px 16px", borderBottom: "1px solid var(--line-soft)",
           }}>
             {stat("Consumido no mês", _mcBRL(data.total.cur),
-              <><_McDelta pct={data.total.pct} size={11} /><span>vs {_mcBRL(data.total.prev)}</span></>)}
+              data.total.exp != null
+                ? <><_McDelta pct={data.total.pct} size={11} /><span>vs {_mcBRL(data.total.exp)} esperado</span></>
+                : <span>sem base de comparação</span>)}
             {stat("Projeção do mês", _mcBRL(data.total.proj),
-              <span>ritmo de {win.elapsedDays.toFixed(1).replace(".", ",")} de {win.daysInMonth} dias</span>)}
-            {stat("Média 3 meses", _mcBRL(data.total.avg),
-              <><span>projeção</span><_McDelta pct={data.total.projPct} size={11} /></>)}
+              data.total.daily != null
+                ? <><_McDelta pct={data.total.projPct} size={11} /><span>vs média mensal</span></>
+                : <span>ritmo de {win.elapsedDays.toFixed(1).replace(".", ",")} de {win.daysInMonth} dias</span>)}
+            {stat("Média diária · 3 meses", data.total.daily != null ? `${_mcBRL(data.total.daily)}/dia` : "—",
+              data.total.daily != null && <span>≈ {_mcBRL(data.total.avgMonth)} no mês · {data.histDays} dias c/ dados</span>)}
             {stat("Itens", `${data.ups} ▲ · ${data.downs} ▼`,
-              <span>subiram · caíram em consumo</span>)}
+              <span>acima · abaixo da média</span>)}
           </div>
 
           {/* Cabeçalho da tabela (desktop) */}
@@ -1596,17 +1629,17 @@ function MonthlyConsumptionCard({ compact = false }) {
             }}>
               <span>Item</span>
               <span style={{ textAlign: "right" }}>Este mês</span>
-              <span style={{ textAlign: "right" }}>Mês anterior</span>
+              <span style={{ textAlign: "right" }}>Esperado · média 3m</span>
               <span style={{ textAlign: "right" }}>Consumo</span>
-              <span style={{ textAlign: "right" }}>Projeção · média 3m</span>
+              <span style={{ textAlign: "right" }}>Projeção · média mês</span>
             </div>
           )}
 
           <div style={{ display: "flex", flexDirection: "column" }}>
             {visible.length === 0 ? (
               <div style={{ padding: 24, textAlign: "center", fontSize: 12, color: "var(--fg-3)" }}>
-                {sort === "up" ? "Nenhum item com consumo maior que no mês anterior"
-                  : sort === "down" ? "Nenhum item com consumo menor que no mês anterior"
+                {sort === "up" ? "Nenhum item com consumo acima da média"
+                  : sort === "down" ? "Nenhum item com consumo abaixo da média"
                   : "Sem consumo registrado no mês"}
               </div>
             ) : visible.map((it, i) => {
@@ -1622,10 +1655,10 @@ function MonthlyConsumptionCard({ compact = false }) {
                     </div>
                     <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)", display: "flex", justifyContent: "space-between", gap: 8 }}>
                       <span>{_mcQty(it.curQty, it.unit)} · {_mcBRL(it.curCost)}</span>
-                      <span style={{ color: "var(--fg-3)" }}>ant. {_mcQty(it.prevQty, it.unit)}</span>
+                      <span style={{ color: "var(--fg-3)" }}>esp. {it.expQty != null ? _mcQty(it.expQty, it.unit) : "—"}</span>
                     </div>
                     <div style={{ fontSize: 10.5, color: "var(--fg-3)" }}>
-                      proj. {_mcQty(it.projQty, it.unit)} · média {_mcQty(it.avgQty, it.unit)}{price ? ` · ${price}` : ""}
+                      proj. {_mcQty(it.projQty, it.unit)}{it.dailyQty != null ? ` · ${_mcQty(it.dailyQty, it.unit)}/dia` : ""}{price ? ` · ${price}` : ""}
                     </div>
                   </div>
                 );
@@ -1643,14 +1676,14 @@ function MonthlyConsumptionCard({ compact = false }) {
                     <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-2)" }}>{_mcQty(it.curQty, it.unit)}</div>
                   </div>
                   <div style={{ textAlign: "right" }}>
-                    <div className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>{_mcBRL(it.prevCost)}</div>
-                    <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{_mcQty(it.prevQty, it.unit)}</div>
+                    <div className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>{it.expQty != null ? _mcBRL(it.expCost) : "—"}</div>
+                    <div className="mono" style={{ fontSize: 10.5, color: "var(--fg-3)" }}>{it.expQty != null ? _mcQty(it.expQty, it.unit) : ""}</div>
                   </div>
                   <div style={{ textAlign: "right" }}><_McDelta pct={it.qtyPct} isNew={it.isNew} /></div>
                   <div style={{ textAlign: "right" }}>
                     <div className="mono" style={{ fontSize: 11, color: "var(--fg-1)" }}>{_mcQty(it.projQty, it.unit)}</div>
                     <div style={{ fontSize: 10.5, color: "var(--fg-3)", display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                      <span className="mono">média {_mcQty(it.avgQty, it.unit)}</span>
+                      <span className="mono">média {it.avgQty != null ? _mcQty(it.avgQty, it.unit) : "—"}</span>
                       {projVsAvg != null && <_McDelta pct={projVsAvg} size={10} />}
                     </div>
                   </div>
