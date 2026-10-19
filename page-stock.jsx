@@ -798,6 +798,9 @@ function Stock({ scope }) {
                   <tr key={it.id} onClick={() => setSelected(it)} style={{ cursor: "pointer", background: isSelected ? "var(--bg-hover)" : null }}>
                     <td className="row-strong">
                       {it.name}
+                      {favs.has(it.id) && (
+                        <I.Star size={11} fill="currentColor" style={{ color: "#e3b341", marginLeft: 6, verticalAlign: "-1px" }} />
+                      )}
                       {it.managedByCentralId && (
                         <I.Truck size={11} style={{ color: "var(--info)", marginLeft: 6, verticalAlign: "-1px" }}
                                  title="Item da cadeia de suprimentos · mín/máx geridos pela central" />

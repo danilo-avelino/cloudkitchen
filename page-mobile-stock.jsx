@@ -379,7 +379,7 @@ function MobileStock({ scope = "all" }) {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {filtered.map((it) => (
-                  <StockItemCard key={it.id} it={it} onTap={() => setDetail(it)} />
+                  <StockItemCard key={it.id} it={it} fav={favs.has(it.id)} onTap={() => setDetail(it)} />
                 ))}
               </div>
             )}
@@ -526,14 +526,17 @@ function MobileStock({ scope = "all" }) {
 }
 
 // ===== Card de insumo =====
-function StockItemCard({ it, onTap }) {
+function StockItemCard({ it, fav, onTap }) {
   const tone = it.status === "ok" ? "ok" : it.status === "warn" ? "warn" : "crit";
   const lbl = it.status === "ok" ? "OK" : it.status === "warn" ? "Baixo" : "Ruptura";
   return (
     <MobileCard onClick={onTap}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14.5, color: "var(--fg-0)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.name}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 14.5, color: "var(--fg-0)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.name}</span>
+            {fav && <I.Star size={12} fill="currentColor" style={{ color: "#e3b341" }} />}
+          </div>
           <div style={{ fontSize: 11.5, color: "var(--fg-3)", marginTop: 3, display: "flex", gap: 8, flexWrap: "wrap" }}>
             <span style={{ color: it.qty <= 0 ? "var(--crit)" : "var(--fg-2)", fontWeight: 500 }}>{it.qty} {it.unit}</span>
             <span>· {_brl(it.cost)}</span>
