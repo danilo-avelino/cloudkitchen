@@ -716,6 +716,10 @@ function StockItemDetailSheet({ it, onClose, onEdit, onEntry, isFav = null, onTo
                 Cobertura estimada: <span style={{ fontFamily: "var(--mono)", color: "var(--fg-0)" }}>{coverage} dias</span> com saldo atual.
               </div>
             )}
+            {/* Modo do auto min/max (reusa o componente do desktop) */}
+            {window.AutoMinMaxSelector && (
+              <window.AutoMinMaxSelector item={it} daily={cons.daily} mobile />
+            )}
           </>
         )}
       </div>

@@ -486,9 +486,10 @@ function mapStockItemFromDb(row) {
     supplier:  row.supplier?.name || null,
     supplierId: row.supplier_id,
     autoMin:   row.auto_min_enabled === true,
-    // Modo do auto min/max: 'off' | 'weekly' | 'monthly'. Fallback p/ rows antigas
+    // Modo do auto min/max: 'off' | 'weekly' | 'monthly' | 'custom'. Fallback p/ rows antigas
     // que só têm o boolean: enabled vira 'weekly'.
     autoMinMode: row.auto_min_mode || (row.auto_min_enabled === true ? "weekly" : "off"),
+    autoMinDays: row.auto_min_days ?? null, // dias de cobertura do modo 'custom'
     // Produção/porcionamento: 'raw' (insumo bruto) | 'transformed' (transformado).
     // portionQty/portionUnit = tamanho da porção (ex.: 0.1 kg = porção de 100g).
     itemKind:    row.item_kind || "raw",
@@ -540,13 +541,16 @@ function stockItemCostIn(item, unit) {
   return null;
 }
 
-// Define o modo de auto min/max do item ('off' | 'weekly' | 'monthly').
+// Define o modo de auto min/max do item ('off' | 'weekly' | 'monthly' | 'custom').
+// 'custom' exige `days` (dias de cobertura, 1–365).
 // Mantém auto_min_enabled em sync; o trigger no banco recalcula reorder/max.
-async function dbSetStockItemAutoMinMode(itemId, mode) {
+async function dbSetStockItemAutoMinMode(itemId, mode, days) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
-  const m = ["off", "weekly", "monthly"].includes(mode) ? mode : "off";
+  const m = ["off", "weekly", "monthly", "custom"].includes(mode) ? mode : "off";
+  const update = { auto_min_mode: m, auto_min_enabled: m !== "off" };
+  if (m === "custom") update.auto_min_days = days;
   const { error } = await _client.from("stock_items")
-    .update({ auto_min_mode: m, auto_min_enabled: m !== "off" })
+    .update(update)
     .eq("id", itemId);
   return { error };
 }
@@ -562,7 +566,7 @@ async function dbListStockItems(tenantId) {
     const { data, error } = await _client.from("stock_items")
       .select(`
         id, code, name, unit, unit_cost, current_qty, reorder_point,
-        max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
+        max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode, auto_min_days,
         item_kind, portion_qty, portion_unit, managed_by_central_id,
         auto_direct_kitchen, direct_kitchen_operation_id,
     auto_direct_kitchen, direct_kitchen_operation_id,
@@ -602,7 +606,7 @@ async function dbInsertStockItem(tenantId, item) {
     notes:           item.notes || null,
   }).select(`
     id, code, name, unit, unit_cost, current_qty, reorder_point,
-    max_qty, expiration_date, compose_cmv, notes, status,
+    max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode, auto_min_days,
     item_kind, portion_qty, portion_unit,
     category_id, supplier_id,
     category:stock_categories(id, name, color, alerts_enabled, auto_min_max_enabled, auto_shopping_enabled, inventory_enabled),
@@ -633,7 +637,7 @@ async function dbUpdateStockItem(id, patch) {
   if (patch.notes       !== undefined) update.notes = patch.notes;
   const { data, error } = await _client.from("stock_items").update(update).eq("id", id).select(`
     id, code, name, unit, unit_cost, current_qty, reorder_point,
-    max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode,
+    max_qty, expiration_date, compose_cmv, notes, status, auto_min_enabled, auto_min_mode, auto_min_days,
     item_kind, portion_qty, portion_unit, managed_by_central_id,
     auto_direct_kitchen, direct_kitchen_operation_id,
     category_id, supplier_id,

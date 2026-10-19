@@ -1918,39 +1918,53 @@ function StockFavCard({ it, onClick }) {
   );
 }
 
-function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
-  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
-  const [movements, setMovements] = useState(null);
-  const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
-  const [sharedSplits30, setSharedSplits30] = useState({}); // { [requestId]: [{op, pct}] } das requisições compartilhadas
-  const [transferDests30, setTransferDests30] = useState({}); // { [transferId]: {name, tenantId} } das saídas p/ a rede
-  const [consumption7d, setConsumption7d] = useState(null);
-  const [showHistory, setShowHistory] = useState(false); // modal "Ver histórico" do item
-  // Modo de auto min/max: 'off' | 'weekly' | 'monthly'
+// Seletor do modo de auto min/max: Desligado / Semanal / Mensal / Personalizado.
+// Usado no detalhe do item (desktop) e no bottom sheet do mobile.
+// Fórmulas espelham o trigger compute_auto_min_max no banco. Têm que bater
+// com o que o Postgres grava ao ligar o modo, senão a UI promete um valor e
+// o banco grava outro.
+//   min (semanal/mensal) = ceil(daily * 7)   · 1 semana de buffer
+//   max semanal          = ceil(min * 1.3)   · min + 30% de margem
+//   max mensal           = ceil(daily * 35)  · 5 semanas de estoque
+//   personalizado        = min ceil(daily * N dias) · max ceil(min * 1.3)
+function AutoMinMaxSelector({ item, daily, mobile = false }) {
   const [autoMinMode, setAutoMinMode] = useState(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
+  const [savedDays, setSavedDays] = useState(item.autoMinDays ?? null);
   const [savingAutoMin, setSavingAutoMin] = useState(false);
-  // Item do catálogo de abastecimento de uma central: mín/máx/auto são dela
-  // (o banco recusa a alteração local — aqui só desabilitamos e explicamos).
+  // Personalizado abre um campo de dias; só grava ao clicar em Aplicar.
+  const [editingCustom, setEditingCustom] = useState(false);
+  const [daysDraft, setDaysDraft] = useState(String(item.autoMinDays || 15));
+  // Item do catálogo de abastecimento de uma central: mín/máx/auto são dela.
   const managedByCentral = !!item.managedByCentralId;
 
   useEffect(() => {
     setAutoMinMode(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
-  }, [item.id, item.autoMinMode, item.autoMin]);
+    setSavedDays(item.autoMinDays ?? null);
+    setDaysDraft(String(item.autoMinDays || 15));
+    setEditingCustom(false);
+  }, [item.id, item.autoMinMode, item.autoMin, item.autoMinDays]);
 
-  const changeAutoMinMode = async (next) => {
-    if (next === autoMinMode) return;
+  const changeAutoMinMode = async (next, days) => {
+    if (savingAutoMin) return;
+    if (next === autoMinMode && (next !== "custom" || days === savedDays)) { setEditingCustom(false); return; }
     const prev = autoMinMode;
+    const prevDays = savedDays;
     setAutoMinMode(next);
+    if (next === "custom") setSavedDays(days);
     if (typeof dbSetStockItemAutoMinMode === "function") {
       setSavingAutoMin(true);
       try {
-        const { error } = await dbSetStockItemAutoMinMode(item.id, next);
+        const { error } = await dbSetStockItemAutoMinMode(item.id, next, days);
         if (error) {
           setAutoMinMode(prev);
+          setSavedDays(prevDays);
           window.showToast(`Erro: ${error.message}`, { tone: "crit" });
         } else {
+          setEditingCustom(false);
           const msg = next === "off"
             ? "Auto-cálculo desativado"
+            : next === "custom"
+            ? `Cobertura de ${days} dias ativada · min/max recalculados`
             : `Reposição ${next === "monthly" ? "mensal" : "semanal"} ativada · min/max recalculados`;
           window.showToast(msg, { tone: "ok" });
         }
@@ -1959,6 +1973,108 @@ function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
       }
     }
   };
+
+  const daysN = parseInt(daysDraft, 10);
+  const daysValid = Number.isFinite(daysN) && daysN >= 1 && daysN <= 365;
+  const customDays = editingCustom ? (daysValid ? daysN : null) : savedDays;
+  const hasData = daily > 0;
+  const suggestedMin        = hasData ? Math.ceil(daily * 7) : null;
+  const suggestedMaxWeekly  = suggestedMin != null ? Math.ceil(suggestedMin * 1.3) : null;
+  const suggestedMaxMonthly = hasData ? Math.ceil(daily * 35) : null;
+  const customMin           = hasData && customDays ? Math.ceil(daily * customDays) : null;
+  const customMax           = customMin != null ? Math.ceil(customMin * 1.3) : null;
+  const shownMode = editingCustom ? "custom" : autoMinMode;
+
+  return (
+    <>
+      <div style={{ marginTop: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+          <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+            Cálculo automático de min/máx
+          </span>
+          {savingAutoMin && <span style={{ fontSize: 10, color: "var(--fg-3)" }}>salvando…</span>}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: mobile ? "1fr 1fr" : "repeat(4, 1fr)", gap: 6 }}>
+          {[
+            { mode: "off",     label: "Desligado", min: null,         max: null },
+            { mode: "weekly",  label: "Semanal",   min: suggestedMin, max: suggestedMaxWeekly },
+            { mode: "monthly", label: "Mensal",    min: suggestedMin, max: suggestedMaxMonthly },
+            { mode: "custom",  label: customDays ? `Personalizado · ${customDays}d` : "Personalizado", min: customMin, max: customMax },
+          ].map((opt) => {
+            const on = shownMode === opt.mode;
+            return (
+              <button key={opt.mode} type="button"
+                      disabled={savingAutoMin || managedByCentral}
+                      title={managedByCentral ? "Definido pela central da rede de suprimentos" : undefined}
+                      onClick={() => {
+                        if (opt.mode === "custom") { setEditingCustom(true); return; }
+                        setEditingCustom(false);
+                        changeAutoMinMode(opt.mode);
+                      }}
+                      style={{
+                        display: "flex", flexDirection: "column", gap: 2,
+                        padding: mobile ? "10px 6px" : "8px 6px", borderRadius: 4, textAlign: "center",
+                        background: on ? "var(--ok-soft)" : "var(--bg-2)",
+                        border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
+                        color: on ? "var(--fg-0)" : "var(--fg-2)",
+                        opacity: managedByCentral ? 0.55 : 1,
+                        cursor: managedByCentral ? "not-allowed" : savingAutoMin ? "wait" : "pointer",
+                        transition: "all 120ms ease",
+                      }}>
+                <span style={{ fontSize: mobile ? 12.5 : 11.5, fontWeight: on ? 600 : 400 }}>{opt.label}</span>
+                {opt.mode !== "off" && (
+                  <span className="mono" style={{ fontSize: 9.5, color: on ? "var(--ok)" : "var(--fg-3)" }}>
+                    {opt.min != null ? `${opt.min} / ${opt.max}` : "—"}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {editingCustom && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11.5, color: "var(--fg-2)" }}>Dias de cobertura</span>
+          <input className="input mono" type="number" inputMode="numeric" min="1" max="365" step="1"
+                 value={daysDraft} autoFocus
+                 onChange={(e) => setDaysDraft(e.target.value)}
+                 onKeyDown={(e) => { if (e.key === "Enter" && daysValid) changeAutoMinMode("custom", daysN); }}
+                 style={{ width: 72 }} />
+          <span style={{ flex: 1 }} />
+          <button className="btn" data-variant="ghost" data-size="sm" type="button"
+                  disabled={savingAutoMin} onClick={() => setEditingCustom(false)}>
+            Cancelar
+          </button>
+          <button className="btn" data-variant="primary" data-size="sm" type="button"
+                  disabled={!daysValid || savingAutoMin} onClick={() => changeAutoMinMode("custom", daysN)}>
+            {savingAutoMin ? "Salvando…" : "Aplicar"}
+          </button>
+        </div>
+      )}
+      {shownMode !== "off" && (
+        <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6, lineHeight: 1.4 }}>
+          {shownMode === "monthly"
+            ? "Reposição mensal · mín = consumo de 7 dias · máx = 5 semanas de estoque. Recalculado a cada movimentação."
+            : shownMode === "custom"
+            ? `Cobertura personalizada · mín = consumo de ${customDays || "N"} dias · máx = mín + 30% de margem de segurança. Recalculado a cada movimentação.`
+            : "Reposição semanal · mín = consumo de 7 dias · máx = mín + 30%. Recalculado a cada movimentação."}
+        </div>
+      )}
+    </>
+  );
+}
+
+function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const [movements, setMovements] = useState(null);
+  const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
+  const [sharedSplits30, setSharedSplits30] = useState({}); // { [requestId]: [{op, pct}] } das requisições compartilhadas
+  const [transferDests30, setTransferDests30] = useState({}); // { [transferId]: {name, tenantId} } das saídas p/ a rede
+  const [consumption7d, setConsumption7d] = useState(null);
+  const [showHistory, setShowHistory] = useState(false); // modal "Ver histórico" do item
+  // Item do catálogo de abastecimento de uma central: mín/máx/auto são dela
+  // (o banco recusa a alteração local — aqui só desabilitamos e explicamos).
+  const managedByCentral = !!item.managedByCentralId;
 
   useEffect(() => {
     if (!dbStatus.isOnline || !item.id) { setMovements([]); setMovements30([]); setSharedSplits30({}); setTransferDests30({}); setConsumption7d({ qty: 0, daily: 0, window: 30, hasData: false }); return; }
@@ -2016,16 +2132,6 @@ function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
     })();
     return () => { cancelled = true; };
   }, [dbStatus.isOnline, item.id]);
-
-  // Fórmulas espelham o trigger compute_auto_min_max no banco. Têm que bater
-  // com o que o Postgres grava ao ligar o modo, senão a UI promete um valor e
-  // o banco grava outro.
-  //   min (ambos modos) = ceil(daily * 7)   · 1 semana de buffer
-  //   max semanal        = ceil(min * 1.3)   · min + 30% de margem
-  //   max mensal         = ceil(daily * 35)  · 5 semanas de estoque
-  const suggestedMin        = consumption7d?.hasData ? Math.ceil(consumption7d.daily * 7) : null;
-  const suggestedMaxWeekly  = suggestedMin != null ? Math.ceil(suggestedMin * 1.3) : null;
-  const suggestedMaxMonthly = consumption7d?.hasData ? Math.ceil(consumption7d.daily * 35) : null;
 
   const fmtDate = (iso) => {
     if (!iso) return "—";
@@ -2253,54 +2359,7 @@ function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
               <span>Total: <strong className="mono">{consumption7d.qty.toFixed(2)} {item.unit}</strong></span>
               <span>Média/dia: <strong className="mono">{consumption7d.daily.toFixed(2)} {item.unit}</strong></span>
             </div>
-            {/* Seletor de modo de auto min/max · Off / Semanal / Mensal */}
-            <div style={{ marginTop: 10 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-                <span style={{ fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                  Cálculo automático de min/máx
-                </span>
-                {savingAutoMin && <span style={{ fontSize: 10, color: "var(--fg-3)" }}>salvando…</span>}
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-                {[
-                  { mode: "off",     label: "Desligado", min: null,         max: null },
-                  { mode: "weekly",  label: "Semanal",   min: suggestedMin, max: suggestedMaxWeekly },
-                  { mode: "monthly", label: "Mensal",    min: suggestedMin, max: suggestedMaxMonthly },
-                ].map((opt) => {
-                  const on = autoMinMode === opt.mode;
-                  return (
-                    <button key={opt.mode} type="button"
-                            disabled={savingAutoMin || managedByCentral}
-                            title={managedByCentral ? "Definido pela central da rede de suprimentos" : undefined}
-                            onClick={() => changeAutoMinMode(opt.mode)}
-                            style={{
-                              display: "flex", flexDirection: "column", gap: 2,
-                              padding: "8px 6px", borderRadius: 4, textAlign: "center",
-                              background: on ? "var(--ok-soft)" : "var(--bg-2)",
-                              border: `1px solid ${on ? "var(--ok-line)" : "var(--line)"}`,
-                              color: on ? "var(--fg-0)" : "var(--fg-2)",
-                              opacity: managedByCentral ? 0.55 : 1,
-                              cursor: managedByCentral ? "not-allowed" : savingAutoMin ? "wait" : "pointer",
-                              transition: "all 120ms ease",
-                            }}>
-                      <span style={{ fontSize: 11.5, fontWeight: on ? 600 : 400 }}>{opt.label}</span>
-                      {opt.mode !== "off" && (
-                        <span className="mono" style={{ fontSize: 9.5, color: on ? "var(--ok)" : "var(--fg-3)" }}>
-                          {opt.min != null ? `${opt.min} / ${opt.max}` : "—"}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            {autoMinMode !== "off" && (
-              <div style={{ fontSize: 10.5, color: "var(--fg-3)", marginTop: 6, lineHeight: 1.4 }}>
-                {autoMinMode === "monthly"
-                  ? "Reposição mensal · mín = consumo de 7 dias · máx = 5 semanas de estoque. Recalculado a cada movimentação."
-                  : "Reposição semanal · mín = consumo de 7 dias · máx = mín + 30%. Recalculado a cada movimentação."}
-              </div>
-            )}
+            <AutoMinMaxSelector item={item} daily={consumption7d.daily} />
           </>
         ) : (
           <span style={{ fontSize: 11, color: "var(--fg-3)" }}>
@@ -3558,8 +3617,10 @@ function StockAssistantModal({ items, categories = [], suppliers: initialSupplie
         composeCmv: draft.composeCmv !== false,
       };
       await onSaveItem(current.id, patch);
-      // Persiste flag auto_min (dispara trigger que recalcula min/max no banco)
-      if (typeof dbSetStockItemAutoMin === "function") {
+      // Persiste flag auto_min (dispara trigger que recalcula min/max no banco).
+      // Só quando a chave mudou: regravar "ligado" vira 'weekly' e derrubaria
+      // itens em Mensal/Personalizado.
+      if (typeof dbSetStockItemAutoMin === "function" && itemAutoMin !== (current.autoMin === true)) {
         await dbSetStockItemAutoMin(current.id, itemAutoMin);
       }
       if (idx < itemsToReview.length - 1) {
@@ -4752,5 +4813,6 @@ window.WasteEntryModal = WasteEntryModal;
 window.StockTopValueModal = StockTopValueModal;
 window.StockScaleBar = StockScaleBar; // reusado no detalhe do item mobile
 window.PriceHistory = PriceHistory;   // idem
+window.AutoMinMaxSelector = AutoMinMaxSelector; // idem
 window.StockFavButton = StockFavButton; // idem
 window.StockFavCard = StockFavCard;     // quadros de favoritos no estoque mobile
