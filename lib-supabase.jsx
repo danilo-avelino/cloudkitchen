@@ -739,9 +739,10 @@ async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, sto
   return { data: mapped, source: "db", error: null };
 }
 
-// Histórico de preço de compra de um insumo · entradas vindas de recebimento
-// (ou do recebimento legado direto no pedido) com custo informado, em ordem
-// cronológica. O unit_cost do movimento já está na unidade do estoque.
+// Histórico de preço de compra de um insumo · toda entrada com custo informado,
+// em ordem cronológica. Não filtra por reference_type: o recebimento grava a
+// entrada pelo front sem ele (só notes "receipt:REC-####"). O unit_cost do
+// movimento já está na unidade do estoque.
 async function dbListStockItemPurchases(tenantId, stockItemId, fromIso) {
   if (!isDbOnline() || !_client) return { data: [], error: null };
   const { data, error } = await _client
@@ -750,7 +751,6 @@ async function dbListStockItemPurchases(tenantId, stockItemId, fromIso) {
     .eq("tenant_id", tenantId)
     .eq("stock_item_id", stockItemId)
     .eq("kind", "in")
-    .in("reference_type", ["goods_receipt", "purchase_order"])
     .gt("unit_cost", 0)
     .gte("performed_at", fromIso)
     .order("performed_at", { ascending: true })

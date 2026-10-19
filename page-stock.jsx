@@ -1675,7 +1675,7 @@ function Tabs({ value, onChange, options }) {
   );
 }
 
-// Histórico de preço de compra dos últimos 12 meses (recebimentos com custo).
+// Histórico de preço de compra dos últimos 12 meses (entradas com custo).
 // Reusado no detalhe do item mobile via window.PriceHistory.
 function PriceHistory({ itemId, unit }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
@@ -1709,7 +1709,7 @@ function PriceHistory({ itemId, unit }) {
   const label = { fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" };
 
   if (rows == null) return <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Carregando…</div>;
-  if (rows.length === 0) return <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Sem compras com custo registradas nos últimos 12 meses.</div>;
+  if (rows.length === 0) return <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Sem entradas com custo registradas nos últimos 12 meses.</div>;
 
   const prices = rows.map((r) => r.unitCost);
   const first = prices[0], last = prices[prices.length - 1];
@@ -1804,7 +1804,7 @@ function PriceHistory({ itemId, unit }) {
             <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span className="mono" style={{ color: "var(--fg-3)", fontSize: 10.5, width: 52 }}>{fmtD(r.at)}</span>
               <span style={{ flex: 1, minWidth: 0, color: "var(--fg-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={r.notes || ""}>
-                {(r.notes || "Compra").replace(/^Recebimento\s+/, "")}
+                {(r.notes || "Entrada").replace(/^(Recebimento\s+|receipt:)/, "")}
               </span>
               <span className="mono" style={{ color: "var(--fg-0)" }}>{brl(r.unitCost)}</span>
               <span className="mono" style={{ fontSize: 10.5, width: 56, textAlign: "right", color: d == null || Math.abs(d) < 0.05 ? "var(--fg-3)" : pctColor(d) }}>
