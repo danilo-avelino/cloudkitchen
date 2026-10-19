@@ -736,8 +736,7 @@ function Stock({ scope }) {
         </div>
       )}
 
-      {/* Two-pane */}
-      <div style={{ flex: 1, display: "grid", gridTemplateColumns: selected ? "1fr 380px" : "1fr", overflow: "hidden" }}>
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr", overflow: "hidden" }}>
         <div style={{ overflow: "auto" }}>
           <table className="table" data-density="compact">
             <thead>
@@ -1949,12 +1948,32 @@ function AllocationPanel({ item, onClose }) {
     return "Movimentação";
   };
 
-  return (
-    <div style={{ borderLeft: "1px solid var(--line)", background: "var(--bg-1)", display: "flex", flexDirection: "column", overflow: "auto" }}>
-      <div style={{ padding: "16px 18px 14px", borderBottom: "1px solid var(--line)" }}>
+  // Esc fecha — exceto com o histórico aberto por cima (ele trata o próprio Esc).
+  useEffect(() => {
+    if (showHistory) return;
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, showHistory]);
+
+  // Modal grande no centro da tela; sem fechar por clique no fundo (só X ou Esc).
+  return ReactDOM.createPortal(
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 200,
+      background: "rgba(7,8,10,0.6)",
+      display: "grid", placeItems: "center", padding: 20,
+      animation: "fadeUp 160ms ease both",
+    }}>
+    <div style={{
+      width: 1080, maxWidth: "calc(100vw - 32px)", maxHeight: "92vh",
+      background: "var(--bg-1)", border: "1px solid var(--line-strong)",
+      borderRadius: 6, display: "flex", flexDirection: "column",
+      boxShadow: "0 24px 60px -12px rgba(0,0,0,0.6)",
+    }}>
+      <div style={{ padding: "16px 22px 14px", borderBottom: "1px solid var(--line)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em" }}>{item.id}</span>
-          <button className="btn" data-variant="ghost" data-size="sm" onClick={onClose}><I.X size={13} /></button>
+          <button className="btn" data-variant="ghost" data-size="sm" onClick={onClose} title="Fechar"><I.X size={13} /></button>
         </div>
         <h2 style={{ margin: "8px 0 4px", fontSize: 18, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.015em" }}>{item.name}</h2>
         <div style={{ fontSize: 12, color: "var(--fg-2)" }}>
@@ -1972,6 +1991,8 @@ function AllocationPanel({ item, onClose }) {
         )}
       </div>
 
+      <div style={{ flex: 1, overflow: "auto", display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)" }}>
+      <div style={{ display: "flex", flexDirection: "column" }}>
       <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--line-soft)" }}>
         <div className="h-eyebrow" style={{ marginBottom: 10 }}>Estoque atual</div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
@@ -2122,11 +2143,6 @@ function AllocationPanel({ item, onClose }) {
         })()}
       </div>
 
-      <div style={{ padding: "16px 18px", borderTop: "1px solid var(--line-soft)" }}>
-        <div className="h-eyebrow" style={{ marginBottom: 12 }}>Histórico de preço · 12 meses</div>
-        <PriceHistory itemId={item.id} unit={item.unit} />
-      </div>
-
       <div style={{ padding: "14px 18px", borderTop: "1px solid var(--line-soft)" }}>
         <div className="h-eyebrow" style={{ marginBottom: 8 }}>Consumo recente</div>
         {consumption7d == null ? (
@@ -2193,8 +2209,15 @@ function AllocationPanel({ item, onClose }) {
           </span>
         )}
       </div>
+      </div>
 
-      <div style={{ padding: "16px 18px", borderTop: "1px solid var(--line-soft)", marginTop: "auto" }}>
+      <div style={{ display: "flex", flexDirection: "column", borderLeft: "1px solid var(--line)" }}>
+      <div style={{ padding: "16px 18px" }}>
+        <div className="h-eyebrow" style={{ marginBottom: 12 }}>Histórico de preço · 12 meses</div>
+        <PriceHistory itemId={item.id} unit={item.unit} />
+      </div>
+
+      <div style={{ padding: "16px 18px", borderTop: "1px solid var(--line-soft)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
           <span className="h-eyebrow">Movimentações recentes</span>
           <button className="btn" data-variant="ghost" data-size="sm" onClick={() => setShowHistory(true)}
@@ -2223,11 +2246,15 @@ function AllocationPanel({ item, onClose }) {
           })}
         </div>
       </div>
+      </div>
+      </div>
 
       {showHistory && (
         <ItemHistoryModal item={item} onClose={() => setShowHistory(false)} />
       )}
     </div>
+    </div>,
+    document.body,
   );
 }
 
