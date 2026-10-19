@@ -48,6 +48,9 @@ function MobileStock({ scope = "all" }) {
   const [entryOpen, setEntryOpen] = useState(false);
   const [flowDetail, setFlowDetail] = useState(null); // "in" | "out"
   const [valueModal, setValueModal] = useState(false);
+  // Favoritos do usuário (user_favorite_items) — mesma regra do desktop.
+  const [favs, setFavs] = useState(() => new Set());
+  const [favAvailable, setFavAvailable] = useState(false);
 
   useEffect(() => {
     if (dbStatus.state === "checking") return;
@@ -60,12 +63,14 @@ function MobileStock({ scope = "all" }) {
         const tid = ctx?.tenant?.id;
         setTenantId(tid || null);
         if (!tid) return;
-        const [itemsRes, catsRes, supRes] = await Promise.all([
+        const [itemsRes, catsRes, supRes, favRes] = await Promise.all([
           dbListStockItems(tid),
           dbListStockCategories(tid),
           dbListSuppliers(tid),
+          typeof dbListFavoriteItems === "function" ? dbListFavoriteItems(tid) : { error: true },
         ]);
         if (cancelled) return;
+        if (!favRes.error) { setFavs(new Set(favRes.data || [])); setFavAvailable(true); }
         if (itemsRes.source === "db") { setItems(itemsRes.data || []); setSource("db"); }
         if (catsRes.data) { setDbCategories(catsRes.data); setCategories(catsRes.data.map((c) => c.name).sort()); }
         if (supRes?.data) setSuppliers(supRes.data.map((s) => ({ id: s.id, name: s.name })));
@@ -192,6 +197,20 @@ function MobileStock({ scope = "all" }) {
         return d !== 0 ? d : a.name.localeCompare(b.name, "pt-BR");
       });
   }, [visible, statusFilter, catFilter, search, scope]);
+
+  const favItems = useMemo(() => filtered.filter((i) => favs.has(i.id)), [filtered, favs]);
+
+  const toggleFav = async (id) => {
+    if (!favAvailable || !tenantId) return;
+    const wasFav = favs.has(id);
+    setFavs((cur) => { const n = new Set(cur); wasFav ? n.delete(id) : n.add(id); return n; });
+    const fn = wasFav ? dbRemoveFavoriteItem : dbAddFavoriteItem;
+    const { error } = await fn(tenantId, id);
+    if (error) {
+      setFavs((cur) => { const n = new Set(cur); wasFav ? n.add(id) : n.delete(id); return n; });
+      window.showToast?.(`Erro ao salvar favorito: ${error.message}`, { tone: "crit", ttl: 4000 });
+    }
+  };
 
   const totals = useMemo(() => ({
     all: visible.length,
@@ -340,6 +359,19 @@ function MobileStock({ scope = "all" }) {
           </div>
 
           <MobileScroll style={{ padding: "0 14px 12px" }}>
+            {/* Favoritos · quadros com a barra mín/máx, rolagem horizontal */}
+            {favItems.length > 0 && window.StockFavCard && (
+              <div style={{ marginBottom: 12 }}>
+                <MSectionLabel>★ Favoritos · {favItems.length}</MSectionLabel>
+                <div style={{ display: "flex", gap: 8, overflowX: "auto", marginTop: 8, paddingBottom: 4 }}>
+                  {favItems.map((it) => (
+                    <div key={it.id} style={{ flex: "0 0 230px" }}>
+                      <window.StockFavCard it={it} onClick={() => setDetail(it)} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {filtered.length === 0 ? (
               <div style={{ textAlign: "center", padding: "40px 12px", color: "var(--fg-3)", fontSize: 13 }}>
                 Nenhum insumo encontrado.
@@ -446,6 +478,8 @@ function MobileStock({ scope = "all" }) {
         <StockItemDetailSheet
           it={items.find((x) => x.id === detail.id) || detail}
           onClose={() => setDetail(null)}
+          isFav={favAvailable ? favs.has(detail.id) : null}
+          onToggleFav={() => toggleFav(detail.id)}
           onEdit={() => { setEditing(detail); setDetail(null); }}
           onEntry={() => { setEntryOpen(true); setDetail(null); }}
         />
@@ -607,7 +641,7 @@ function useItemConsumption(itemId) {
   return data;
 }
 
-function StockItemDetailSheet({ it, onClose, onEdit, onEntry }) {
+function StockItemDetailSheet({ it, onClose, onEdit, onEntry, isFav = null, onToggleFav }) {
   const tone = it.status === "ok" ? "ok" : it.status === "warn" ? "warn" : "crit";
   const lbl = it.status === "ok" ? "Em estoque" : it.status === "warn" ? "Baixo" : "Ruptura";
   const cons = useItemConsumption(it.id);
@@ -634,6 +668,8 @@ function StockItemDetailSheet({ it, onClose, onEdit, onEntry }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <MBadge tone={tone}>{lbl}</MBadge>
         <span style={{ fontSize: 20, fontWeight: 600, color: it.qty <= 0 ? "var(--crit)" : "var(--fg-0)" }}>{it.qty} {it.unit}</span>
+        <span style={{ flex: 1 }} />
+        {isFav !== null && window.StockFavButton && <window.StockFavButton isFav={isFav} onToggle={onToggleFav} />}
       </div>
       {/* Barra de escala com marcadores de mín/máx (reusa o componente do desktop) */}
       {it.max && window.StockScaleBar && (

@@ -30,6 +30,10 @@ function Stock({ scope }) {
   const [flowDetail, setFlowDetail] = useState(null); // null | "in" | "out"
   // Drill-down do KPI "Valor em estoque" (mesmo modal do dashboard)
   const [showStockValueModal, setShowStockValueModal] = useState(false);
+  // Favoritos do usuário (user_favorite_items · mesma tabela das requisições mobile).
+  // Fail-soft: sem a tabela, a estrela e os quadros de favoritos não aparecem.
+  const [favs, setFavs] = useState(() => new Set());
+  const [favAvailable, setFavAvailable] = useState(false);
 
   // Carrega tenant + items + categorias do DB quando online
   useEffect(() => {
@@ -45,12 +49,15 @@ function Stock({ scope }) {
         setTenantId(tid || null);
         if (!tid) return;
 
-        const [itemsRes, catsRes, supRes] = await Promise.all([
+        const [itemsRes, catsRes, supRes, favRes] = await Promise.all([
           dbListStockItems(tid),
           dbListStockCategories(tid),
           dbListSuppliers(tid),
+          typeof dbListFavoriteItems === "function" ? dbListFavoriteItems(tid) : { error: true },
         ]);
         if (cancelled) return;
+
+        if (!favRes.error) { setFavs(new Set(favRes.data || [])); setFavAvailable(true); }
 
         if (itemsRes.source === "db") {
           // Mesmo que array vazio, exibe dados reais do DB (não MOCK)
@@ -349,6 +356,22 @@ function Stock({ scope }) {
         return a.name.localeCompare(b.name, "pt-BR");
       });
   }, [visibleItems, hiddenItems, filter, cats, search, scope]);
+
+  // Favoritos sobem pra quadros no topo da lista — só os que passam nos filtros.
+  const favItems = useMemo(() => filtered.filter((i) => favs.has(i.id)), [filtered, favs]);
+
+  // Update otimista com rollback (mesmo padrão das requisições mobile).
+  const toggleFav = async (id) => {
+    if (!favAvailable || !tenantId) return;
+    const wasFav = favs.has(id);
+    setFavs((cur) => { const n = new Set(cur); wasFav ? n.delete(id) : n.add(id); return n; });
+    const fn = wasFav ? dbRemoveFavoriteItem : dbAddFavoriteItem;
+    const { error } = await fn(tenantId, id);
+    if (error) {
+      setFavs((cur) => { const n = new Set(cur); wasFav ? n.add(id) : n.delete(id); return n; });
+      window.showToast(`Erro ao salvar favorito: ${error.message}`, { tone: "crit", ttl: 4000 });
+    }
+  };
 
   const totals = {
     ok:   visibleItems.filter((i) => i.status === "ok").length,
@@ -738,6 +761,19 @@ function Stock({ scope }) {
 
       <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr", overflow: "hidden" }}>
         <div style={{ overflow: "auto" }}>
+          {favItems.length > 0 && (
+            <div style={{ padding: "14px 28px 16px", borderBottom: "1px solid var(--line)" }}>
+              <div className="h-eyebrow" style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+                <I.Star size={11} fill="currentColor" style={{ color: "#e3b341" }} />
+                Favoritos · {favItems.length}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
+                {favItems.map((it) => (
+                  <StockFavCard key={it.id} it={it} onClick={() => setSelected(it)} />
+                ))}
+              </div>
+            </div>
+          )}
           <table className="table" data-density="compact">
             <thead>
               <tr>
@@ -796,7 +832,14 @@ function Stock({ scope }) {
           </table>
         </div>
 
-        {selected && <AllocationPanel item={selected} onClose={() => setSelected(null)} />}
+        {selected && (
+          <AllocationPanel
+            item={selected}
+            onClose={() => setSelected(null)}
+            isFav={favAvailable ? favs.has(selected.id) : null}
+            onToggleFav={() => toggleFav(selected.id)}
+          />
+        )}
       </div>
       </>)}
 
@@ -1822,7 +1865,60 @@ function PriceHistory({ itemId, unit }) {
   );
 }
 
-function AllocationPanel({ item, onClose }) {
+// Estrela de favoritar · trava duplo-clique e mostra "Salvando…" até o banco responder.
+function StockFavButton({ isFav, onToggle }) {
+  const [saving, setSaving] = useState(false);
+  const click = async () => {
+    if (saving) return;
+    setSaving(true);
+    try { await onToggle(); } finally { setSaving(false); }
+  };
+  return (
+    <button className="btn" data-variant="ghost" data-size="sm" onClick={click} disabled={saving}
+            title={isFav ? "Remover dos favoritos" : "Favoritar · aparece em quadro no topo do estoque"}
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, color: isFav ? "#e3b341" : "var(--fg-3)" }}>
+      <I.Star size={14} fill={isFav ? "currentColor" : "none"} style={{ color: "inherit" }} />
+      <span style={{ fontSize: 11 }}>{saving ? "Salvando…" : isFav ? "Favorito" : "Favoritar"}</span>
+    </button>
+  );
+}
+
+// Quadro de insumo favorito · nome, saldo e a barra mín/máx do detalhe.
+function StockFavCard({ it, onClick }) {
+  const tone = it.status === "ok" ? "ok" : it.status === "warn" ? "warn" : "crit";
+  const lbl = it.status === "ok" ? "OK" : it.status === "warn" ? "BAIXO" : "RUPTURA";
+  return (
+    <div onClick={onClick} style={{
+      cursor: "pointer", padding: "12px 14px 4px", borderRadius: 6,
+      background: "var(--bg-1)", border: "1px solid var(--line)",
+    }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 500, color: "var(--fg-0)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              title={it.name}>{it.name}</span>
+        <span className="badge" data-tone={tone}>{lbl}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 6 }}>
+        <span className="mono" style={{ fontSize: 22, fontWeight: 500, color: it.qty <= 0 ? "var(--crit)" : "var(--fg-0)", letterSpacing: "-0.02em" }}>{it.qty}</span>
+        <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-2)" }}>{it.unit}</span>
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 11.5, color: "var(--fg-2)" }}>R$ {(Math.max(0, it.qty) * it.cost).toFixed(2)}</span>
+      </div>
+      {it.max
+        ? <StockScaleBar qty={it.qty} reorder={it.reorder} max={it.max} unit={it.unit} />
+        : (
+          <div style={{ padding: "12px 0 10px" }}>
+            <div className="bar">
+              <i style={{ width: `${Math.min(100, (it.qty / Math.max(it.reorder * 2, 1)) * 100)}%`, background: tone === "ok" ? "var(--accent-bright)" : tone === "warn" ? "var(--warn)" : "var(--crit)" }} />
+            </div>
+            <div style={{ marginTop: 6, fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)" }}>sem máximo definido</div>
+          </div>
+        )
+      }
+    </div>
+  );
+}
+
+function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
   const [movements, setMovements] = useState(null);
   const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
@@ -1975,7 +2071,10 @@ function AllocationPanel({ item, onClose }) {
           <span className="mono" style={{ fontSize: 10, color: "var(--fg-3)", letterSpacing: "0.06em" }}>{item.id}</span>
           <button className="btn" data-variant="ghost" data-size="sm" onClick={onClose} title="Fechar"><I.X size={13} /></button>
         </div>
-        <h2 style={{ margin: "8px 0 4px", fontSize: 18, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.015em" }}>{item.name}</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "8px 0 4px" }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: "var(--fg-0)", letterSpacing: "-0.015em" }}>{item.name}</h2>
+          {isFav !== null && <StockFavButton isFav={isFav} onToggle={onToggleFav} />}
+        </div>
         <div style={{ fontSize: 12, color: "var(--fg-2)" }}>
           {item.cat} · mín {item.reorder} {item.unit} · máx {item.max ?? "—"} {item.unit}
         </div>
@@ -4653,3 +4752,5 @@ window.WasteEntryModal = WasteEntryModal;
 window.StockTopValueModal = StockTopValueModal;
 window.StockScaleBar = StockScaleBar; // reusado no detalhe do item mobile
 window.PriceHistory = PriceHistory;   // idem
+window.StockFavButton = StockFavButton; // idem
+window.StockFavCard = StockFavCard;     // quadros de favoritos no estoque mobile
