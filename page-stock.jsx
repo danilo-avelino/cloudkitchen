@@ -1675,6 +1675,154 @@ function Tabs({ value, onChange, options }) {
   );
 }
 
+// Histórico de preço de compra dos últimos 12 meses (recebimentos com custo).
+// Reusado no detalhe do item mobile via window.PriceHistory.
+function PriceHistory({ itemId, unit }) {
+  const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
+  const [rows, setRows] = useState(null);
+  const [hover, setHover] = useState(null); // índice do ponto sob o cursor
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    if (!dbStatus.isOnline || !itemId) { setRows([]); return; }
+    setRows(null); setHover(null); setShowAll(false);
+    let cancelled = false;
+    (async () => {
+      const ctx = await dbGetCurrentContext();
+      if (cancelled) return;
+      const tid = ctx?.tenant?.id;
+      if (!tid) { setRows([]); return; }
+      const from = new Date(Date.now() - 365 * 864e5).toISOString();
+      const { data } = await dbListStockItemPurchases(tid, itemId, from);
+      if (!cancelled) setRows(data || []);
+    })();
+    return () => { cancelled = true; };
+  }, [dbStatus.isOnline, itemId]);
+
+  const brl = (v) => `R$ ${(Number(v) || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const fmtD = (iso) => {
+    const d = new Date(iso);
+    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getFullYear()).slice(2)}`;
+  };
+  const pctTxt = (p) => `${p > 0 ? "▲" : p < 0 ? "▼" : ""} ${Math.abs(p).toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%`;
+  const pctColor = (p) => p > 0 ? "var(--crit)" : p < 0 ? "var(--ok)" : "var(--fg-2)";
+  const label = { fontFamily: "var(--mono)", fontSize: 9.5, color: "var(--fg-3)", letterSpacing: "0.06em", textTransform: "uppercase" };
+
+  if (rows == null) return <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Carregando…</div>;
+  if (rows.length === 0) return <div style={{ fontSize: 12, color: "var(--fg-3)" }}>Sem compras com custo registradas nos últimos 12 meses.</div>;
+
+  const prices = rows.map((r) => r.unitCost);
+  const first = prices[0], last = prices[prices.length - 1];
+  const minP = Math.min(...prices), maxP = Math.max(...prices);
+  const change = first > 0 ? ((last - first) / first) * 100 : 0;
+
+  // Gráfico: eixo X por data real (compras espaçadas irregularmente), Y com folga de 10%.
+  const W = 320, H = 110, PL = 4, PR = 4, PT = 10, PB = 18;
+  const t0 = new Date(rows[0].at).getTime();
+  const t1 = new Date(rows[rows.length - 1].at).getTime();
+  const pad = (maxP - minP) * 0.1 || maxP * 0.1 || 1;
+  const yLo = Math.max(0, minP - pad), yHi = maxP + pad;
+  const xOf = (iso) => t1 > t0 ? PL + ((new Date(iso).getTime() - t0) / (t1 - t0)) * (W - PL - PR) : W / 2;
+  const yOf = (v) => PT + (1 - (v - yLo) / (yHi - yLo)) * (H - PT - PB);
+  const pts = rows.map((r) => [xOf(r.at), yOf(r.unitCost)]);
+  const onMove = (e) => {
+    const box = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - box.left) / box.width) * W;
+    let best = 0;
+    pts.forEach((p, i) => { if (Math.abs(p[0] - x) < Math.abs(pts[best][0] - x)) best = i; });
+    setHover(best);
+  };
+  const h = hover != null ? rows[hover] : null;
+
+  const recent = rows.slice().reverse();
+  const listed = showAll ? recent : recent.slice(0, 5);
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        <div>
+          <div style={label}>Último</div>
+          <div className="mono" style={{ fontSize: 15, fontWeight: 500, color: "var(--fg-0)" }}>{brl(last)}</div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>/{unit}</div>
+        </div>
+        <div>
+          <div style={label}>Variação 12m</div>
+          <div className="mono" style={{ fontSize: 15, fontWeight: 500, color: rows.length > 1 ? pctColor(change) : "var(--fg-3)" }}>
+            {rows.length > 1 ? pctTxt(change) : "—"}
+          </div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>desde {fmtD(rows[0].at)}</div>
+        </div>
+        <div>
+          <div style={label}>Mín – Máx</div>
+          <div className="mono" style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-0)", lineHeight: "20px" }}>
+            {brl(minP)}
+          </div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>até {brl(maxP)}</div>
+        </div>
+      </div>
+
+      {rows.length > 1 && (
+        <div style={{ position: "relative", marginTop: 12 }}>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block", touchAction: "pan-y" }}
+               onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => setHover(null)}>
+            {[maxP, minP].map((v, i) => (
+              <line key={i} x1={PL} x2={W - PR} y1={yOf(v)} y2={yOf(v)} stroke="var(--line-soft)" strokeDasharray="2 3" />
+            ))}
+            <polyline points={pts.map((p) => p.join(",")).join(" ")} fill="none"
+                      stroke="var(--accent-bright)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+            {h && <line x1={pts[hover][0]} x2={pts[hover][0]} y1={PT} y2={H - PB} stroke="var(--fg-3)" strokeWidth={1} />}
+            {pts.map((p, i) => (
+              <circle key={i} cx={p[0]} cy={p[1]} r={i === hover ? 4.5 : 3}
+                      fill="var(--accent-bright)" stroke="var(--bg-1)" strokeWidth={2} />
+            ))}
+            <text x={PL} y={H - 4} fontSize={9} fill="var(--fg-3)" fontFamily="var(--mono)">{fmtD(rows[0].at)}</text>
+            <text x={W - PR} y={H - 4} fontSize={9} fill="var(--fg-3)" fontFamily="var(--mono)" textAnchor="end">{fmtD(rows[rows.length - 1].at)}</text>
+          </svg>
+          {h && (
+            <div style={{
+              position: "absolute", top: 0, pointerEvents: "none",
+              left: `${(pts[hover][0] / W) * 100}%`,
+              transform: `translateX(${pts[hover][0] > W / 2 ? "calc(-100% - 8px)" : "8px"})`,
+              background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 4,
+              padding: "5px 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-1)",
+            }}>
+              <div className="mono" style={{ color: "var(--fg-0)", fontWeight: 500 }}>{brl(h.unitCost)}/{unit}</div>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)" }}>
+                {fmtD(h.at)} · {h.qty.toLocaleString("pt-BR", { maximumFractionDigits: 3 })} {unit}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 7, fontSize: 11.5 }}>
+        {listed.map((r) => {
+          const idx = rows.indexOf(r);
+          const prev = idx > 0 ? rows[idx - 1].unitCost : null;
+          const d = prev ? ((r.unitCost - prev) / prev) * 100 : null;
+          return (
+            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="mono" style={{ color: "var(--fg-3)", fontSize: 10.5, width: 52 }}>{fmtD(r.at)}</span>
+              <span style={{ flex: 1, minWidth: 0, color: "var(--fg-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={r.notes || ""}>
+                {(r.notes || "Compra").replace(/^Recebimento\s+/, "")}
+              </span>
+              <span className="mono" style={{ color: "var(--fg-0)" }}>{brl(r.unitCost)}</span>
+              <span className="mono" style={{ fontSize: 10.5, width: 56, textAlign: "right", color: d == null || Math.abs(d) < 0.05 ? "var(--fg-3)" : pctColor(d) }}>
+                {d == null || Math.abs(d) < 0.05 ? "—" : pctTxt(d)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {recent.length > 5 && (
+        <button className="btn" data-variant="ghost" data-size="sm" style={{ marginTop: 8 }} onClick={() => setShowAll((v) => !v)}>
+          {showAll ? "Mostrar menos" : `Ver todas (${recent.length})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function AllocationPanel({ item, onClose }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
   const [movements, setMovements] = useState(null);
@@ -1972,6 +2120,11 @@ function AllocationPanel({ item, onClose }) {
             </div>
           );
         })()}
+      </div>
+
+      <div style={{ padding: "16px 18px", borderTop: "1px solid var(--line-soft)" }}>
+        <div className="h-eyebrow" style={{ marginBottom: 12 }}>Histórico de preço · 12 meses</div>
+        <PriceHistory itemId={item.id} unit={item.unit} />
       </div>
 
       <div style={{ padding: "14px 18px", borderTop: "1px solid var(--line-soft)" }}>
@@ -4472,3 +4625,4 @@ window.CategoriesView = CategoriesView; // reusado na aba Categorias mobile
 window.WasteEntryModal = WasteEntryModal;
 window.StockTopValueModal = StockTopValueModal;
 window.StockScaleBar = StockScaleBar; // reusado no detalhe do item mobile
+window.PriceHistory = PriceHistory;   // idem

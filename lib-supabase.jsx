@@ -739,6 +739,35 @@ async function dbListStockMovements(tenantId, fromIso, toIso, { limit = 500, sto
   return { data: mapped, source: "db", error: null };
 }
 
+// Histórico de preço de compra de um insumo · entradas vindas de recebimento
+// (ou do recebimento legado direto no pedido) com custo informado, em ordem
+// cronológica. O unit_cost do movimento já está na unidade do estoque.
+async function dbListStockItemPurchases(tenantId, stockItemId, fromIso) {
+  if (!isDbOnline() || !_client) return { data: [], error: null };
+  const { data, error } = await _client
+    .from("stock_movements")
+    .select("id, qty, unit_cost, performed_at, notes")
+    .eq("tenant_id", tenantId)
+    .eq("stock_item_id", stockItemId)
+    .eq("kind", "in")
+    .in("reference_type", ["goods_receipt", "purchase_order"])
+    .gt("unit_cost", 0)
+    .gte("performed_at", fromIso)
+    .order("performed_at", { ascending: true })
+    .limit(1000);
+  if (error) return { data: [], error };
+  return {
+    data: (data || []).map((m) => ({
+      id: m.id,
+      at: m.performed_at,
+      qty: Number(m.qty) || 0,
+      unitCost: Number(m.unit_cost) || 0,
+      notes: m.notes || null,
+    })),
+    error: null,
+  };
+}
+
 // =====================================================================
 // PAYMENT METHODS
 // =====================================================================
@@ -4492,6 +4521,7 @@ Object.assign(window, {
   dbUpdateStockCategory, dbSetCategoryAutoMinMax,
   dbListSuppliers, dbInsertSupplier, dbUpdateSupplier, dbDeleteSupplier,
   dbListStockItems, dbInsertStockItem, dbUpdateStockItem, dbDeleteStockItem, dbApplyStockMovement, dbListStockMovements,
+  dbListStockItemPurchases,
   dbSetStockItemAutoMin, dbSetStockItemAutoMinMode,
   stockItemUnitWeightKg, stockItemCostIn,
   dbListPaymentMethods,

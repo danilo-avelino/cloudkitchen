@@ -712,6 +712,16 @@ function StockItemDetailSheet({ it, onClose, onEdit, onEntry }) {
           </div>
         </div>
       )}
+
+      {/* Histórico de preço de compra · 12 meses (reusa o componente do desktop) */}
+      {window.PriceHistory && (
+        <div style={{ marginTop: 18 }}>
+          <MSectionLabel>Histórico de preço · 12 meses</MSectionLabel>
+          <div style={{ marginTop: 10 }}>
+            <window.PriceHistory itemId={it.id} unit={it.unit} />
+          </div>
+        </div>
+      )}
     </BottomSheet>
   );
 }
