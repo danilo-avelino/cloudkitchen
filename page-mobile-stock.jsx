@@ -480,6 +480,7 @@ function MobileStock({ scope = "all" }) {
           onClose={() => setDetail(null)}
           isFav={favAvailable ? favs.has(detail.id) : null}
           onToggleFav={() => toggleFav(detail.id)}
+          onItemPatched={(p) => setItems((prev) => prev.map((x) => x.id === detail.id ? { ...x, ...p } : x))}
           onEdit={() => { setEditing(detail); setDetail(null); }}
           onEntry={() => { setEntryOpen(true); setDetail(null); }}
         />
@@ -644,7 +645,7 @@ function useItemConsumption(itemId) {
   return data;
 }
 
-function StockItemDetailSheet({ it, onClose, onEdit, onEntry, isFav = null, onToggleFav }) {
+function StockItemDetailSheet({ it, onClose, onEdit, onEntry, isFav = null, onToggleFav, onItemPatched }) {
   const tone = it.status === "ok" ? "ok" : it.status === "warn" ? "warn" : "crit";
   const lbl = it.status === "ok" ? "Em estoque" : it.status === "warn" ? "Baixo" : "Ruptura";
   const cons = useItemConsumption(it.id);
@@ -721,7 +722,7 @@ function StockItemDetailSheet({ it, onClose, onEdit, onEntry, isFav = null, onTo
             )}
             {/* Modo do auto min/max (reusa o componente do desktop) */}
             {window.AutoMinMaxSelector && (
-              <window.AutoMinMaxSelector item={it} daily={cons.daily} mobile />
+              <window.AutoMinMaxSelector item={it} daily={cons.daily} mobile onSaved={onItemPatched} />
             )}
           </>
         )}

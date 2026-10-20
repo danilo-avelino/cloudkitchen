@@ -841,6 +841,10 @@ function Stock({ scope }) {
             onClose={() => setSelected(null)}
             isFav={favAvailable ? favs.has(selected.id) : null}
             onToggleFav={() => toggleFav(selected.id)}
+            onItemPatched={(p) => {
+              setItems((prev) => prev.map((x) => x.id === selected.id ? { ...x, ...p } : x));
+              setSelected((s) => s && { ...s, ...p });
+            }}
           />
         )}
       </div>
@@ -1930,7 +1934,7 @@ function StockFavCard({ it, onClick }) {
 //   max semanal          = ceil(min * 1.3)   · min + 30% de margem
 //   max mensal           = ceil(daily * 35)  · 5 semanas de estoque
 //   personalizado        = min ceil(daily * N dias) · max ceil(min * 1.3)
-function AutoMinMaxSelector({ item, daily, mobile = false }) {
+function AutoMinMaxSelector({ item, daily, mobile = false, onSaved }) {
   const [autoMinMode, setAutoMinMode] = useState(item.autoMinMode || (item.autoMin ? "weekly" : "off"));
   const [savedDays, setSavedDays] = useState(item.autoMinDays ?? null);
   const [savingAutoMin, setSavingAutoMin] = useState(false);
@@ -1957,13 +1961,16 @@ function AutoMinMaxSelector({ item, daily, mobile = false }) {
     if (typeof dbSetStockItemAutoMinMode === "function") {
       setSavingAutoMin(true);
       try {
-        const { error } = await dbSetStockItemAutoMinMode(item.id, next, days);
+        const { data, error } = await dbSetStockItemAutoMinMode(item.id, next, days);
         if (error) {
           setAutoMinMode(prev);
           setSavedDays(prevDays);
           window.showToast(`Erro: ${error.message}`, { tone: "crit" });
         } else {
           setEditingCustom(false);
+          // Sem isso a lista/painel segue com o item antigo e, ao reabrir, o modo
+          // e o mín/máx "voltam" (o banco gravou certo).
+          if (data) onSaved?.(data);
           const msg = next === "off"
             ? "Auto-cálculo desativado"
             : next === "custom"
@@ -2067,7 +2074,7 @@ function AutoMinMaxSelector({ item, daily, mobile = false }) {
   );
 }
 
-function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
+function AllocationPanel({ item, onClose, isFav = null, onToggleFav, onItemPatched }) {
   const dbStatus = (typeof useDbStatus === "function") ? useDbStatus() : { isOnline: false };
   const [movements, setMovements] = useState(null);
   const [movements30, setMovements30] = useState(null); // saídas dos últimos 30d (p/ consumo por operação)
@@ -2362,7 +2369,7 @@ function AllocationPanel({ item, onClose, isFav = null, onToggleFav }) {
               <span>Total: <strong className="mono">{consumption7d.qty.toFixed(2)} {item.unit}</strong></span>
               <span>Média/dia: <strong className="mono">{consumption7d.daily.toFixed(2)} {item.unit}</strong></span>
             </div>
-            <AutoMinMaxSelector item={item} daily={consumption7d.daily} />
+            <AutoMinMaxSelector item={item} daily={consumption7d.daily} onSaved={onItemPatched} />
           </>
         ) : (
           <span style={{ fontSize: 11, color: "var(--fg-3)" }}>

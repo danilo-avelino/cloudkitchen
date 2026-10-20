@@ -544,6 +544,7 @@ function stockItemCostIn(item, unit) {
 // Define o modo de auto min/max do item ('off' | 'weekly' | 'monthly' | 'custom').
 // 'custom' exige `days` (dias de cobertura, 1–365).
 // Mantém auto_min_enabled em sync; o trigger no banco recalcula reorder/max.
+// Retorna `data` = patch p/ mesclar no item da lista (modo + mín/máx recalculados).
 async function dbSetStockItemAutoMinMode(itemId, mode, days) {
   if (!isDbOnline() || !_client) return { error: new Error("DB offline") };
   const m = ["off", "weekly", "monthly", "custom"].includes(mode) ? mode : "off";
@@ -552,7 +553,30 @@ async function dbSetStockItemAutoMinMode(itemId, mode, days) {
   const { error } = await _client.from("stock_items")
     .update(update)
     .eq("id", itemId);
-  return { error };
+  if (error) return { data: null, error };
+  return _dbReadStockItemMinMax(itemId);
+}
+
+// Relê mín/máx/modo depois de um UPDATE. Precisa ser leitura separada: o recálculo
+// roda num trigger AFTER UPDATE, então o RETURNING do próprio update vem com os
+// valores antigos.
+async function _dbReadStockItemMinMax(itemId) {
+  const { data, error } = await _client.from("stock_items")
+    .select("reorder_point, max_qty, status, auto_min_enabled, auto_min_mode, auto_min_days")
+    .eq("id", itemId)
+    .single();
+  if (error) return { data: null, error };
+  return {
+    data: {
+      reorder:     Number(data.reorder_point) || 0,
+      max:         data.max_qty != null ? Number(data.max_qty) : null,
+      status:      data.status,
+      autoMin:     data.auto_min_enabled === true,
+      autoMinMode: data.auto_min_mode || "off",
+      autoMinDays: data.auto_min_days ?? null,
+    },
+    error: null,
+  };
 }
 
 // Compat: liga/desliga (true = weekly). Mantido p/ chamadas antigas (Assistente).
@@ -646,6 +670,12 @@ async function dbUpdateStockItem(id, patch) {
     allocations:stock_allocations(qty, operation:operations(id, slug))
   `).single();
   if (error) return { data: null, error };
+  // Trocar para categoria com auto mín/máx liga o modo e recalcula em trigger AFTER
+  // (o RETURNING acima ainda traz o mín/máx antigo).
+  if (patch.catId !== undefined) {
+    const fresh = await _dbReadStockItemMinMax(id);
+    if (fresh.data) return { data: { ...mapStockItemFromDb(data), ...fresh.data }, error: null };
+  }
   return { data: mapStockItemFromDb(data), error: null };
 }
 
